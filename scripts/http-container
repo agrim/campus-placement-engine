@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+HTTP_DIR="${CPE_HTTP_DIR:-"$ROOT/http"}"
+NAME="${CPE_HTTP_CONTAINER:-cpe-http-test}"
+HOST="${CPE_HTTP_HOST:-127.0.0.1}"
+HOST_PORT="${CPE_HTTP_PORT:-8080}"
+CONTAINER_PORT="${CPE_HTTP_CONTAINER_PORT:-8000}"
+IMAGE="${CPE_HTTP_IMAGE:-docker.io/library/php:8.3-cli}"
+
+usage() {
+  cat <<USAGE
+Usage: scripts/http-container <command>
+
+Commands:
+  sync      Refresh ignored http/ sandbox from the repo, preserving http/data/
+  start     Start the Apple Container web server, creating http/ if missing
+  stop      Stop and remove the named test container
+  restart   Stop then start the test container
+  status    Show container status
+  logs      Show container logs
+  url       Print the local test URL
+
+Environment overrides:
+  CPE_HTTP_DIR=$HTTP_DIR
+  CPE_HTTP_CONTAINER=$NAME
+  CPE_HTTP_HOST=$HOST
+  CPE_HTTP_PORT=$HOST_PORT
+  CPE_HTTP_IMAGE=$IMAGE
+USAGE
+}
+
+need_container() {
+  if ! command -v container >/dev/null 2>&1; then
+    echo "Apple Container CLI not found. Install Apple Container first." >&2
+    exit 1
+  fi
+}
+
+ensure_system() {
+  need_container
+  if ! container system status >/dev/null 2>&1; then
+    container system start --enable-kernel-install --timeout 120
+  fi
+}
+
+sync_sandbox() {
+  mkdir -p "$HTTP_DIR"
+  rsync -a --delete \
+    --exclude '/.git/' \
+    --exclude '/.legacy-private/' \
+    --exclude '/.playwright-cli/' \
+    --exclude '/http/' \
+    --exclude '/data/*.sqlite' \
+    --exclude '/data/*.sqlite-*' \
+    --exclude '/data/backups/' \
+    --exclude '/data/config/' \
+    --exclude '/data/exports/' \
+    --exclude '/data/imports/' \
+    --exclude '/data/privacy/' \
+    --exclude '/data/restore-safety-*.sqlite' \
+    "$ROOT"/ "$HTTP_DIR"/
+  mkdir -p "$HTTP_DIR/data"
+  touch "$HTTP_DIR/data/.gitkeep"
+  echo "Synced test sandbox: $HTTP_DIR"
+}
+
+container_exists() {
+  container inspect "$NAME" >/dev/null 2>&1
+}
+
+container_running() {
+  container inspect "$NAME" 2>/dev/null | grep -q '"state" : "running"'
+}
+
+stop_container() {
+  ensure_system
+  if container_exists; then
+    container stop "$NAME" >/dev/null 2>&1 || true
+    container rm "$NAME" >/dev/null 2>&1 || true
+    echo "Stopped test container: $NAME"
+  else
+    echo "No test container found: $NAME"
+  fi
+}
+
+start_container() {
+  ensure_system
+  if [ ! -d "$HTTP_DIR/public" ]; then
+    sync_sandbox
+  fi
+  if container_exists; then
+    if container_running; then
+      echo "Container already running: $NAME"
+    else
+      container start "$NAME"
+      echo "Started existing container: $NAME"
+    fi
+    echo "URL: http://$HOST:$HOST_PORT/"
+    return
+  fi
+  container run -d \
+    --name "$NAME" \
+    --volume "$HTTP_DIR:/site" \
+    --workdir /site \
+    --publish "$HOST:$HOST_PORT:$CONTAINER_PORT" \
+    "$IMAGE" \
+    php -S "0.0.0.0:$CONTAINER_PORT" -t public
+  echo "Started $NAME"
+  echo "URL: http://$HOST:$HOST_PORT/"
+}
+
+case "${1:-}" in
+  sync)
+    sync_sandbox
+    ;;
+  start)
+    start_container
+    ;;
+  stop)
+    stop_container
+    ;;
+  restart)
+    stop_container
+    start_container
+    ;;
+  status)
+    ensure_system
+    container inspect "$NAME"
+    ;;
+  logs)
+    ensure_system
+    container logs "$NAME"
+    ;;
+  url)
+    echo "http://$HOST:$HOST_PORT/"
+    ;;
+  -h|--help|help|'')
+    usage
+    ;;
+  *)
+    usage >&2
+    exit 1
+    ;;
+esac

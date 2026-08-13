@@ -1,0 +1,3 @@
+ALTER TABLE candidates ADD COLUMN opted_out INTEGER NOT NULL DEFAULT 0;
+ALTER TABLE companies ADD COLUMN offer_tier TEXT NOT NULL DEFAULT '';
+ALTER TABLE applications ADD COLUMN waitlist_rank INTEGER NULL;

@@ -1,0 +1,2 @@
+candidate_external_id,label,schedule_day,starts_at,ends_at,notes
+C006,Exam block,1,10:00,11:00,Do not schedule during test

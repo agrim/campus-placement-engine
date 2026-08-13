@@ -1,0 +1,22 @@
+Options -Indexes
+
+<FilesMatch "^(?:placement|\.env(?:\..*)?|\.gitignore)$|\.(?:sqlite|sqlite3|db|sql|ini|log|bak|jsonl|sha256)$">
+  <IfModule mod_authz_core.c>
+    Require all denied
+  </IfModule>
+  <IfModule !mod_authz_core.c>
+    Deny from all
+  </IfModule>
+</FilesMatch>
+
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+
+  RewriteRule ^(?:app|config|data|database|docs|examples|tests)(?:/|$) - [R=404,L,NC]
+
+  RewriteRule ^assets/(.*)$ public/assets/$1 [L]
+  RewriteRule ^install\.php$ public/install.php [QSA,L]
+  RewriteRule ^public/ - [L]
+  RewriteRule ^$ public/index.php [QSA,L]
+  RewriteRule ^.*$ public/index.php [QSA,L]
+</IfModule>

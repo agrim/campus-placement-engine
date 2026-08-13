@@ -1,0 +1,2 @@
+code,name,slot,offer_tier,process_type,room,tracker_name,max_active,deadline_day,deadline_at,process_notes,tags,custom_fields_json
+KITE,Kite Ventures,Day 1 / Slot 1,dream,Interview,Room A1,Company Tracker,2,1,17:30,Bring printed resumes,"fintech,priority","{""work_mode"":""Hybrid"",""ctc_lpa"":24}"
