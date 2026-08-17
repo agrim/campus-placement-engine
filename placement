@@ -1080,7 +1080,7 @@ function verify_release_package(string $path): void
         }
         $entries[$relative] = true;
     }
-    foreach (['.htaccess', 'README.md', 'placement', 'public/.htaccess', 'public/index.php', 'database/.htaccess', 'database/migrations/001_initial.sql', 'docs/environment.md', 'examples/env/local.env.example', 'examples/deployment/apache-vhost.conf', 'examples/deployment/nginx-server.conf', 'tests/.htaccess', 'data/.gitkeep', 'data/.htaccess'] as $required) {
+    foreach (['.htaccess', 'README.md', 'placement', 'public/.htaccess', 'public/index.php', 'database/.htaccess', 'database/migrations/001_initial.sql', 'database/migrations/pgsql/001_portal_baseline.sql', 'docs/environment.md', 'examples/env/local.env.example', 'examples/deployment/apache-vhost.conf', 'examples/deployment/nginx-server.conf', 'tests/.htaccess', 'data/.gitkeep', 'data/.htaccess'] as $required) {
         if (!isset($entries[$required])) {
             throw new RuntimeException('Release package is missing required file: ' . $required);
         }
@@ -1868,6 +1868,7 @@ function publication_check(): void
         'public/.htaccess',
         'data/.htaccess',
         'database/.htaccess',
+        'database/migrations/pgsql/001_portal_baseline.sql',
         'tests/.htaccess',
         'docs/environment.md',
         'docs/release-checklist.md',
@@ -1885,7 +1886,7 @@ function publication_check(): void
     }
 
     $gitignore = is_file(__DIR__ . '/.gitignore') ? (string) file_get_contents(__DIR__ . '/.gitignore') : '';
-    foreach (['/.legacy-private/', '/http/', '/dist/', '/.env', '/.env.*', '/config/local.php', '/data/*.sqlite', '/data/backups/', '/data/config/', '/data/imports/', '*.zip', '*.7z', '*.rar', '*.xlsx', '*.docx', '*.sql', '!/database/migrations/*.sql', '!/database/control-plane/**/*.sql'] as $pattern) {
+    foreach (['/.legacy-private/', '/http/', '/dist/', '/.env', '/.env.*', '/config/local.php', '/data/*.sqlite', '/data/backups/', '/data/config/', '/data/imports/', '*.zip', '*.7z', '*.rar', '*.xlsx', '*.docx', '*.sql', '!/database/migrations/*.sql', '!/database/migrations/pgsql/*.sql', '!/database/control-plane/**/*.sql'] as $pattern) {
         if (!str_contains($gitignore, $pattern)) {
             $failures[] = "Missing .gitignore protection: {$pattern}";
         }

@@ -19,6 +19,7 @@
 *.pdf
 
 !/database/migrations/*.sql
+!/database/migrations/pgsql/*.sql
 !/database/control-plane/**/*.sql
 
 # macOS Finder metadata.

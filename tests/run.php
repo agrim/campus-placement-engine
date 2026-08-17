@@ -1350,7 +1350,7 @@ test_case('open-source release governance files and ignore protections exist', f
         assert_true(str_contains($nginx, $snippet), "Missing Nginx deployment safeguard: {$snippet}");
     }
     $gitignore = (string) file_get_contents($root . '/.gitignore');
-    foreach (['/.legacy-private/', '/http/', '/dist/', '/.env', '/.env.*', '/config/local.php', '/data/*.sqlite', '/data/backups/', '/data/config/', '/data/imports/', '/data/privacy/', '*.zip', '*.7z', '*.rar', '*.xlsx', '*.docx', '*.sql', '!/database/migrations/*.sql', '!/database/control-plane/**/*.sql'] as $pattern) {
+    foreach (['/.legacy-private/', '/http/', '/dist/', '/.env', '/.env.*', '/config/local.php', '/data/*.sqlite', '/data/backups/', '/data/config/', '/data/imports/', '/data/privacy/', '*.zip', '*.7z', '*.rar', '*.xlsx', '*.docx', '*.sql', '!/database/migrations/*.sql', '!/database/migrations/pgsql/*.sql', '!/database/control-plane/**/*.sql'] as $pattern) {
         assert_true(str_contains($gitignore, $pattern), "Missing .gitignore protection: {$pattern}");
     }
     $migrationGuide = (string) file_get_contents($root . '/docs/migration-from-legacy.md');
@@ -1420,6 +1420,7 @@ test_case('release package includes public source and excludes private runtime d
         assert_true(str_contains($joined, '/examples/deployment/apache-vhost.conf'), 'Package should include Apache deployment example');
         assert_true(str_contains($joined, '/examples/deployment/nginx-server.conf'), 'Package should include Nginx deployment example');
         assert_true(str_contains($joined, '/database/migrations/014_round_schedule_day.sql'), 'Package should include migrations');
+        assert_true(str_contains($joined, '/database/migrations/pgsql/001_portal_baseline.sql'), 'Package should include PostgreSQL migrations');
         assert_true(str_contains($joined, '/data/.gitkeep'), 'Package should keep an empty data directory marker');
         assert_true(!str_contains($joined, '.legacy-private'), 'Package should exclude private archive material');
         assert_true(!str_contains($joined, 'data/app.sqlite'), 'Package should exclude runtime SQLite data');
