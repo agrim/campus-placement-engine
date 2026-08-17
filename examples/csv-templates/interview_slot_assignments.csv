@@ -1,0 +1,2 @@
+candidate_external_id,company_code,round_sequence,round_label,schedule_sequence,room,schedule_day,starts_at,assignment_sequence,assignment_status,notes
+C006,KITE,1,Case discussion,1,Room A1,1,09:00,1,assigned,First case slot

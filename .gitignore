@@ -1,0 +1,50 @@
+# Private historical archive material; never commit raw legacy data.
+/.legacy-private/
+
+# Raw archive/document dumps are private by default. Add a narrow exception only
+# after confirming the file is synthetic and publication-safe.
+*.7z
+*.rar
+*.zip
+*.tar
+*.tar.gz
+*.tgz
+*.sql
+*.xlsx
+*.xls
+*.docx
+*.doc
+*.pptx
+*.ppt
+*.pdf
+
+!/database/migrations/*.sql
+!/database/control-plane/**/*.sql
+
+# macOS Finder metadata.
+.DS_Store
+
+# Local environment and secret files.
+/.env
+/.env.*
+/config/local.php
+
+# Local self-hosted and hosted runtime data.
+/data/*.sqlite
+/data/*.sqlite-*
+/data/backups/
+/data/config/
+/data/exports/
+/data/imports/
+/data/privacy/
+/data/restore-safety-*.sqlite
+
+# Local browser QA scratch artifacts.
+/.playwright-cli/
+/output/playwright/
+
+# Generated release archives; verify these before publishing them externally.
+/dist/
+
+# Local Apple Container testing deployment sandbox.
+/http/

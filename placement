@@ -1,0 +1,2304 @@
+#!/usr/bin/env php
+<?php
+
+declare(strict_types=1);
+
+require __DIR__ . '/app/bootstrap.php';
+
+use App\Modules\Placement\Application\PlacementService;
+use App\Modules\Placement\Workflow\WorkflowDefinitionFileService;
+use App\Modules\Placement\Workflow\WorkflowMigrationService;
+use App\Modules\Placement\Workflow\WorkflowRepository;
+use App\Modules\Placement\Workflow\WorkflowSimulationService;
+use App\Core\Modules\ModuleLifecycleService;
+use App\Core\Portability\PortalPortabilityService;
+use App\Core\Privacy\PortalPrivacyService;
+use App\Core\Backup\DatabaseBackupService;
+use App\Core\Backup\DatabaseRestoreService;
+use App\Core\Events\DomainEventOutboxWorker;
+use App\Hosted\ControlPlane\HostedControlPlane;
+use App\Hosted\Operations\FleetUpgradeService;
+use App\Hosted\Operations\ProvisioningService;
+use App\Hosted\Tenant\TenantDatabaseResolver;
+use App\Domain\ConfigurationSnapshotService;
+use App\Domain\NotificationDeliveryService;
+use App\Domain\ReadinessService;
+use App\Domain\PrivacyService;
+use App\Domain\SnapshotExporter;
+use App\Install\Installer;
+use App\Install\SystemRequirements;
+use App\Import\ImportRollbackService;
+use App\Security\ExternalIdentityService;
+use App\Operations\MetricsService;
+use App\Operations\HttpLoadProbe;
+use App\Support\Csv;
+use App\Support\Database;
+
+$command = $argv[1] ?? 'help';
+
+try {
+    match ($command) {
+        'doctor' => doctor(),
+        'migrate' => migrate(),
+        'upgrade' => upgrade(array_slice($argv, 2)),
+        'serve' => serve(array_slice($argv, 2)),
+        'install' => install_app(array_slice($argv, 2)),
+        'seed-demo' => seed_demo(),
+        'seed-large-demo' => seed_large_demo((int) ($argv[2] ?? 60), (int) ($argv[3] ?? 8)),
+        'install-demo' => install_demo(),
+        'readiness' => readiness(),
+        'metrics' => metrics_snapshot(),
+        'placement-report' => placement_report(),
+        'privacy-report' => privacy_report(),
+        'anonymize-candidate' => anonymize_candidate(array_slice($argv, 2)),
+        'privacy-person-report' => privacy_person_report(array_slice($argv, 2)),
+        'privacy-person-erase' => privacy_person_erase(array_slice($argv, 2)),
+        'backup' => backup_database(),
+        'restore' => restore_database($argv[2] ?? ''),
+        'rollback-import' => rollback_import($argv[2] ?? ''),
+        'config-export' => config_export($argv[2] ?? null),
+        'config-validate' => config_validate($argv[2] ?? ''),
+        'config-import' => config_import($argv[2] ?? ''),
+        'bundle-export' => bundle_export($argv[2] ?? null),
+        'bundle-validate' => bundle_validate($argv[2] ?? ''),
+        'bundle-import' => bundle_import(array_slice($argv, 2)),
+        'workflow-list' => workflow_list(),
+        'workflow-export' => workflow_export(array_slice($argv, 2)),
+        'workflow-validate' => workflow_validate($argv[2] ?? ''),
+        'workflow-publish' => workflow_publish($argv[2] ?? ''),
+        'workflow-simulate' => workflow_simulate(array_slice($argv, 2)),
+        'workflow-migration-preview' => workflow_migration_preview(array_slice($argv, 2)),
+        'workflow-migrate' => workflow_migrate(array_slice($argv, 2)),
+        'module-list' => module_list(),
+        'module-enable' => module_enable(array_slice($argv, 2)),
+        'module-disable' => module_disable(array_slice($argv, 2)),
+        'hosted-control-migrate' => hosted_control_migrate(),
+        'hosted-tenant-create' => hosted_tenant_create(array_slice($argv, 2)),
+        'hosted-tenant-list' => hosted_tenant_list(),
+        'hosted-provision' => hosted_provision(array_slice($argv, 2)),
+        'hosted-entitle' => hosted_entitle(array_slice($argv, 2)),
+        'hosted-fleet-plan' => hosted_fleet_plan(array_slice($argv, 2)),
+        'hosted-fleet-run' => hosted_fleet_run(array_slice($argv, 2)),
+        'hosted-support-grant' => hosted_support_grant(array_slice($argv, 2)),
+        'hosted-support-revoke' => hosted_support_revoke(array_slice($argv, 2)),
+        'hosted-support-list' => hosted_support_list(array_slice($argv, 2)),
+        'sso-link' => sso_link(array_slice($argv, 2)),
+        'export' => export_snapshot(array_slice($argv, 2)),
+        'package' => package_release(array_slice($argv, 2)),
+        'release-package' => package_release(array_slice($argv, 2)),
+        'verify-package' => verify_release_package($argv[2] ?? ''),
+        'deliver-notifications' => deliver_notifications(array_slice($argv, 2)),
+        'work-outbox' => work_outbox(array_slice($argv, 2)),
+        'certify-notifications' => certify_notifications(array_slice($argv, 2)),
+        'smoke-http' => smoke_http(array_slice($argv, 2)),
+        'load-smoke' => load_smoke(array_slice($argv, 2)),
+        'browser-qa-plan' => browser_qa_plan(array_slice($argv, 2)),
+        'suggest-slots' => suggest_slots($argv[2] ?? ''),
+        'optimize-slots' => optimize_slots($argv[2] ?? ''),
+        'assign-slots' => assign_slots($argv[2] ?? ''),
+        'assign-optimized-slots' => assign_optimized_slots($argv[2] ?? ''),
+        'publication-check' => publication_check(),
+        'help' => help(),
+        default => throw new RuntimeException('Unknown command: ' . $command),
+    };
+} catch (Throwable $e) {
+    fwrite(STDERR, "Error: {$e->getMessage()}\n");
+    exit(1);
+}
+
+function doctor(): void
+{
+    $requirements = new SystemRequirements();
+    foreach ($requirements->checks() as $check) {
+        echo ($check['ok'] ? 'OK' : 'ERROR') . " {$check['label']}: {$check['value']}\n";
+    }
+    echo "INFO database: " . Database::path() . "\n";
+    echo "INFO installed: " . (Database::isInstalled() ? 'yes' : 'no') . "\n";
+    $requirements->assertReady();
+}
+
+function migrate(): void
+{
+    Database::migrate();
+    echo "Migrations applied.\n";
+}
+
+function upgrade(array $args): void
+{
+    if (in_array('--help', $args, true) || in_array('-h', $args, true)) {
+        upgrade_help();
+        return;
+    }
+    if ($args !== []) {
+        throw new RuntimeException('Unexpected upgrade argument: ' . implode(' ', $args));
+    }
+    if (!Database::isInstalled()) {
+        throw new RuntimeException('App is not installed.');
+    }
+
+    (new SystemRequirements())->assertReady();
+    $backup = create_database_backup('upgrade');
+    echo "Upgrade backup written: {$backup}\n";
+    Database::migrate();
+    echo "Migrations applied.\n";
+
+    $snapshot = (new ReadinessService())->snapshot();
+    print_readiness_snapshot($snapshot);
+    $failures = array_values(array_filter($snapshot['checks'], fn (array $check): bool => $check['status'] === 'fail'));
+    if ($failures !== []) {
+        throw new RuntimeException('Upgrade completed migrations, but readiness has failing checks.');
+    }
+    echo "Upgrade complete.\n";
+}
+
+function serve(array $args): void
+{
+    if (in_array('--help', $args, true) || in_array('-h', $args, true)) {
+        serve_help();
+        return;
+    }
+    $address = (string) ($args[0] ?? getenv('CPE_SERVE_ADDRESS') ?: '127.0.0.1:8000');
+    if (!preg_match('/^[A-Za-z0-9._-]+:[0-9]{2,5}$/', $address)) {
+        serve_help();
+        throw new RuntimeException('Serve address must look like 127.0.0.1:8000 or localhost:8000.');
+    }
+    [, $port] = explode(':', $address, 2);
+    $portNumber = (int) $port;
+    if ($portNumber < 1 || $portNumber > 65535) {
+        throw new RuntimeException('Serve port must be between 1 and 65535.');
+    }
+
+    echo "Starting Campus Placement Engine at http://{$address}/\n";
+    echo "Press Ctrl+C to stop.\n";
+    passthru(escapeshellarg(PHP_BINARY) . ' -S ' . escapeshellarg($address) . ' -t ' . escapeshellarg(cpe_path('public')), $exitCode);
+    exit((int) $exitCode);
+}
+
+function install_app(array $args): void
+{
+    if (in_array('--help', $args, true) || in_array('-h', $args, true)) {
+        install_help();
+        return;
+    }
+    if (Database::isInstalled()) {
+        throw new RuntimeException('App is already installed. Use upgrade, configuration import, or a different CPE_DB_PATH for a fresh setup.');
+    }
+
+    $options = cli_options($args);
+    $input = [
+        'college_name' => (string) ($options['college'] ?? $options['college-name'] ?? getenv('CPE_COLLEGE_NAME') ?: ''),
+        'site_name' => (string) ($options['site-name'] ?? getenv('CPE_SITE_NAME') ?: cpe_config('app.name')),
+        'site_tagline' => (string) ($options['site-tagline'] ?? getenv('CPE_SITE_TAGLINE') ?: ''),
+        'timezone' => (string) ($options['timezone'] ?? getenv('CPE_TIMEZONE') ?: 'Asia/Kolkata'),
+        'cycle_name' => (string) ($options['cycle-name'] ?? getenv('CPE_CYCLE_NAME') ?: ''),
+        'cycle_type' => (string) ($options['cycle-type'] ?? getenv('CPE_CYCLE_TYPE') ?: 'final'),
+        'cycle_start_date' => (string) ($options['cycle-start-date'] ?? getenv('CPE_CYCLE_START_DATE') ?: ''),
+        'cycle_end_date' => (string) ($options['cycle-end-date'] ?? getenv('CPE_CYCLE_END_DATE') ?: ''),
+        'calendar_non_operating_weekdays' => (string) ($options['non-operating-weekdays'] ?? getenv('CPE_NON_OPERATING_WEEKDAYS') ?: ''),
+        'calendar_non_operating_dates' => (string) ($options['non-operating-dates'] ?? getenv('CPE_NON_OPERATING_DATES') ?: ''),
+        'audit_request_metadata' => (string) ($options['audit-request-metadata'] ?? getenv('CPE_AUDIT_REQUEST_METADATA') ?: 'none'),
+        'workflow' => (string) ($options['workflow'] ?? getenv('CPE_WORKFLOW') ?: 'default'),
+        'terminology_candidate_label' => (string) ($options['candidate-label'] ?? getenv('CPE_CANDIDATE_LABEL') ?: 'Candidate'),
+        'terminology_candidates_label' => (string) ($options['candidates-label'] ?? getenv('CPE_CANDIDATES_LABEL') ?: 'Candidates'),
+        'terminology_company_label' => (string) ($options['company-label'] ?? getenv('CPE_COMPANY_LABEL') ?: 'Company'),
+        'terminology_companies_label' => (string) ($options['companies-label'] ?? getenv('CPE_COMPANIES_LABEL') ?: 'Companies'),
+        'admin_name' => (string) ($options['admin-name'] ?? getenv('CPE_ADMIN_NAME') ?: ''),
+        'admin_email' => (string) ($options['admin-email'] ?? getenv('CPE_ADMIN_EMAIL') ?: ''),
+        'admin_password' => (string) ($options['admin-password'] ?? getenv('CPE_ADMIN_PASSWORD') ?: ''),
+    ];
+    $seedDemo = $options['seed-demo'] ?? getenv('CPE_SEED_DEMO') ?: '';
+    if (cli_truthy($seedDemo)) {
+        $input['seed_demo'] = '1';
+    }
+
+    if ($input['college_name'] === '' || $input['admin_name'] === '' || $input['admin_email'] === '' || strlen($input['admin_password']) < 8) {
+        install_help();
+        throw new RuntimeException('Missing required install options: college, admin-name, admin-email, and 8+ character admin password.');
+    }
+
+    $adminId = (new Installer())->install($input);
+    echo "Installed app.\n";
+    echo "Admin user id: {$adminId}\n";
+    echo "Login: {$input['admin_email']}\n";
+}
+
+function seed_demo(): void
+{
+    Database::migrate();
+    (new PlacementService())->seedDemo();
+    echo "Demo data ready.\n";
+}
+
+function seed_large_demo(int $candidateCount, int $companyCount): void
+{
+    Database::migrate();
+    $result = (new PlacementService())->seedLargeDemo($candidateCount, $companyCount);
+    echo "Large synthetic QA data ready.\n";
+    foreach ($result as $label => $count) {
+        echo "  {$label}: {$count}\n";
+    }
+}
+
+function install_demo(): void
+{
+    if (Database::isInstalled()) {
+        throw new RuntimeException('App is already installed. Use upgrade or a different CPE_DB_PATH for a fresh demo setup.');
+    }
+    (new Installer())->install([
+        'college_name' => 'Demo College',
+        'timezone' => 'Asia/Kolkata',
+        'admin_name' => 'Placement Admin',
+        'admin_email' => 'admin@example.test',
+        'admin_password' => 'password123',
+        'seed_demo' => '1',
+    ]);
+    echo "Installed demo app.\n";
+    echo "Login: admin@example.test / password123\n";
+}
+
+function readiness(): void
+{
+    if (!Database::isInstalled()) {
+        throw new RuntimeException('App is not installed.');
+    }
+    print_readiness_snapshot((new ReadinessService())->snapshot());
+}
+
+function metrics_snapshot(): void
+{
+    if (!Database::isInstalled()) {
+        throw new RuntimeException('App is not installed.');
+    }
+    echo json_encode((new MetricsService())->snapshot(), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+}
+
+function backup_database(): void
+{
+    $backup = create_database_backup('app');
+    echo "Backup written: {$backup}\n";
+    echo "Checksum written: " . backup_checksum_path($backup) . "\n";
+}
+
+function privacy_person_report(array $args): void
+{
+    require_installed_app();
+    $options = cli_options($args);
+    $person = trim((string) ($options['person'] ?? ''));
+    if ($person === '') {
+        throw new RuntimeException('Use privacy-person-report --person=PERSON_PUBLIC_ID.');
+    }
+    echo json_encode((new PortalPrivacyService())->report($person), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+}
+
+function privacy_person_erase(array $args): void
+{
+    require_installed_app();
+    $options = cli_options($args);
+    $person = trim((string) ($options['person'] ?? ''));
+    $reason = trim((string) ($options['reason'] ?? ''));
+    if ($person === '' || $reason === '' || (string) ($options['confirm'] ?? '') !== $person) {
+        throw new RuntimeException('Use privacy-person-erase --person=PUBLIC_ID --reason=... --confirm=PUBLIC_ID.');
+    }
+    $result = (new PortalPrivacyService())->erase($person, $reason);
+    echo "Portal privacy erasure complete: {$result['person_public_id']}\n";
+    echo "Safety backup written: {$result['backup_path']}\n";
+}
+
+function create_database_backup(string $prefix): string
+{
+    return (string) (new DatabaseBackupService())->create($prefix)['path'];
+}
+
+function backup_checksum_path(string $path): string
+{
+    return $path . '.sha256';
+}
+
+function print_readiness_snapshot(array $snapshot): void
+{
+    foreach ($snapshot['checks'] as $check) {
+        echo strtoupper($check['status']) . ': ' . $check['label'] . ' - ' . $check['message'] . "\n";
+    }
+}
+
+function restore_database(string $path): void
+{
+    $result = (new DatabaseRestoreService())->restore($path);
+    echo "Safety copy written: {$result['safety_path']}\n";
+    echo "Restored database from: {$path}\n";
+}
+
+function rollback_import(string $id): void
+{
+    if (!Database::isInstalled()) {
+        throw new RuntimeException('App is not installed.');
+    }
+    if ($id === '' || in_array($id, ['--list', 'list'], true)) {
+        $rows = (new ImportRollbackService())->recent(20);
+        if ($rows === []) {
+            echo "No import rollback snapshots found.\n";
+            return;
+        }
+        echo "id,type,rows,created_at,status\n";
+        $handle = fopen('php://output', 'w');
+        foreach ($rows as $row) {
+            $status = !empty($row['restored_at']) ? 'restored' : (!empty($row['backup_exists']) ? 'ready' : 'missing');
+            Csv::writeRow($handle, [$row['id'], $row['type'], (int) $row['rows'], $row['created_at'], $status]);
+        }
+        fclose($handle);
+        return;
+    }
+    $manifest = (new ImportRollbackService())->restore($id);
+    echo "Restored import rollback snapshot: {$manifest['id']}\n";
+    echo "Safety copy written: {$manifest['restore_safety_path']}\n";
+}
+
+function config_export(?string $targetPath): void
+{
+    if (!Database::isInstalled()) {
+        throw new RuntimeException('App is not installed.');
+    }
+    $result = (new ConfigurationSnapshotService())->export($targetPath);
+    echo "Configuration export written: {$result['path']}\n";
+    echo "Settings: {$result['settings']}\n";
+    echo "Status overrides: {$result['status_overrides']}\n";
+    echo "Transition overrides: {$result['transition_overrides']}\n";
+}
+
+function config_validate(string $path): void
+{
+    if ($path === '' || in_array($path, ['--help', '-h'], true)) {
+        config_validate_help();
+        return;
+    }
+    if (!Database::isInstalled()) {
+        throw new RuntimeException('App is not installed.');
+    }
+    $result = (new ConfigurationSnapshotService())->validate($path);
+    echo "Configuration valid: {$result['path']}\n";
+    echo "Workflow: {$result['workflow']}\n";
+    echo "Settings: {$result['settings']}\n";
+    echo "Status overrides: {$result['status_overrides']}\n";
+    echo "Transition overrides: {$result['transition_overrides']}\n";
+}
+
+function config_import(string $path): void
+{
+    if (!Database::isInstalled()) {
+        throw new RuntimeException('App is not installed.');
+    }
+    $result = (new ConfigurationSnapshotService())->import($path);
+    echo "Configuration imported from: {$path}\n";
+    echo "Safety copy written: {$result['safety_path']}\n";
+    echo "Settings: {$result['settings']}\n";
+    echo "Status overrides: {$result['status_overrides']}\n";
+    echo "Transition overrides: {$result['transition_overrides']}\n";
+}
+
+function bundle_export(?string $targetDirectory): void
+{
+    require_installed_app();
+    $targetDirectory = trim((string) $targetDirectory);
+    if ($targetDirectory === '' || in_array($targetDirectory, ['--help', '-h'], true)) {
+        $targetDirectory = cpe_data_path('exports/portable-' . gmdate('Ymd-His'));
+    }
+    $result = (new PortalPortabilityService())->export($targetDirectory);
+    echo "Portability bundle written: {$result['path']}\n";
+    echo "Bundle id: {$result['bundle_id']}\n";
+    echo "Modules: {$result['modules']}\n";
+    echo "Files: {$result['files']}\n";
+}
+
+function bundle_validate(string $directory): void
+{
+    if ($directory === '' || in_array($directory, ['--help', '-h'], true)) {
+        throw new RuntimeException('Usage: php placement bundle-validate /path/to/bundle');
+    }
+    require_installed_app();
+    $result = (new PortalPortabilityService())->validate($directory);
+    echo "Portability bundle valid: {$result['path']}\n";
+    echo "Bundle id: {$result['bundle_id']}\n";
+    echo "Institution: {$result['institution_public_id']}\n";
+    echo "Modules: " . implode(', ', array_keys($result['modules'])) . "\n";
+}
+
+function bundle_import(array $args): void
+{
+    require_installed_app();
+    $directory = '';
+    if (isset($args[0]) && !str_starts_with((string) $args[0], '--')) {
+        $directory = (string) array_shift($args);
+    }
+    $options = cli_options($args);
+    $directory = (string) ($options['path'] ?? $directory);
+    if ($directory === '' || in_array('--help', $args, true) || in_array('-h', $args, true)) {
+        throw new RuntimeException('Usage: php placement bundle-import /path/to/bundle --confirm=IMPORT');
+    }
+    if (strtoupper((string) ($options['confirm'] ?? '')) !== 'IMPORT') {
+        throw new RuntimeException('Portability import requires --confirm=IMPORT. It only accepts an empty operational database and writes a backup first.');
+    }
+    $result = (new PortalPortabilityService())->import($directory);
+    echo "Portability bundle imported: {$result['bundle_id']}\n";
+    echo "Pre-import backup: {$result['backup_path']}\n";
+    foreach ($result['modules'] as $key => $counts) {
+        echo "Module {$key}: " . json_encode($counts, JSON_UNESCAPED_SLASHES) . "\n";
+    }
+}
+
+function workflow_list(): void
+{
+    require_installed_app();
+    echo "id,workflow_key,version,status,source,applications,active,published_at\n";
+    $handle = fopen('php://output', 'w');
+    foreach ((new WorkflowRepository(Database::connection()))->versions() as $version) {
+        Csv::writeRow($handle, [
+            $version['id'],
+            $version['workflow_key'],
+            $version['version_number'],
+            $version['lifecycle_status'],
+            $version['source_type'],
+            $version['application_count'],
+            !empty($version['is_active']) ? 'yes' : 'no',
+            $version['published_at'],
+        ]);
+    }
+    fclose($handle);
+}
+
+function workflow_export(array $args): void
+{
+    require_installed_app();
+    $options = cli_options($args);
+    $repository = new WorkflowRepository(Database::connection());
+    $versionId = (int) ($options['version'] ?? $repository->activeVersionId() ?? 0);
+    if ($versionId <= 0) {
+        throw new RuntimeException('Workflow export requires --version=ID or an active version.');
+    }
+    $workflow = $repository->workflowForVersion($versionId);
+    if ($workflow === null) {
+        throw new RuntimeException('Workflow version not found.');
+    }
+    $target = (string) ($options['target'] ?? cpe_data_path('config/workflow-' . $workflow['key'] . '-v' . $workflow['version_number'] . '.json'));
+    $result = (new WorkflowDefinitionFileService(Database::connection()))->export($versionId, $target);
+    echo "Workflow definition written: {$result['path']}\n";
+    echo "Workflow: {$result['workflow_key']} version {$result['version']}\n";
+}
+
+function workflow_validate(string $path): void
+{
+    require_installed_app();
+    $result = (new WorkflowDefinitionFileService(Database::connection()))->validate($path);
+    echo "Workflow definition valid: {$result['path']}\n";
+    echo "Workflow: {$result['workflow_key']}\n";
+    echo "States: {$result['states']}\n";
+    echo "Transitions: {$result['transitions']}\n";
+}
+
+function workflow_publish(string $path): void
+{
+    require_installed_app();
+    $service = new WorkflowDefinitionFileService(Database::connection());
+    $service->validate($path);
+    $versionId = $service->publish($path, null, true);
+    echo "Workflow version published: {$versionId}\n";
+    echo "Existing applications remain pinned until workflow-migrate is run.\n";
+}
+
+function workflow_simulate(array $args): void
+{
+    require_installed_app();
+    $options = cli_options($args);
+    $repository = new WorkflowRepository(Database::connection());
+    $versionId = (int) ($options['version'] ?? $repository->activeVersionId() ?? 0);
+    $transitionKeys = array_values(array_filter(array_map('trim', explode(',', (string) ($options['transitions'] ?? '')))));
+    if ($versionId <= 0 || $transitionKeys === []) {
+        throw new RuntimeException('Use workflow-simulate --version=ID --transitions=key_one,key_two [--roles=role_one,role_two].');
+    }
+    $roles = array_values(array_filter(array_map('trim', explode(',', (string) ($options['roles'] ?? 'admin')))));
+    $steps = [];
+    foreach ($transitionKeys as $index => $key) {
+        $steps[] = [
+            'transition_key' => $key,
+            'actor_role' => $roles[$index] ?? end($roles) ?: 'admin',
+            'reason' => (string) ($options['reason'] ?? ''),
+        ];
+    }
+    $context = [
+        'start_state' => (string) ($options['start'] ?? ''),
+        'opted_out' => cli_truthy($options['opted-out'] ?? ''),
+        'placement_frozen' => cli_truthy($options['placement-frozen'] ?? ''),
+        'has_offer' => cli_truthy($options['has-offer'] ?? ''),
+        'allow_offer_upgrade' => cli_truthy($options['allow-offer-upgrade'] ?? ''),
+    ];
+    if ($context['start_state'] === '') {
+        unset($context['start_state']);
+    }
+    $result = (new WorkflowSimulationService(Database::connection()))->simulate($versionId, $steps, $context);
+    echo "Workflow simulation: {$result['workflow_key']} version {$result['version_number']}\n";
+    foreach ($result['trace'] as $step) {
+        echo "{$step['step']}. {$step['from']} -> {$step['to']} via {$step['transition_key']} ({$step['actor_role']})\n";
+    }
+    echo "End state: {$result['end_state']}" . ($result['terminal'] ? ' (terminal)' : '') . "\n";
+}
+
+function workflow_migration_preview(array $args): void
+{
+    require_installed_app();
+    $options = cli_options($args);
+    $versionId = (int) ($options['to-version'] ?? 0);
+    if ($versionId <= 0) {
+        throw new RuntimeException('Workflow migration preview requires --to-version=ID.');
+    }
+    $result = (new WorkflowMigrationService(Database::connection()))->preview($versionId, workflow_state_map((string) ($options['map'] ?? '')));
+    print_workflow_migration_preview($result);
+}
+
+function workflow_migrate(array $args): void
+{
+    require_installed_app();
+    $options = cli_options($args);
+    $versionId = (int) ($options['to-version'] ?? 0);
+    $reason = trim((string) ($options['reason'] ?? ''));
+    if ($versionId <= 0 || $reason === '' || (string) ($options['confirm'] ?? '') !== (string) $versionId) {
+        throw new RuntimeException('Use workflow-migrate --to-version=ID --reason="..." --confirm=ID [--map=old:new,...].');
+    }
+    $service = new WorkflowMigrationService(Database::connection());
+    $map = workflow_state_map((string) ($options['map'] ?? ''));
+    $preview = $service->preview($versionId, $map);
+    if ($preview['unmapped_states'] !== []) {
+        print_workflow_migration_preview($preview);
+        throw new RuntimeException('Supply mappings for every unmapped state before migration.');
+    }
+    $backup = create_database_backup('workflow-migration');
+    echo "Workflow migration backup written: {$backup}\n";
+    $result = $service->migrate($versionId, $map, null, 'admin', $reason);
+    echo "Applications migrated: {$result['migrated']}\n";
+}
+
+function workflow_state_map(string $value): array
+{
+    $map = [];
+    foreach (array_filter(array_map('trim', explode(',', $value))) as $pair) {
+        if (!str_contains($pair, ':')) {
+            throw new RuntimeException('Workflow state mappings use old:new pairs.');
+        }
+        [$from, $to] = array_map('trim', explode(':', $pair, 2));
+        if ($from === '' || $to === '') {
+            throw new RuntimeException('Workflow state mappings cannot be empty.');
+        }
+        $map[$from] = $to;
+    }
+    return $map;
+}
+
+function print_workflow_migration_preview(array $result): void
+{
+    echo "Target workflow version: {$result['target_version_id']} (version {$result['target_version_number']})\n";
+    echo "Applications to migrate: {$result['applications']}\n";
+    foreach ($result['status_counts'] as $state => $count) {
+        echo "  {$state}: {$count}\n";
+    }
+    if ($result['unmapped_states'] !== []) {
+        echo 'Unmapped states: ' . implode(', ', $result['unmapped_states']) . "\n";
+    }
+}
+
+function require_installed_app(): void
+{
+    if (!Database::isInstalled()) {
+        throw new RuntimeException('App is not installed.');
+    }
+}
+
+function module_list(): void
+{
+    require_installed_app();
+    echo "key,name,version,installed,enabled,requires\n";
+    $handle = fopen('php://output', 'w');
+    foreach ((new ModuleLifecycleService(Database::connection()))->modules() as $module) {
+        Csv::writeRow($handle, [
+            $module['key'],
+            $module['name'],
+            $module['installed_version'] ?? $module['version'],
+            $module['installed'] ? 'yes' : 'no',
+            $module['enabled'] ? 'yes' : 'no',
+            implode(',', $module['requires_modules']),
+        ]);
+    }
+    fclose($handle);
+}
+
+function module_enable(array $args): void
+{
+    require_installed_app();
+    $options = cli_options($args);
+    $moduleKey = strtolower(trim((string) ($options['module'] ?? '')));
+    if ($moduleKey === '') {
+        throw new RuntimeException('Use module-enable --module=MODULE_KEY.');
+    }
+    (new ModuleLifecycleService(Database::connection()))->enable($moduleKey);
+    echo "Module enabled: {$moduleKey}\n";
+}
+
+function module_disable(array $args): void
+{
+    require_installed_app();
+    $options = cli_options($args);
+    $moduleKey = strtolower(trim((string) ($options['module'] ?? '')));
+    if ($moduleKey === '' || (string) ($options['confirm'] ?? '') !== $moduleKey) {
+        throw new RuntimeException('Use module-disable --module=MODULE_KEY --confirm=MODULE_KEY.');
+    }
+    (new ModuleLifecycleService(Database::connection()))->disable($moduleKey);
+    echo "Module disabled; data retained: {$moduleKey}\n";
+}
+
+function hosted_control_migrate(): void
+{
+    $controlPlane = HostedControlPlane::fromEnvironment();
+    $controlPlane->migrate();
+    echo "Hosted control-plane migrations applied ({$controlPlane->driver()}).\n";
+    echo "Control plane: {$controlPlane->identifier()}\n";
+}
+
+function hosted_tenant_create(array $args): void
+{
+    $options = cli_options($args);
+    $controlPlane = HostedControlPlane::fromEnvironment();
+    $tenant = $controlPlane->createTenant([
+        'slug' => (string) ($options['slug'] ?? ''),
+        'name' => (string) ($options['name'] ?? ''),
+        'domain' => (string) ($options['domain'] ?? ''),
+        'plan_key' => (string) ($options['plan'] ?? 'community'),
+        'database_reference' => (string) ($options['database-ref'] ?? ''),
+        'region' => (string) ($options['region'] ?? 'local'),
+    ], hosted_operator());
+    echo "Hosted tenant recorded: {$tenant['slug']} ({$tenant['tenant_public_id']})\n";
+    echo "Domain: {$tenant['hostname']}\n";
+    echo "Database secret: CPE_TENANT_DATABASE_URL_{$tenant['database_reference']}\n";
+    echo "Status: {$tenant['tenant_status']}\n";
+}
+
+function hosted_tenant_list(): void
+{
+    $rows = HostedControlPlane::fromEnvironment()->tenants();
+    echo "slug,name,domain,plan,status,deployment,release,database_reference\n";
+    $handle = fopen('php://output', 'w');
+    foreach ($rows as $row) {
+        Csv::writeRow($handle, [
+            $row['slug'],
+            $row['name'],
+            $row['hostname'],
+            $row['plan_key'],
+            $row['tenant_status'],
+            $row['deployment_status'],
+            $row['release_version'],
+            $row['database_reference'],
+        ]);
+    }
+    fclose($handle);
+}
+
+function hosted_provision(array $args): void
+{
+    $options = cli_options($args);
+    $tenantKey = trim((string) ($options['tenant'] ?? ''));
+    $password = (string) (getenv('CPE_ADMIN_PASSWORD') ?: '');
+    if ($tenantKey === '' || $password === '') {
+        throw new RuntimeException('Use hosted-provision --tenant=SLUG with CPE_ADMIN_PASSWORD set.');
+    }
+    $controlPlane = HostedControlPlane::fromEnvironment();
+    $result = (new ProvisioningService($controlPlane, new TenantDatabaseResolver($controlPlane)))->provision($tenantKey, [
+        'site_name' => (string) ($options['site-name'] ?? 'Career Services Portal'),
+        'timezone' => (string) ($options['timezone'] ?? 'UTC'),
+        'cycle_name' => (string) ($options['cycle-name'] ?? ''),
+        'workflow' => (string) ($options['workflow'] ?? 'default'),
+        'admin_name' => (string) ($options['admin-name'] ?? ''),
+        'admin_email' => (string) ($options['admin-email'] ?? ''),
+        'admin_password' => $password,
+        'seed_demo' => cli_truthy($options['seed-demo'] ?? ''),
+    ], hosted_operator());
+    echo "Hosted tenant provisioned: {$result['tenant']['slug']}\n";
+    echo "Release: {$result['release_version']}\n";
+}
+
+function hosted_entitle(array $args): void
+{
+    $options = cli_options($args);
+    $tenant = trim((string) ($options['tenant'] ?? ''));
+    $module = strtolower(trim((string) ($options['module'] ?? '')));
+    $enabled = strtolower(trim((string) ($options['enabled'] ?? '')));
+    if ($tenant === '' || !array_key_exists($module, cpe_config('modules', [])) || !in_array($enabled, ['0', '1'], true)) {
+        throw new RuntimeException('Use hosted-entitle --tenant=SLUG --module=MODULE --enabled=0|1.');
+    }
+    HostedControlPlane::fromEnvironment()->setEntitlement($tenant, $module, $enabled === '1', hosted_operator());
+    echo "Hosted entitlement updated: {$tenant} {$module}=" . ($enabled === '1' ? 'enabled' : 'disabled') . "\n";
+}
+
+function hosted_fleet_plan(array $args): void
+{
+    $options = cli_options($args);
+    $version = (string) ($options['version'] ?? cpe_config('app.version', '0.0.0'));
+    $controlPlane = HostedControlPlane::fromEnvironment();
+    $jobs = (new FleetUpgradeService($controlPlane, new TenantDatabaseResolver($controlPlane)))->plan($version);
+    echo "Fleet upgrade jobs planned: " . count($jobs) . "\n";
+    echo "Target release: {$version}\n";
+}
+
+function hosted_fleet_run(array $args): void
+{
+    $options = cli_options($args);
+    $limit = (int) ($options['limit'] ?? 10);
+    $controlPlane = HostedControlPlane::fromEnvironment();
+    $results = (new FleetUpgradeService($controlPlane, new TenantDatabaseResolver($controlPlane)))->run($limit);
+    $failed = false;
+    foreach ($results as $result) {
+        echo strtoupper($result['status']) . " {$result['tenant']}";
+        echo isset($result['version']) ? " -> {$result['version']}" : '';
+        echo isset($result['backup']) ? " backup={$result['backup']}" : '';
+        echo isset($result['error']) ? " error={$result['error']}" : '';
+        echo "\n";
+        $failed = $failed || $result['status'] === 'failed';
+    }
+    if ($results === []) {
+        echo "No pending fleet upgrade jobs.\n";
+    }
+    if ($failed) {
+        throw new RuntimeException('One or more fleet upgrades failed.');
+    }
+}
+
+function hosted_support_grant(array $args): void
+{
+    $options = cli_options($args);
+    if ((string) ($options['confirm'] ?? '') !== 'GRANT') {
+        throw new RuntimeException('Support access requires --confirm=GRANT.');
+    }
+    $result = HostedControlPlane::fromEnvironment()->grantSupportAccess(
+        (string) ($options['tenant'] ?? ''),
+        (string) ($options['subject'] ?? ''),
+        (string) ($options['reason'] ?? ''),
+        (string) ($options['expires-at'] ?? ''),
+        hosted_operator(),
+    );
+    echo "Support access grant recorded: {$result['public_id']} until {$result['expires_at']} UTC\n";
+}
+
+function hosted_support_revoke(array $args): void
+{
+    $options = cli_options($args);
+    $grant = (string) ($options['grant'] ?? '');
+    if ($grant === '' || (string) ($options['confirm'] ?? '') !== $grant) {
+        throw new RuntimeException('Use hosted-support-revoke --grant=PUBLIC_ID --confirm=PUBLIC_ID.');
+    }
+    HostedControlPlane::fromEnvironment()->revokeSupportAccess($grant, hosted_operator());
+    echo "Support access revoked: {$grant}\n";
+}
+
+function hosted_support_list(array $args): void
+{
+    $options = cli_options($args);
+    $tenant = (string) ($options['tenant'] ?? '');
+    if ($tenant === '') {
+        throw new RuntimeException('Use hosted-support-list --tenant=SLUG.');
+    }
+    echo "public_id,subject,reason,expires_at,created_at\n";
+    $handle = fopen('php://output', 'w');
+    foreach (HostedControlPlane::fromEnvironment()->activeSupportGrants($tenant) as $grant) {
+        Csv::writeRow($handle, $grant);
+    }
+    fclose($handle);
+}
+
+function hosted_operator(): string
+{
+    return trim((string) (getenv('CPE_OPERATOR_ID') ?: 'cli-operator'));
+}
+
+function sso_link(array $args): void
+{
+    require_installed_app();
+    $options = cli_options($args);
+    $result = (new ExternalIdentityService())->link(
+        (string) ($options['provider'] ?? ''),
+        (string) ($options['subject'] ?? ''),
+        (string) ($options['user-email'] ?? ''),
+    );
+    echo "External identity linked: {$result['provider']}/{$result['subject']} -> {$result['email']}\n";
+}
+
+function export_snapshot(array $args): void
+{
+    if (!Database::isInstalled()) {
+        throw new RuntimeException('App is not installed.');
+    }
+    if (in_array('--help', $args, true) || in_array('-h', $args, true)) {
+        export_snapshot_help();
+        return;
+    }
+    [$targetDir, $profile] = export_snapshot_args($args);
+    $result = (new SnapshotExporter())->export($targetDir, $profile);
+    echo "Export written: {$result['dir']}\n";
+    echo "Profile: {$result['profile']}\n";
+    foreach ($result['files'] as $file) {
+        echo "  {$file['file']}: {$file['rows']} rows\n";
+    }
+}
+
+function export_snapshot_args(array $args): array
+{
+    $targetDir = null;
+    $profile = 'full';
+    for ($i = 0; $i < count($args); $i++) {
+        $arg = (string) $args[$i];
+        if ($arg === '--profile') {
+            if (!isset($args[$i + 1])) {
+                throw new RuntimeException('Missing value for --profile.');
+            }
+            $profile = (string) $args[++$i];
+            continue;
+        }
+        if (str_starts_with($arg, '--profile=')) {
+            $profile = substr($arg, strlen('--profile='));
+            continue;
+        }
+        if (str_starts_with($arg, '--')) {
+            throw new RuntimeException('Unknown export option: ' . $arg);
+        }
+        if ($targetDir !== null) {
+            throw new RuntimeException('Only one export target directory can be supplied.');
+        }
+        $targetDir = $arg;
+    }
+    return [$targetDir, $profile];
+}
+
+function placement_report(): void
+{
+    if (!Database::isInstalled()) {
+        throw new RuntimeException('App is not installed.');
+    }
+    $summary = (new PlacementService())->placementSummary();
+    $handle = fopen('php://output', 'w');
+    Csv::writeRow($handle, ['section', 'key', 'label', 'count', 'placed_count', 'active_count']);
+    $totals = $summary['totals'];
+    foreach ([
+        'candidates' => 'Candidates',
+        'placed_candidates' => 'Placed candidates',
+        'unplaced_candidates' => 'Unplaced candidates',
+        'applications' => 'Applications',
+        'active_applications' => 'Active applications',
+    ] as $key => $label) {
+        Csv::writeRow($handle, ['totals', $key, $label, (int) ($totals[$key] ?? 0), '', '']);
+    }
+    foreach ($summary['applicationStatusCounts'] as $row) {
+        Csv::writeRow($handle, ['application_status', $row['status'], $row['label'], (int) $row['count'], '', '']);
+    }
+    foreach ($summary['placementsByCompany'] as $row) {
+        Csv::writeRow($handle, ['placements_by_company', $row['code'], $row['name'], (int) $row['placed_count'], (int) $row['placed_count'], '']);
+    }
+    foreach ($summary['candidatesByProgram'] as $row) {
+        Csv::writeRow($handle, ['candidates_by_program', $row['program'], $row['program'], (int) $row['candidate_count'], (int) $row['placed_count'], '']);
+    }
+    foreach ($summary['candidatesByLocation'] as $row) {
+        Csv::writeRow($handle, ['candidates_by_location', $row['current_location'], $row['current_location'], (int) $row['candidate_count'], '', '']);
+    }
+    fclose($handle);
+}
+
+function privacy_report(): void
+{
+    if (!Database::isInstalled()) {
+        throw new RuntimeException('App is not installed.');
+    }
+    $handle = fopen('php://output', 'w');
+    Csv::writeRow($handle, ['key', 'count']);
+    foreach ((new PrivacyService())->report() as $key => $count) {
+        Csv::writeRow($handle, [$key, $count]);
+    }
+    fclose($handle);
+}
+
+function anonymize_candidate(array $args): void
+{
+    if (!Database::isInstalled()) {
+        throw new RuntimeException('App is not installed.');
+    }
+    if ($args === [] || in_array('--help', $args, true) || in_array('-h', $args, true)) {
+        anonymize_candidate_help();
+        return;
+    }
+    $externalId = (string) array_shift($args);
+    if (str_starts_with($externalId, '--')) {
+        throw new RuntimeException('Provide the candidate external ID before options.');
+    }
+    $options = cli_options($args);
+    $confirm = (string) ($options['confirm'] ?? '');
+    if ($confirm !== $externalId) {
+        throw new RuntimeException('Refusing to anonymize without --confirm=' . $externalId);
+    }
+    $result = (new PrivacyService())->anonymizeCandidate($externalId, null);
+    echo "Candidate anonymized: {$result['external_id']}\n";
+    echo "Safety copy written: {$result['safety_path']}\n";
+    echo "Applications retained: {$result['applications']}\n";
+    echo "Preference requests closed: {$result['preference_requests']}\n";
+    echo "Wanted alerts closed: {$result['wanted_alerts']}\n";
+    echo "Notifications redacted: {$result['notifications']}\n";
+}
+
+function package_release(array $args): void
+{
+    if (!class_exists(PharData::class)) {
+        throw new RuntimeException('PharData is required to build a release package.');
+    }
+    publication_check();
+    $options = cli_options($args);
+    $targetDir = (string) ($options['target'] ?? (__DIR__ . '/dist'));
+    $force = cli_truthy($options['force'] ?? '');
+    if (!is_dir($targetDir) && !mkdir($targetDir, 0775, true)) {
+        throw new RuntimeException('Could not create package target directory: ' . $targetDir);
+    }
+    if (!is_writable($targetDir)) {
+        throw new RuntimeException('Package target is not writable: ' . $targetDir);
+    }
+    putenv('TMPDIR=' . $targetDir);
+    @ini_set('sys_temp_dir', $targetDir);
+
+    $version = preg_replace('/[^A-Za-z0-9._-]/', '-', (string) cpe_config('app.version', '0.1.0')) ?: '0.1.0';
+    $rootName = 'campus-placement-engine-' . $version;
+    $tarPath = rtrim($targetDir, '/') . '/' . $rootName . '.tar';
+    $gzPath = $tarPath . '.gz';
+    $checksumPath = release_package_checksum_path($gzPath);
+    foreach ([$tarPath, $gzPath, $checksumPath] as $path) {
+        if (is_file($path)) {
+            if (!$force) {
+                throw new RuntimeException('Package already exists; rerun with --force: ' . $path);
+            }
+            if (!unlink($path)) {
+                throw new RuntimeException('Could not replace existing package: ' . $path);
+            }
+        }
+    }
+
+    $archive = new PharData($tarPath);
+    $count = 0;
+    foreach (release_package_files() as $relative) {
+        $archive->addFile(__DIR__ . '/' . $relative, $rootName . '/' . $relative);
+        $count++;
+    }
+    $archive->compress(Phar::GZ);
+    unset($archive);
+    if (is_file($tarPath) && !unlink($tarPath)) {
+        throw new RuntimeException('Could not remove intermediate package: ' . $tarPath);
+    }
+    write_release_package_checksum($gzPath);
+
+    echo "Release package written: {$gzPath}\n";
+    echo "Checksum written: {$checksumPath}\n";
+    echo "Files included: {$count}\n";
+}
+
+function release_package_checksum_path(string $path): string
+{
+    return $path . '.sha256';
+}
+
+function write_release_package_checksum(string $path): void
+{
+    $hash = hash_file('sha256', $path);
+    if ($hash === false) {
+        throw new RuntimeException('Could not checksum release package: ' . $path);
+    }
+    $checksumPath = release_package_checksum_path($path);
+    $line = $hash . '  ' . basename($path) . "\n";
+    if (file_put_contents($checksumPath, $line) === false) {
+        throw new RuntimeException('Could not write release package checksum: ' . $checksumPath);
+    }
+}
+
+function verify_release_package(string $path): void
+{
+    if ($path === '' || !is_file($path)) {
+        throw new RuntimeException('Provide a readable release package path.');
+    }
+    $checksumPath = release_package_checksum_path($path);
+    if (!is_file($checksumPath)) {
+        throw new RuntimeException('Release package checksum not found: ' . $checksumPath);
+    }
+    $contents = trim((string) file_get_contents($checksumPath));
+    $expected = strtolower(strtok($contents, " \t"));
+    if (!preg_match('/^[a-f0-9]{64}$/', $expected)) {
+        throw new RuntimeException('Release package checksum file is invalid: ' . $checksumPath);
+    }
+    $actual = hash_file('sha256', $path);
+    if ($actual === false || !hash_equals($expected, strtolower($actual))) {
+        throw new RuntimeException('Release package checksum verification failed for: ' . $path);
+    }
+    if (!class_exists(PharData::class)) {
+        throw new RuntimeException('PharData is required to inspect a release package.');
+    }
+    putenv('TMPDIR=' . dirname($path));
+    @ini_set('sys_temp_dir', dirname($path));
+    $archive = new PharData($path);
+    $archivePrefix = 'phar://' . (realpath($path) ?: $path) . '/';
+    $entries = [];
+    $rootName = '';
+    $uncompressedBytes = 0;
+    foreach (new RecursiveIteratorIterator($archive) as $file) {
+        if (!$file instanceof SplFileInfo || !$file->isFile()) {
+            continue;
+        }
+        $pathname = $file->getPathname();
+        if (!str_starts_with($pathname, $archivePrefix)) {
+            throw new RuntimeException('Release package contains an unreadable archive entry.');
+        }
+        $entry = substr($pathname, strlen($archivePrefix));
+        $segments = explode('/', $entry);
+        $candidateRoot = (string) ($segments[0] ?? '');
+        if ($entry === ''
+            || str_contains($entry, "\0")
+            || str_contains($entry, '\\')
+            || in_array('', $segments, true)
+            || in_array('.', $segments, true)
+            || in_array('..', $segments, true)
+            || preg_match('/^campus-placement-engine-[A-Za-z0-9._-]+$/', $candidateRoot) !== 1
+            || $file->isLink()) {
+            throw new RuntimeException('Release package contains an unsafe archive entry: ' . $entry);
+        }
+        if ($rootName === '') {
+            $rootName = $candidateRoot;
+        } elseif ($rootName !== $candidateRoot) {
+            throw new RuntimeException('Release package must contain exactly one application root.');
+        }
+        $relative = implode('/', array_slice($segments, 1));
+        if ($relative === '' || isset($entries[$relative])) {
+            throw new RuntimeException('Release package contains an invalid or duplicate entry: ' . $entry);
+        }
+        $size = max(0, (int) $file->getSize());
+        $uncompressedBytes += $size;
+        if ($size > 20 * 1024 * 1024 || $uncompressedBytes > 100 * 1024 * 1024 || count($entries) >= 5000) {
+            throw new RuntimeException('Release package exceeds safe inspection limits.');
+        }
+        $entries[$relative] = true;
+    }
+    foreach (['.htaccess', 'README.md', 'placement', 'public/.htaccess', 'public/index.php', 'database/.htaccess', 'database/migrations/001_initial.sql', 'docs/environment.md', 'examples/env/local.env.example', 'examples/deployment/apache-vhost.conf', 'examples/deployment/nginx-server.conf', 'tests/.htaccess', 'data/.gitkeep', 'data/.htaccess'] as $required) {
+        if (!isset($entries[$required])) {
+            throw new RuntimeException('Release package is missing required file: ' . $required);
+        }
+    }
+    foreach (['.legacy-private', 'data/app.sqlite', '.playwright-cli'] as $forbidden) {
+        foreach (array_keys($entries) as $entry) {
+            if ($entry === $forbidden || str_starts_with($entry, $forbidden . '/')) {
+                throw new RuntimeException('Release package contains forbidden path: ' . $forbidden);
+            }
+        }
+    }
+    echo "Package checksum verified: {$path}\n";
+    echo "Package archive inspected: " . count($entries) . " files.\n";
+}
+
+function release_package_files(): array
+{
+    $allowed = [
+        '.github',
+        '.htaccess',
+        '.gitignore',
+        'README.md',
+        'LICENSE',
+        'SECURITY.md',
+        'CONTRIBUTING.md',
+        'CODE_OF_CONDUCT.md',
+        'placement',
+        'app',
+        'config',
+        'database',
+        'docs',
+        'examples',
+        'public',
+        'tests',
+        'data/.gitkeep',
+        'data/.htaccess',
+    ];
+    $files = [];
+    foreach ($allowed as $relative) {
+        $path = __DIR__ . '/' . $relative;
+        if (is_file($path)) {
+            if (is_link($path)) {
+                throw new RuntimeException('Release package refuses symbolic links: ' . $relative);
+            }
+            $files[] = $relative;
+            continue;
+        }
+        if (!is_dir($path)) {
+            continue;
+        }
+        $iterator = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($path, FilesystemIterator::SKIP_DOTS)
+        );
+        foreach ($iterator as $file) {
+            if (!$file instanceof SplFileInfo || !$file->isFile()) {
+                continue;
+            }
+            $relativePath = ltrim(str_replace(__DIR__, '', $file->getPathname()), '/');
+            $realPath = $file->getRealPath();
+            if ($file->isLink()
+                || $realPath === false
+                || !str_starts_with($realPath, rtrim((string) realpath(__DIR__), '/') . '/')) {
+                throw new RuntimeException('Release package refuses symbolic links or out-of-tree files: ' . $relativePath);
+            }
+            if ($relativePath === 'config/local.php') {
+                continue;
+            }
+            $files[] = $relativePath;
+        }
+    }
+    sort($files);
+    return $files;
+}
+
+function deliver_notifications(array $args): void
+{
+    if (!Database::isInstalled()) {
+        throw new RuntimeException('App is not installed.');
+    }
+    Database::migrate();
+    $options = cli_options($args);
+    $channel = (string) ($options['channel'] ?? '');
+    $limit = (int) ($options['limit'] ?? 100);
+    $dryRun = cli_truthy($options['dry-run'] ?? '');
+    $result = (new NotificationDeliveryService())->deliverPending($channel, $limit, $dryRun);
+    echo "Notification deliveries checked: {$result['checked']}\n";
+    echo "Delivered: {$result['delivered']}\n";
+    echo "Failed: {$result['failed']}\n";
+    if ($dryRun) {
+        echo "Dry run: yes\n";
+    }
+    foreach ($result['rows'] as $row) {
+        echo "{$row['id']},{$row['channel']},{$row['status']},{$row['target']}";
+        if ($row['error'] !== '') {
+            echo ',' . $row['error'];
+        }
+        echo "\n";
+    }
+}
+
+function work_outbox(array $args): void
+{
+    if (!Database::isInstalled()) {
+        throw new RuntimeException('App is not installed.');
+    }
+    Database::migrate();
+    $options = cli_options($args);
+    $limit = max(1, min(1000, (int) ($options['limit'] ?? 100)));
+    $result = (new DomainEventOutboxWorker())->work($limit);
+    echo "Domain events claimed: {$result['claimed']}\n";
+    echo "Delivered: {$result['delivered']}\n";
+    echo "Failed: {$result['failed']}\n";
+    echo "Dead-lettered: {$result['dead_lettered']}\n";
+    foreach ($result['rows'] as $row) {
+        echo "{$row['public_id']},{$row['status']}";
+        if ($row['destination'] !== '') {
+            echo ',' . $row['destination'];
+        }
+        if ($row['error'] !== '') {
+            echo ',' . $row['error'];
+        }
+        echo "\n";
+    }
+    if ($result['failed'] > 0) {
+        throw new RuntimeException('One or more domain events could not be delivered.');
+    }
+}
+
+function certify_notifications(array $args): void
+{
+    if (in_array('--help', $args, true) || in_array('-h', $args, true)) {
+        certify_notifications_help();
+        return;
+    }
+    if (!Database::isInstalled()) {
+        throw new RuntimeException('App is not installed.');
+    }
+    $options = cli_options($args);
+    $channel = strtolower(trim((string) ($options['channel'] ?? '')));
+    if ($channel === '') {
+        throw new RuntimeException('Provide --channel=sms or --channel=whatsapp.');
+    }
+    $requireLiveGateway = cli_truthy($options['require-live'] ?? '');
+
+    $report = (new NotificationDeliveryService())->certificationReport($channel, $requireLiveGateway);
+    foreach ($report['checks'] as $check) {
+        echo strtoupper((string) $check['status']) . ' ' . $check['key'] . ' - ' . $check['message'] . "\n";
+    }
+    if (!$report['ok']) {
+        throw new RuntimeException(strtoupper($channel) . ' notification certification preflight failed.');
+    }
+    echo "Notification certification preflight passed for {$channel}.\n";
+}
+
+function smoke_http(array $args): void
+{
+    if (in_array('--help', $args, true) || in_array('-h', $args, true)) {
+        smoke_http_help();
+        return;
+    }
+    $options = cli_options($args);
+    $baseUrl = rtrim((string) ($options['base-url'] ?? getenv('CPE_SMOKE_BASE_URL') ?: 'http://127.0.0.1:8000'), '/');
+    if (!filter_var($baseUrl, FILTER_VALIDATE_URL) || !preg_match('/^https?:\/\//', $baseUrl)) {
+        throw new RuntimeException('Provide a valid http(s) --base-url.');
+    }
+    $email = (string) ($options['email'] ?? getenv('CPE_SMOKE_EMAIL') ?: 'admin@example.test');
+    $password = (string) ($options['password'] ?? getenv('CPE_SMOKE_PASSWORD') ?: getenv('CPE_ADMIN_PASSWORD') ?: 'password123');
+    $restrictedEmail = trim((string) ($options['restricted-email'] ?? getenv('CPE_SMOKE_RESTRICTED_EMAIL') ?: ''));
+    $restrictedPassword = (string) ($options['restricted-password'] ?? getenv('CPE_SMOKE_RESTRICTED_PASSWORD') ?: $password);
+    $timeout = max(1, min(30, (int) ($options['timeout'] ?? 5)));
+    if (!filter_var($email, FILTER_VALIDATE_EMAIL) || $password === '') {
+        throw new RuntimeException('Provide a valid --email and non-empty --password.');
+    }
+    if ($restrictedEmail !== '' && (!filter_var($restrictedEmail, FILTER_VALIDATE_EMAIL) || $restrictedPassword === '')) {
+        throw new RuntimeException('Provide a valid --restricted-email and non-empty --restricted-password.');
+    }
+
+    $cookies = [];
+    $checks = 0;
+    $loginPage = http_smoke_request('GET', $baseUrl . '/?r=login', [], $cookies, $timeout);
+    http_smoke_assert($loginPage, 200, 'login page');
+    http_smoke_assert_security_headers($loginPage, 'login page');
+    $sessionCookie = http_smoke_cookie_header($loginPage['headers'], (string) cpe_config('security.session_name', 'cpe_session'));
+    if ($sessionCookie === '' || stripos($sessionCookie, 'HttpOnly') === false || stripos($sessionCookie, 'SameSite=Lax') === false) {
+        throw new RuntimeException('Login page did not set a hardened HttpOnly SameSite=Lax session cookie.');
+    }
+    $token = http_smoke_csrf_token($loginPage['body']);
+    echo "OK login page\n";
+    $checks++;
+
+    $anonymousPublic = http_smoke_request('GET', $baseUrl . '/?r=public', [], $cookies, $timeout);
+    http_smoke_assert($anonymousPublic, 200, 'anonymous public placements');
+    if (str_contains($anonymousPublic['body'], 'C001') || str_contains($anonymousPublic['body'], 'Demo Candidate')) {
+        throw new RuntimeException('Anonymous public placements exposed candidate identity data.');
+    }
+    echo "OK anonymous aggregate public placements\n";
+    $checks++;
+
+    $anonymousStudent = http_smoke_request('GET', $baseUrl . '/?r=student', [], $cookies, $timeout);
+    if (!in_array($anonymousStudent['status'], [302, 303], true)
+        || !str_contains(http_smoke_header($anonymousStudent['headers'], 'Location'), 'r=login')) {
+        throw new RuntimeException('Anonymous candidate status lookup should redirect to sign-in.');
+    }
+    echo "OK anonymous candidate lookup block\n";
+    $checks++;
+
+    $login = http_smoke_request('POST', $baseUrl . '/?r=login', [
+        '_token' => $token,
+        'email' => $email,
+        'password' => $password,
+    ], $cookies, $timeout);
+    if (!in_array($login['status'], [302, 303], true)) {
+        throw new RuntimeException('Login POST did not redirect; received HTTP ' . $login['status'] . '.');
+    }
+    $loginLocation = http_smoke_header($login['headers'], 'Location');
+    if ($loginLocation !== '' && str_contains($loginLocation, 'r=login')) {
+        throw new RuntimeException('Login POST redirected back to sign-in; check --email and --password.');
+    }
+    echo "OK login post\n";
+    $checks++;
+
+    $pages = [
+        'board' => '/?r=board',
+        'records' => '/?r=records',
+        'reports' => '/?r=reports',
+        'import' => '/?r=import',
+        'notifications' => '/?r=notifications',
+        'admin' => '/?r=admin',
+        'system' => '/?r=system',
+        'public' => '/?r=public',
+        'student' => '/?r=student',
+    ];
+    foreach ($pages as $label => $path) {
+        $response = http_smoke_request('GET', $baseUrl . $path, [], $cookies, $timeout);
+        http_smoke_assert($response, 200, $label);
+        if (str_contains($response['body'], '<h1>Sign in</h1>')) {
+            throw new RuntimeException("HTTP smoke reached sign-in page while checking {$label}; login likely failed.");
+        }
+        if ($label === 'board') {
+            $hasMovementForm = str_contains($response['body'], '?r=move') || str_contains($response['body'], '?r=return-to-idle');
+            if ($hasMovementForm && !str_contains($response['body'], 'name="idempotency_key"')) {
+                throw new RuntimeException('Board forms are missing idempotency keys.');
+            }
+            if (str_contains($response['body'], 'Board refreshes every') && !str_contains($response['body'], 'http-equiv="refresh"')) {
+                throw new RuntimeException('Board reports automatic refresh but the refresh meta tag is missing.');
+            }
+            if (str_contains($response['body'], 'Board auto-refresh is off') && str_contains($response['body'], 'http-equiv="refresh"')) {
+                throw new RuntimeException('Board reports refresh disabled but a refresh meta tag is present.');
+            }
+        } elseif (str_contains($response['body'], 'http-equiv="refresh"')) {
+            throw new RuntimeException("HTTP smoke found unexpected refresh meta tag on {$label} page.");
+        }
+        echo "OK {$label}\n";
+        $checks++;
+    }
+
+    $css = http_smoke_request('GET', $baseUrl . '/assets/app.css', [], $cookies, $timeout);
+    http_smoke_assert($css, 200, 'css asset');
+    if (!str_contains($css['body'], 'body')) {
+        throw new RuntimeException('CSS asset response did not look like the app stylesheet.');
+    }
+    echo "OK css asset\n";
+    $checks++;
+
+    if ($restrictedEmail !== '') {
+        $restrictedCookies = [];
+        $restrictedLoginPage = http_smoke_request('GET', $baseUrl . '/?r=login', [], $restrictedCookies, $timeout);
+        http_smoke_assert($restrictedLoginPage, 200, 'restricted login page');
+        http_smoke_assert_security_headers($restrictedLoginPage, 'restricted login page');
+        $restrictedToken = http_smoke_csrf_token($restrictedLoginPage['body']);
+        echo "OK restricted login page\n";
+        $checks++;
+
+        $restrictedLogin = http_smoke_request('POST', $baseUrl . '/?r=login', [
+            '_token' => $restrictedToken,
+            'email' => $restrictedEmail,
+            'password' => $restrictedPassword,
+        ], $restrictedCookies, $timeout);
+        if (!in_array($restrictedLogin['status'], [302, 303], true)) {
+            throw new RuntimeException('Restricted login POST did not redirect; received HTTP ' . $restrictedLogin['status'] . '.');
+        }
+        $restrictedLocation = http_smoke_header($restrictedLogin['headers'], 'Location');
+        if ($restrictedLocation !== '' && str_contains($restrictedLocation, 'r=login')) {
+            throw new RuntimeException('Restricted login POST redirected back to sign-in; check --restricted-email and --restricted-password.');
+        }
+        echo "OK restricted login post\n";
+        $checks++;
+
+        $restrictedAllowed = [
+            'restricted board' => '/?r=board',
+            'restricted notifications' => '/?r=notifications',
+            'restricted public' => '/?r=public',
+            'restricted student' => '/?r=student',
+        ];
+        foreach ($restrictedAllowed as $label => $path) {
+            $response = http_smoke_request('GET', $baseUrl . $path, [], $restrictedCookies, $timeout);
+            http_smoke_assert($response, 200, $label);
+            if (str_contains($response['body'], '<h1>Sign in</h1>')) {
+                throw new RuntimeException("HTTP smoke reached sign-in page while checking {$label}; restricted login likely failed.");
+            }
+            echo "OK {$label}\n";
+            $checks++;
+        }
+
+        $restrictedForbidden = [
+            'restricted records block' => '/?r=records',
+            'restricted reports block' => '/?r=reports',
+            'restricted import block' => '/?r=import',
+            'restricted preferences block' => '/?r=preferences',
+            'restricted wanted block' => '/?r=wanted',
+            'restricted admin block' => '/?r=admin',
+            'restricted system block' => '/?r=system',
+        ];
+        foreach ($restrictedForbidden as $label => $path) {
+            $response = http_smoke_request('GET', $baseUrl . $path, [], $restrictedCookies, $timeout);
+            if (!in_array($response['status'], [302, 303], true)) {
+                throw new RuntimeException("HTTP smoke failed for {$label}: expected a redirect, received HTTP " . (int) $response['status'] . '.');
+            }
+            $location = http_smoke_header($response['headers'], 'Location');
+            if ($location !== '/') {
+                throw new RuntimeException("HTTP smoke failed for {$label}: expected redirect to /, received " . ($location === '' ? 'no Location header' : $location) . '.');
+            }
+            echo "OK {$label}\n";
+            $checks++;
+        }
+    }
+
+    echo "HTTP smoke passed: {$checks} checks.\n";
+}
+
+function load_smoke(array $args): void
+{
+    if (in_array('--help', $args, true) || in_array('-h', $args, true)) {
+        load_smoke_help();
+        return;
+    }
+    $options = cli_options($args);
+    $baseUrl = (string) ($options['base-url'] ?? getenv('CPE_LOAD_BASE_URL') ?: 'http://127.0.0.1:8000');
+    $path = (string) ($options['path'] ?? '/?r=public');
+    $requests = (int) ($options['requests'] ?? 50);
+    $concurrency = (int) ($options['concurrency'] ?? 5);
+    $timeout = (int) ($options['timeout'] ?? 10);
+    $minimumSuccessRate = (float) ($options['min-success-rate'] ?? 1.0);
+    $maximumP95 = (float) ($options['max-p95-ms'] ?? 2000);
+    if ($minimumSuccessRate < 0 || $minimumSuccessRate > 1 || $maximumP95 <= 0) {
+        throw new RuntimeException('Load thresholds require --min-success-rate between 0 and 1 and positive --max-p95-ms.');
+    }
+    $report = (new HttpLoadProbe())->run($baseUrl, $path, $requests, $concurrency, $timeout);
+    echo "URL: {$report['url']}\n";
+    echo "Transport: {$report['transport']}\n";
+    echo "Requests: {$report['requests']} ({$report['successful']} successful, {$report['failed']} failed)\n";
+    echo 'Success rate: ' . number_format($report['success_rate'] * 100, 2) . "%\n";
+    echo "Throughput: {$report['requests_per_second']} requests/s\n";
+    echo "Latency: p50 {$report['p50_ms']} ms, p95 {$report['p95_ms']} ms, max {$report['max_ms']} ms\n";
+    echo 'Statuses: ' . json_encode($report['status_counts'], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+    if ($report['errors'] !== []) {
+        echo 'Errors: ' . json_encode($report['errors'], JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+    }
+    if ($report['success_rate'] < $minimumSuccessRate || $report['p95_ms'] > $maximumP95) {
+        throw new RuntimeException('Load smoke thresholds were not met.');
+    }
+    echo "Load smoke passed.\n";
+}
+
+function browser_qa_plan(array $args): void
+{
+    if (in_array('--help', $args, true) || in_array('-h', $args, true)) {
+        browser_qa_plan_help();
+        return;
+    }
+    $options = cli_options($args);
+    $format = strtolower(trim((string) ($options['format'] ?? 'text')));
+    if (!in_array($format, ['text', 'markdown'], true)) {
+        throw new RuntimeException('Browser QA plan format must be text or markdown.');
+    }
+    $baseUrl = rtrim((string) ($options['base-url'] ?? getenv('CPE_QA_BASE_URL') ?: 'http://127.0.0.1:8000'), '/');
+    if (!filter_var($baseUrl, FILTER_VALIDATE_URL) || !preg_match('/^https?:\/\//', $baseUrl)) {
+        throw new RuntimeException('Provide a valid http(s) --base-url.');
+    }
+    $candidateTarget = max(1, min(5000, (int) ($options['candidate-target'] ?? 80)));
+    $companyTarget = max(1, min(500, (int) ($options['company-target'] ?? 10)));
+
+    $plan = browser_qa_plan_snapshot($baseUrl, $candidateTarget, $companyTarget);
+    if ($format === 'markdown') {
+        print_browser_qa_plan_markdown($plan);
+        return;
+    }
+    print_browser_qa_plan_text($plan);
+}
+
+function browser_qa_plan_snapshot(string $baseUrl, int $candidateTarget, int $companyTarget): array
+{
+    $installed = Database::isInstalled();
+    $counts = [
+        'candidates' => 0,
+        'companies' => 0,
+        'applications' => 0,
+        'active_applications' => 0,
+    ];
+    $readiness = [];
+    if ($installed) {
+        $pdo = Database::connection();
+        $counts = [
+            'candidates' => (int) $pdo->query('SELECT COUNT(*) FROM candidates')->fetchColumn(),
+            'companies' => (int) $pdo->query('SELECT COUNT(*) FROM companies')->fetchColumn(),
+            'applications' => (int) $pdo->query('SELECT COUNT(*) FROM applications')->fetchColumn(),
+            'active_applications' => (int) $pdo->query("SELECT COUNT(*) FROM applications WHERE current_status NOT IN ('idle', 'placed')")->fetchColumn(),
+        ];
+        $readiness = (new ReadinessService($pdo))->snapshot()['checks'];
+    }
+
+    return [
+        'base_url' => $baseUrl,
+        'installed' => $installed,
+        'candidate_target' => $candidateTarget,
+        'company_target' => $companyTarget,
+        'counts' => $counts,
+        'routes' => browser_qa_routes($baseUrl),
+        'matrix' => browser_qa_matrix(),
+        'visual_checks' => browser_qa_visual_checks(),
+        'readiness' => $readiness,
+    ];
+}
+
+function browser_qa_routes(string $baseUrl): array
+{
+    return [
+        ['label' => 'Login', 'url' => $baseUrl . '/?r=login', 'auth' => 'public', 'focus' => 'Form fits without horizontal overflow.'],
+        ['label' => 'Board - all visible', 'url' => $baseUrl . '/', 'auth' => 'admin/control', 'focus' => 'Dense status columns remain readable.'],
+        ['label' => 'Board - compact mode', 'url' => $baseUrl . '/?compact=1', 'auth' => 'admin/control/mobile/floor', 'focus' => 'Compact cards keep candidate, company, flags, status, and actions visible.'],
+        ['label' => 'Board - wanted flag', 'url' => $baseUrl . '/?flag=wanted', 'auth' => 'admin/control/mobile/floor', 'focus' => 'Urgent queue flag is visible without changing layout width.'],
+        ['label' => 'Board - conflict flag', 'url' => $baseUrl . '/?flag=conflict', 'auth' => 'admin/control/placement', 'focus' => 'Conflict warning text wraps cleanly.'],
+        ['label' => 'Records', 'url' => $baseUrl . '/?r=records', 'auth' => 'admin/control', 'focus' => 'Record grids scroll inside their own container.'],
+        ['label' => 'Import', 'url' => $baseUrl . '/?r=import', 'auth' => 'admin/control', 'focus' => 'Preview and rollback panels fit on phone width.'],
+        ['label' => 'Notifications', 'url' => $baseUrl . '/?r=notifications', 'auth' => 'role-scoped', 'focus' => 'Queue rows and actions do not overlap.'],
+        ['label' => 'Reports', 'url' => $baseUrl . '/?r=reports', 'auth' => 'admin/placement/auditor', 'focus' => 'Summary tables remain scannable.'],
+        ['label' => 'Admin', 'url' => $baseUrl . '/?r=admin', 'auth' => 'admin', 'focus' => 'Settings forms wrap labels, checkboxes, and action buttons.'],
+        ['label' => 'System', 'url' => $baseUrl . '/?r=system', 'auth' => 'admin/auditor', 'focus' => 'Readiness tables expose warnings without clipping.'],
+        ['label' => 'Public placements', 'url' => $baseUrl . '/?r=public', 'auth' => 'public', 'focus' => 'Public table is readable without login.'],
+        ['label' => 'Candidate lookup', 'url' => $baseUrl . '/?r=student', 'auth' => 'placement role', 'focus' => 'Lookup form and result table fit phone width without exposing it before sign-in.'],
+    ];
+}
+
+function browser_qa_matrix(): array
+{
+    return [
+        ['browser' => 'Safari', 'viewport' => 'desktop', 'size' => '1440x900', 'required' => true],
+        ['browser' => 'Safari', 'viewport' => 'phone', 'size' => '390x844', 'required' => true],
+        ['browser' => 'Chrome or Chromium', 'viewport' => 'desktop', 'size' => '1366x768', 'required' => true],
+        ['browser' => 'Chrome or Chromium', 'viewport' => 'phone', 'size' => '390x844', 'required' => true],
+        ['browser' => 'Firefox', 'viewport' => 'desktop', 'size' => '1366x768', 'required' => true],
+        ['browser' => 'Edge', 'viewport' => 'desktop', 'size' => '1366x768', 'required' => false],
+    ];
+}
+
+function browser_qa_visual_checks(): array
+{
+    return [
+        'No horizontal page overflow on phone-width viewport.',
+        'Top navigation wraps instead of overlapping.',
+        'Board columns remain readable with the large synthetic dataset.',
+        'Board routes include the configured refresh interval and form-heavy routes do not auto-refresh.',
+        'Compact board hides optional details but keeps required action context.',
+        'Buttons and status badges do not resize cards unexpectedly.',
+        'Tables and grids scroll inside their own area instead of widening the page.',
+        'No browser console errors on tested routes.',
+        'Public pages remain usable without an authenticated session.',
+    ];
+}
+
+function print_browser_qa_plan_text(array $plan): void
+{
+    echo "Browser QA plan\n";
+    echo "Base URL: {$plan['base_url']}\n";
+    echo 'Installed: ' . ($plan['installed'] ? 'yes' : 'no') . "\n";
+    print_browser_qa_dataset_status($plan, '');
+    print_browser_qa_readiness_status($plan, '');
+    echo "\nSetup for dense local QA:\n";
+    echo "  export CPE_DB_PATH=\"\$(mktemp -t cpe-browser-qa).sqlite\"\n";
+    echo "  php placement install-demo\n";
+    echo "  php placement seed-large-demo {$plan['candidate_target']} {$plan['company_target']}\n";
+    echo "  php placement readiness\n";
+    echo "  php placement metrics\n";
+    echo "  php placement serve\n";
+    echo "  php placement smoke-http --base-url={$plan['base_url']} --email=admin@example.test --password=password123 --restricted-email=atlas@example.test --restricted-password=password123\n";
+    echo "\nCross-browser matrix:\n";
+    foreach ($plan['matrix'] as $row) {
+        echo '  ' . ($row['required'] ? 'REQUIRED' : 'OPTIONAL') . " {$row['browser']} {$row['viewport']} {$row['size']}\n";
+    }
+    echo "\nRoutes:\n";
+    foreach ($plan['routes'] as $route) {
+        echo "  {$route['label']} ({$route['auth']}): {$route['url']}\n";
+        echo "    Check: {$route['focus']}\n";
+    }
+    echo "\nVisual checks:\n";
+    foreach ($plan['visual_checks'] as $check) {
+        echo "  - {$check}\n";
+    }
+}
+
+function print_browser_qa_plan_markdown(array $plan): void
+{
+    echo "# Browser QA Plan\n\n";
+    echo "- Base URL: `{$plan['base_url']}`\n";
+    echo '- Installed: ' . ($plan['installed'] ? 'yes' : 'no') . "\n";
+    print_browser_qa_dataset_status($plan, '- ');
+    print_browser_qa_readiness_status($plan, '- ');
+    echo "\n## Dense Local Setup\n\n";
+    echo "```bash\n";
+    echo "export CPE_DB_PATH=\"\$(mktemp -t cpe-browser-qa).sqlite\"\n";
+    echo "php placement install-demo\n";
+    echo "php placement seed-large-demo {$plan['candidate_target']} {$plan['company_target']}\n";
+    echo "php placement readiness\n";
+    echo "php placement serve\n";
+    echo "php placement smoke-http --base-url={$plan['base_url']} --email=admin@example.test --password=password123 --restricted-email=atlas@example.test --restricted-password=password123\n";
+    echo "```\n\n";
+    echo "## Cross-Browser Matrix\n\n";
+    echo "| Required | Browser | Viewport | Size |\n";
+    echo "| --- | --- | --- | --- |\n";
+    foreach ($plan['matrix'] as $row) {
+        echo '| ' . ($row['required'] ? 'yes' : 'optional') . " | {$row['browser']} | {$row['viewport']} | {$row['size']} |\n";
+    }
+    echo "\n## Routes\n\n";
+    echo "| Screen | Auth | URL | Check |\n";
+    echo "| --- | --- | --- | --- |\n";
+    foreach ($plan['routes'] as $route) {
+        echo "| {$route['label']} | {$route['auth']} | `{$route['url']}` | {$route['focus']} |\n";
+    }
+    echo "\n## Visual Checks\n\n";
+    foreach ($plan['visual_checks'] as $check) {
+        echo "- {$check}\n";
+    }
+}
+
+function print_browser_qa_dataset_status(array $plan, string $prefix): void
+{
+    $counts = $plan['counts'];
+    $denseOk = $plan['installed']
+        && $counts['candidates'] >= $plan['candidate_target']
+        && $counts['companies'] >= $plan['company_target'];
+    $status = $denseOk ? 'OK' : 'WARN';
+    echo "{$prefix}{$status} dense dataset: {$counts['candidates']}/{$plan['candidate_target']} candidates, {$counts['companies']}/{$plan['company_target']} companies, {$counts['applications']} applications, {$counts['active_applications']} active applications.\n";
+}
+
+function print_browser_qa_readiness_status(array $plan, string $prefix): void
+{
+    if (!$plan['installed']) {
+        echo "{$prefix}WARN readiness: app is not installed, so readiness checks are unavailable.\n";
+        return;
+    }
+    $failures = array_values(array_filter($plan['readiness'], fn (array $check): bool => $check['status'] === 'fail'));
+    $warnings = array_values(array_filter($plan['readiness'], fn (array $check): bool => $check['status'] === 'warn'));
+    echo "{$prefix}" . ($failures === [] ? 'OK' : 'FAIL') . ' readiness: ' . count($failures) . ' failing check(s), ' . count($warnings) . " warning check(s).\n";
+    foreach ([...$failures, ...$warnings] as $check) {
+        echo "{$prefix}  {$check['status']} {$check['label']}: {$check['message']}\n";
+    }
+}
+
+function http_smoke_request(string $method, string $url, array $form, array &$cookies, int $timeout): array
+{
+    $headers = [
+        "User-Agent: CampusPlacementEngineSmoke/1.0\r\n",
+        "Accept: text/html,application/xhtml+xml,text/css,*/*\r\n",
+    ];
+    if ($cookies !== []) {
+        $pairs = [];
+        foreach ($cookies as $name => $value) {
+            $pairs[] = rawurlencode((string) $name) . '=' . rawurlencode((string) $value);
+        }
+        $headers[] = 'Cookie: ' . implode('; ', $pairs) . "\r\n";
+    }
+    $content = '';
+    if ($method === 'POST') {
+        $content = http_build_query($form);
+        $headers[] = "Content-Type: application/x-www-form-urlencoded\r\n";
+        $headers[] = 'Content-Length: ' . strlen($content) . "\r\n";
+    }
+    $context = stream_context_create([
+        'http' => [
+            'method' => $method,
+            'header' => implode('', $headers),
+            'content' => $content,
+            'timeout' => $timeout,
+            'ignore_errors' => true,
+            'follow_location' => 0,
+        ],
+    ]);
+    $body = @file_get_contents($url, false, $context);
+    if ($body === false) {
+        $error = error_get_last();
+        throw new RuntimeException('HTTP request failed for ' . $url . ': ' . (string) ($error['message'] ?? 'unknown error'));
+    }
+    $responseHeaders = $http_response_header ?? [];
+    $status = 0;
+    if (isset($responseHeaders[0]) && preg_match('/\s(\d{3})\s/', $responseHeaders[0], $matches)) {
+        $status = (int) $matches[1];
+    }
+    foreach ($responseHeaders as $header) {
+        if (stripos($header, 'Set-Cookie:') !== 0) {
+            continue;
+        }
+        $cookie = trim(substr($header, strlen('Set-Cookie:')));
+        $pair = explode(';', $cookie, 2)[0] ?? '';
+        if (!str_contains($pair, '=')) {
+            continue;
+        }
+        [$name, $value] = explode('=', $pair, 2);
+        $cookies[$name] = $value;
+    }
+    return ['status' => $status, 'headers' => $responseHeaders, 'body' => $body];
+}
+
+function http_smoke_assert(array $response, int $expectedStatus, string $label): void
+{
+    if ((int) $response['status'] !== $expectedStatus) {
+        throw new RuntimeException("HTTP smoke failed for {$label}: expected {$expectedStatus}, received " . (int) $response['status'] . '.');
+    }
+    if (trim((string) $response['body']) === '') {
+        throw new RuntimeException("HTTP smoke failed for {$label}: empty response body.");
+    }
+}
+
+function http_smoke_assert_security_headers(array $response, string $label): void
+{
+    $expected = cpe_security_headers();
+    foreach (['Content-Security-Policy', 'X-Frame-Options', 'X-Content-Type-Options', 'Referrer-Policy', 'Permissions-Policy', 'Cache-Control', 'Pragma'] as $name) {
+        $actual = http_smoke_header($response['headers'], $name);
+        if ($actual !== ($expected[$name] ?? '')) {
+            throw new RuntimeException("HTTP smoke failed for {$label}: missing or unexpected {$name} header.");
+        }
+    }
+}
+
+function http_smoke_header(array $headers, string $name): string
+{
+    $prefix = strtolower($name) . ':';
+    foreach ($headers as $header) {
+        if (str_starts_with(strtolower((string) $header), $prefix)) {
+            return trim(substr((string) $header, strlen($prefix)));
+        }
+    }
+    return '';
+}
+
+function http_smoke_cookie_header(array $headers, string $cookieName): string
+{
+    foreach ($headers as $header) {
+        if (stripos((string) $header, 'Set-Cookie:') !== 0) {
+            continue;
+        }
+        $cookie = trim(substr((string) $header, strlen('Set-Cookie:')));
+        if (str_starts_with($cookie, $cookieName . '=')) {
+            return $cookie;
+        }
+    }
+    return '';
+}
+
+function http_smoke_csrf_token(string $body): string
+{
+    if (preg_match('/name="_token"\s+value="([^"]+)"/', $body, $matches)) {
+        return html_entity_decode($matches[1], ENT_QUOTES | ENT_SUBSTITUTE, 'UTF-8');
+    }
+    throw new RuntimeException('Could not find CSRF token on login page.');
+}
+
+function suggest_slots(string $companyCode): void
+{
+    if (!Database::isInstalled()) {
+        throw new RuntimeException('App is not installed.');
+    }
+    $service = new PlacementService();
+    $companyCode = require_existing_company_code($service, $companyCode);
+    $suggestions = $service->slotAssignmentSuggestions($companyCode);
+    print_slot_suggestions($suggestions);
+}
+
+function optimize_slots(string $companyCode): void
+{
+    if (!Database::isInstalled()) {
+        throw new RuntimeException('App is not installed.');
+    }
+    $service = new PlacementService();
+    $companyCode = require_existing_company_code($service, $companyCode);
+    $suggestions = $service->optimizedSlotAssignmentSuggestions($companyCode);
+    print_slot_suggestions($suggestions);
+}
+
+function require_existing_company_code(PlacementService $service, string $companyCode): string
+{
+    $companyCode = strtoupper(trim($companyCode));
+    if ($companyCode !== '' && !$service->companyExists($companyCode)) {
+        throw new RuntimeException("Company code not found: {$companyCode}");
+    }
+    return $companyCode;
+}
+
+function print_slot_suggestions(array $suggestions): void
+{
+    if ($suggestions === []) {
+        echo "No unassigned active applications found.\n";
+        return;
+    }
+    echo "candidate_external_id,company_code,current_status,round_sequence,round_label,schedule_sequence,room,schedule_day,starts_at,ends_at,capacity,assigned_count,reason\n";
+    $handle = fopen('php://output', 'w');
+    foreach ($suggestions as $suggestion) {
+        Csv::writeRow($handle, [
+            $suggestion['candidate_external_id'],
+            $suggestion['company_code'],
+            $suggestion['current_status'],
+            $suggestion['round_sequence'],
+            $suggestion['round_label'],
+            $suggestion['schedule_sequence'],
+            $suggestion['room'],
+            $suggestion['schedule_day'] ?? '',
+            $suggestion['starts_at'],
+            $suggestion['ends_at'],
+            $suggestion['capacity'],
+            $suggestion['assigned_count'],
+            $suggestion['reason'],
+        ]);
+    }
+    fclose($handle);
+}
+
+function assign_slots(string $companyCode): void
+{
+    if (!Database::isInstalled()) {
+        throw new RuntimeException('App is not installed.');
+    }
+    $service = new PlacementService();
+    $companyCode = require_existing_company_code($service, $companyCode);
+    $result = $service->applySlotAssignmentSuggestions($companyCode, null);
+    print_slot_assignment_result($result);
+}
+
+function assign_optimized_slots(string $companyCode): void
+{
+    if (!Database::isInstalled()) {
+        throw new RuntimeException('App is not installed.');
+    }
+    $service = new PlacementService();
+    $companyCode = require_existing_company_code($service, $companyCode);
+    $result = $service->applyOptimizedSlotAssignmentSuggestions($companyCode, null);
+    print_slot_assignment_result($result);
+}
+
+function print_slot_assignment_result(array $result): void
+{
+    if ($result['assigned'] === [] && $result['skipped'] === []) {
+        echo "No unassigned active applications found.\n";
+        return;
+    }
+    echo "candidate_external_id,company_code,current_status,round_sequence,round_label,schedule_sequence,room,schedule_day,starts_at,ends_at,assignment_id,result,reason\n";
+    $handle = fopen('php://output', 'w');
+    foreach ([...$result['assigned'], ...$result['skipped']] as $row) {
+        Csv::writeRow($handle, [
+            $row['candidate_external_id'],
+            $row['company_code'],
+            $row['current_status'],
+            $row['round_sequence'],
+            $row['round_label'],
+            $row['schedule_sequence'],
+            $row['room'],
+            $row['schedule_day'] ?? '',
+            $row['starts_at'],
+            $row['ends_at'],
+            $row['assignment_id'] ?? '',
+            $row['result'],
+            $row['reason'],
+        ]);
+    }
+    fclose($handle);
+}
+
+function publication_check(): void
+{
+    $required = [
+        'README.md',
+        'LICENSE',
+        'SECURITY.md',
+        'CONTRIBUTING.md',
+        'CODE_OF_CONDUCT.md',
+        '.htaccess',
+        'public/.htaccess',
+        'data/.htaccess',
+        'database/.htaccess',
+        'tests/.htaccess',
+        'docs/environment.md',
+        'docs/release-checklist.md',
+        'docs/migration-from-legacy.md',
+        'examples/env/local.env.example',
+        'examples/deployment/apache-vhost.conf',
+        'examples/deployment/nginx-server.conf',
+        '.gitignore',
+    ];
+    $failures = [];
+    foreach ($required as $path) {
+        if (!is_file(__DIR__ . '/' . $path)) {
+            $failures[] = "Missing required release file: {$path}";
+        }
+    }
+
+    $gitignore = is_file(__DIR__ . '/.gitignore') ? (string) file_get_contents(__DIR__ . '/.gitignore') : '';
+    foreach (['/.legacy-private/', '/http/', '/dist/', '/.env', '/.env.*', '/config/local.php', '/data/*.sqlite', '/data/backups/', '/data/config/', '/data/imports/', '*.zip', '*.7z', '*.rar', '*.xlsx', '*.docx', '*.sql', '!/database/migrations/*.sql', '!/database/control-plane/**/*.sql'] as $pattern) {
+        if (!str_contains($gitignore, $pattern)) {
+            $failures[] = "Missing .gitignore protection: {$pattern}";
+        }
+    }
+
+    foreach (publication_forbidden_files(__DIR__) as $path) {
+        $failures[] = "Forbidden publish-risk file outside private/runtime paths: {$path}";
+    }
+
+    foreach (publication_secret_findings(__DIR__) as $finding) {
+        $failures[] = "Potential secret in {$finding['path']}:{$finding['line']} ({$finding['label']})";
+    }
+
+    if ($failures !== []) {
+        foreach ($failures as $failure) {
+            echo "FAIL: {$failure}\n";
+        }
+        throw new RuntimeException('Publication check failed.');
+    }
+    echo "OK: Required release files are present.\n";
+    echo "OK: Private archive and runtime data patterns are ignored.\n";
+    echo "OK: No forbidden publish-risk files found outside allowed paths.\n";
+    echo "OK: No obvious secret or token patterns found in public files.\n";
+}
+
+function publication_forbidden_files(string $root): array
+{
+    $forbiddenExtensions = ['7z', 'rar', 'zip', 'tar', 'gz', 'tgz', 'xlsx', 'xls', 'docx', 'doc', 'pptx', 'ppt', 'pdf', 'sql'];
+    $allowedSqlPrefixes = [
+        $root . '/database/migrations/',
+        $root . '/database/control-plane/',
+    ];
+    $failures = [];
+    $iterator = new RecursiveIteratorIterator(
+        new RecursiveCallbackFilterIterator(
+            new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS),
+            function (SplFileInfo $file) use ($root): bool {
+                if (!$file->isDir()) {
+                    return true;
+                }
+                $relative = publication_relative_path($root, $file->getPathname());
+                return !in_array($relative, ['.git', '.legacy-private', '.playwright-cli', 'data/backups', 'data/config', 'data/exports', 'data/imports', 'data/privacy', 'dist', 'http'], true);
+            }
+        )
+    );
+    foreach ($iterator as $file) {
+        if (!$file instanceof SplFileInfo || !$file->isFile()) {
+            continue;
+        }
+        $path = $file->getPathname();
+        $relative = ltrim(str_replace($root, '', $path), '/');
+        if (str_starts_with($relative, 'data/') && preg_match('/\.sqlite(?:-.+)?$/', $relative)) {
+            continue;
+        }
+        $extension = strtolower(pathinfo($path, PATHINFO_EXTENSION));
+        $allowedSql = false;
+        if ($extension === 'sql') {
+            foreach ($allowedSqlPrefixes as $prefix) {
+                if (str_starts_with($path, $prefix)) {
+                    $allowedSql = true;
+                    break;
+                }
+            }
+        }
+        if ($allowedSql) {
+            continue;
+        }
+        if (in_array($extension, $forbiddenExtensions, true)) {
+            $failures[] = $relative;
+        }
+    }
+    sort($failures);
+    return $failures;
+}
+
+/**
+ * @return array<int, array{path: string, line: int, label: string}>
+ */
+function publication_secret_findings(string $root): array
+{
+    $findings = [];
+    foreach (publication_secret_scan_files($root) as $path) {
+        $contents = file_get_contents($path);
+        if ($contents === false || str_contains($contents, "\0")) {
+            continue;
+        }
+        foreach (publication_secret_patterns() as $label => $pattern) {
+            $matched = preg_match($pattern, $contents, $matches, PREG_OFFSET_CAPTURE);
+            if ($matched !== 1) {
+                continue;
+            }
+            $offset = (int) ($matches[0][1] ?? 0);
+            $line = substr_count(substr($contents, 0, $offset), "\n") + 1;
+            $findings[] = [
+                'path' => publication_relative_path($root, $path),
+                'line' => $line,
+                'label' => $label,
+            ];
+        }
+    }
+
+    usort($findings, function (array $a, array $b): int {
+        return [$a['path'], $a['line'], $a['label']] <=> [$b['path'], $b['line'], $b['label']];
+    });
+    return $findings;
+}
+
+/**
+ * @return array<string, string>
+ */
+function publication_secret_patterns(): array
+{
+    return [
+        'private key block' => '/-----BEGIN [A-Z ]*PRIVATE KEY-----/',
+        'AWS access key' => '/\bAKIA[0-9A-Z]{16}\b/',
+        'GitHub token' => '/\b(?:gh[opsru]_[A-Za-z0-9_]{30,}|github_pat_[A-Za-z0-9_]{20,})\b/',
+        'OpenAI-style API key' => '/\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b/',
+        'Slack token' => '/\bxox[baprs]-[A-Za-z0-9-]{20,}\b/',
+        'long bearer token' => '/Bearer\s+(?!\.\.\.|replace|example|token|test)[A-Za-z0-9._~+\/=-]{24,}/i',
+    ];
+}
+
+/**
+ * @return array<int, string>
+ */
+function publication_secret_scan_files(string $root): array
+{
+    $files = [];
+    $skipDirs = ['.git', '.legacy-private', '.playwright-cli', 'data', 'dist', 'http', 'node_modules', 'output', 'vendor'];
+    $iterator = new RecursiveIteratorIterator(
+        new RecursiveCallbackFilterIterator(
+            new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS),
+            function (SplFileInfo $file) use ($root, $skipDirs): bool {
+                if (!$file->isDir()) {
+                    return true;
+                }
+                $relative = publication_relative_path($root, $file->getPathname());
+                return !in_array($relative, $skipDirs, true);
+            }
+        )
+    );
+
+    foreach ($iterator as $file) {
+        if (!$file instanceof SplFileInfo || !$file->isFile()) {
+            continue;
+        }
+        $path = $file->getPathname();
+        if (publication_text_file($path)) {
+            $files[] = $path;
+        }
+    }
+    sort($files);
+    return $files;
+}
+
+function publication_text_file(string $path): bool
+{
+    $basename = basename($path);
+    if (in_array($basename, ['placement', '.gitignore', '.htaccess'], true)) {
+        return true;
+    }
+    $extension = strtolower(pathinfo($path, PATHINFO_EXTENSION));
+    return in_array($extension, [
+        'conf',
+        'css',
+        'csv',
+        'example',
+        'gitignore',
+        'htaccess',
+        'ini',
+        'js',
+        'json',
+        'md',
+        'php',
+        'sql',
+        'txt',
+        'xml',
+        'yaml',
+        'yml',
+    ], true);
+}
+
+function publication_relative_path(string $root, string $path): string
+{
+    return ltrim(str_replace(rtrim($root, '/') . '/', '', $path), '/');
+}
+
+function help(): void
+{
+    echo "Campus Placement Engine CLI\n";
+    echo "Commands:\n";
+    echo "  php placement doctor\n";
+    echo "  php placement migrate\n";
+    echo "  php placement upgrade\n";
+    echo "  php placement serve [127.0.0.1:8000]\n";
+    echo "  php placement install --college=\"College\" --admin-name=\"Admin\" --admin-email=admin@example.test\n";
+    echo "  php placement seed-demo\n";
+    echo "  php placement seed-large-demo [candidate-count] [company-count]\n";
+    echo "  php placement install-demo\n";
+    echo "  php placement readiness\n";
+    echo "  php placement metrics\n";
+    echo "  php placement placement-report\n";
+    echo "  php placement privacy-report\n";
+    echo "  php placement anonymize-candidate C001 --confirm=C001\n";
+    echo "  php placement privacy-person-report --person=PERSON_PUBLIC_ID\n";
+    echo "  php placement privacy-person-erase --person=PERSON_PUBLIC_ID --reason=... --confirm=PERSON_PUBLIC_ID\n";
+    echo "  php placement backup\n";
+    echo "  php placement restore /path/to/app.sqlite\n";
+    echo "  php placement rollback-import [--list|ROLLBACK_ID]\n";
+    echo "  php placement config-export [target-json]\n";
+    echo "  php placement config-validate /path/to/config.json\n";
+    echo "  php placement config-import /path/to/config.json\n";
+    echo "  php placement bundle-export [/path/to/new-bundle-directory]\n";
+    echo "  php placement bundle-validate /path/to/bundle\n";
+    echo "  php placement bundle-import /path/to/bundle --confirm=IMPORT\n";
+    echo "  php placement workflow-list\n";
+    echo "  php placement workflow-export [--version=ID] [--target=/path/to/workflow.json]\n";
+    echo "  php placement workflow-validate /path/to/workflow.json\n";
+    echo "  php placement workflow-publish /path/to/workflow.json\n";
+    echo "  php placement workflow-simulate --version=ID --transitions=key_one,key_two [--roles=role_one,role_two]\n";
+    echo "  php placement workflow-migration-preview --to-version=ID [--map=old:new,...]\n";
+    echo "  php placement workflow-migrate --to-version=ID --reason=... --confirm=ID [--map=old:new,...]\n";
+    echo "  php placement module-list\n";
+    echo "  php placement module-enable --module=MODULE_KEY\n";
+    echo "  php placement module-disable --module=MODULE_KEY --confirm=MODULE_KEY\n";
+    echo "  php placement hosted-control-migrate\n";
+    echo "  php placement hosted-tenant-create --slug=COLLEGE --name=\"College\" --domain=college.example --plan=community --database-ref=COLLEGE\n";
+    echo "  php placement hosted-tenant-list\n";
+    echo "  CPE_ADMIN_PASSWORD=... php placement hosted-provision --tenant=COLLEGE --admin-name=Admin --admin-email=admin@example.edu\n";
+    echo "  php placement hosted-entitle --tenant=COLLEGE --module=MODULE --enabled=0|1\n";
+    echo "  php placement hosted-fleet-plan [--version=CURRENT_VERSION]\n";
+    echo "  php placement hosted-fleet-run [--limit=10]\n";
+    echo "  php placement hosted-support-grant --tenant=COLLEGE --subject=USER --reason=REASON --expires-at=\"YYYY-MM-DD HH:MM:SS\" --confirm=GRANT\n";
+    echo "  php placement hosted-support-revoke --grant=PUBLIC_ID --confirm=PUBLIC_ID\n";
+    echo "  php placement hosted-support-list --tenant=COLLEGE\n";
+    echo "  php placement sso-link --provider=oidc_proxy --subject=SUBJECT --user-email=USER_EMAIL\n";
+    echo "  php placement export [target-directory] [--profile=full|operations|summary|custom]\n";
+    echo "  php placement package [--target=dist] [--force]\n";
+    echo "  php placement verify-package /path/to/campus-placement-engine-version.tar.gz\n";
+    echo "  php placement deliver-notifications [--channel=file|webhook|email|sms|whatsapp] [--limit=100] [--dry-run]\n";
+    echo "  php placement work-outbox [--limit=100]\n";
+    echo "  php placement certify-notifications --channel=sms|whatsapp [--require-live]\n";
+    echo "  php placement smoke-http [--base-url=http://127.0.0.1:8000] [--email=admin@example.test] [--password=password123] [--restricted-email=atlas@example.test]\n";
+    echo "  php placement load-smoke [--base-url=http://127.0.0.1:8000] [--path='/?r=public'] [--requests=50] [--concurrency=5]\n";
+    echo "  php placement browser-qa-plan [--base-url=http://127.0.0.1:8000] [--format=text|markdown]\n";
+    echo "  php placement suggest-slots [COMPANY]\n";
+    echo "  php placement optimize-slots [COMPANY]\n";
+    echo "  php placement assign-slots [COMPANY]\n";
+    echo "  php placement assign-optimized-slots [COMPANY]\n";
+    echo "  php placement publication-check\n";
+}
+
+function upgrade_help(): void
+{
+    echo "Safely apply an installed app upgrade:\n";
+    echo "  php placement upgrade\n";
+    echo "\n";
+    echo "The command checks driver-specific requirements, writes a timestamped database backup,\n";
+    echo "applies migrations, then prints live-day readiness checks. Warnings are reported but\n";
+    echo "do not stop the upgrade; failing readiness checks exit non-zero after migrations.\n";
+}
+
+function config_validate_help(): void
+{
+    echo "Validate a portable configuration JSON without mutating the database:\n";
+    echo "  php placement config-validate /path/to/config.json\n";
+    echo "\n";
+    echo "The command checks schema, portable setting keys, workflow references, status overrides,\n";
+    echo "transition overrides, role names, colors, calendar/audit policy, and normalized board card fields.\n";
+}
+
+function export_snapshot_help(): void
+{
+    echo "Write a CSV export snapshot:\n";
+    echo "  php placement export\n";
+    echo "  php placement export /path/to/export-folder --profile=operations\n";
+    echo "  php placement export --profile=summary\n";
+    echo "\n";
+    echo "Profiles:\n";
+    echo "  full        Complete local audit snapshot, including users, notifications, audit logs, and aggregate summaries.\n";
+    echo "  operations  Placement-day operational records without account tables, notification deliveries, settings, or audit logs.\n";
+    echo "  summary     Aggregate report CSVs only: totals, statuses, company placements, programs, and locations.\n";
+    echo "  custom      Datasets selected by the export_profile_custom_datasets setting.\n";
+    echo "\n";
+    echo "Audit logs include request metadata only when audit_request_metadata is enabled.\n";
+    echo "The target directory must be empty. Real exports are local institutional data and should not be committed.\n";
+}
+
+function serve_help(): void
+{
+    echo "Start the local PHP development server:\n";
+    echo "  php placement serve\n";
+    echo "  php placement serve localhost:8000\n";
+    echo "\n";
+    echo "This is a small wrapper around:\n";
+    echo "  php -S 127.0.0.1:8000 -t public\n";
+    echo "\n";
+    echo "Environment fallback:\n";
+    echo "  CPE_SERVE_ADDRESS=127.0.0.1:8000\n";
+}
+
+function smoke_http_help(): void
+{
+    echo "Run a dependency-free HTTP smoke test against a running PHP server:\n";
+    echo "  php -S 127.0.0.1:8000 -t public\n";
+    echo "  php placement smoke-http --base-url=http://127.0.0.1:8000 --email=admin@example.test --password=password123 --restricted-email=atlas@example.test --restricted-password=password123\n";
+    echo "\n";
+    echo "Environment fallbacks:\n";
+    echo "  CPE_SMOKE_BASE_URL, CPE_SMOKE_EMAIL, CPE_SMOKE_PASSWORD, CPE_ADMIN_PASSWORD\n";
+    echo "  CPE_SMOKE_RESTRICTED_EMAIL, CPE_SMOKE_RESTRICTED_PASSWORD\n";
+}
+
+function load_smoke_help(): void
+{
+    echo "Run a bounded read-only HTTP load probe without adding runtime dependencies:\n";
+    echo "  php placement load-smoke --base-url=http://127.0.0.1:8000 --path='/?r=public' --requests=50 --concurrency=5\n";
+    echo "\n";
+    echo "Use --min-success-rate=1 and --max-p95-ms=2000 to set pass thresholds. The probe uses\n";
+    echo "curl_multi when ext-curl is available and a sequential PHP streams fallback otherwise.\n";
+}
+
+function browser_qa_plan_help(): void
+{
+    echo "Print a deterministic manual/cross-browser QA plan for a local release candidate:\n";
+    echo "  php placement browser-qa-plan\n";
+    echo "  php placement browser-qa-plan --base-url=http://127.0.0.1:8010 --format=markdown\n";
+    echo "\n";
+    echo "Options:\n";
+    echo "  --base-url            Local server URL to place in route checks. Default http://127.0.0.1:8000.\n";
+    echo "  --format              text or markdown. Default text.\n";
+    echo "  --candidate-target    Dense QA candidate threshold. Default 80.\n";
+    echo "  --company-target      Dense QA company threshold. Default 10.\n";
+    echo "\n";
+    echo "Environment fallback:\n";
+    echo "  CPE_QA_BASE_URL\n";
+}
+
+function certify_notifications_help(): void
+{
+    echo "Run SMS/WhatsApp gateway preflight without sending a live message:\n";
+    echo "  php placement certify-notifications --channel=sms\n";
+    echo "  php placement certify-notifications --channel=whatsapp --require-live\n";
+    echo "\n";
+    echo "The command validates local app-side settings, recipient route, gateway URL or local outbox,\n";
+    echo "authorization header syntax, message templates, and rendered JSON payloads. It also prints\n";
+    echo "manual provider, consent, and live-probe checks that must be completed by the institution.\n";
+}
+
+function anonymize_candidate_help(): void
+{
+    echo "Anonymize one candidate while preserving aggregate operational history:\n";
+    echo "  php placement anonymize-candidate C001 --confirm=C001\n";
+    echo "\n";
+    echo "The command rewrites candidate identity fields, closes/redacts candidate-specific\n";
+    echo "wanted/preference queues and notifications, redacts linked notes, and writes a\n";
+    echo "SQLite safety copy before mutation.\n";
+}
+
+function install_help(): void
+{
+    echo "Install a fresh Campus Placement Engine database:\n";
+    echo "  CPE_ADMIN_PASSWORD='password123' php placement install --college='College' --admin-name='Admin' --admin-email=admin@example.test\n";
+    echo "\n";
+    echo "Options:\n";
+    echo "  --college, --college-name     College name.\n";
+    echo "  --site-name                   Displayed site name, default Campus Placement Engine.\n";
+    echo "  --site-tagline                Optional displayed tagline.\n";
+    echo "  --timezone                    Timezone, default Asia/Kolkata.\n";
+    echo "  --cycle-name                  Placement cycle name.\n";
+    echo "  --cycle-type                  final, internship, lateral, pooled, job_fair, or other.\n";
+    echo "  --cycle-start-date            Optional YYYY-MM-DD cycle start date.\n";
+    echo "  --cycle-end-date              Optional YYYY-MM-DD cycle end date.\n";
+    echo "  --non-operating-weekdays      Optional weekdays such as sat,sun.\n";
+    echo "  --non-operating-dates         Optional YYYY-MM-DD dates separated by commas.\n";
+    echo "  --audit-request-metadata      none, ip, user_agent, or both. Default none.\n";
+    echo "  --workflow                    Starter workflow key, default default.\n";
+    echo "  --candidate-label             Singular candidate label, default Candidate.\n";
+    echo "  --candidates-label            Plural candidate label, default Candidates.\n";
+    echo "  --company-label               Singular company label, default Company.\n";
+    echo "  --companies-label             Plural company label, default Companies.\n";
+    echo "  --admin-name                  First administrator name.\n";
+    echo "  --admin-email                 First administrator email.\n";
+    echo "  --admin-password              First administrator password. Prefer CPE_ADMIN_PASSWORD.\n";
+    echo "  --seed-demo                   Load the small synthetic demo dataset.\n";
+}
+
+function cli_options(array $args): array
+{
+    $options = [];
+    for ($i = 0; $i < count($args); $i++) {
+        $arg = (string) $args[$i];
+        if (!str_starts_with($arg, '--')) {
+            throw new RuntimeException('Unexpected argument: ' . $arg);
+        }
+        $pair = substr($arg, 2);
+        if ($pair === '') {
+            throw new RuntimeException('Empty option is not valid.');
+        }
+        if (str_contains($pair, '=')) {
+            [$key, $value] = explode('=', $pair, 2);
+            $options[$key] = $value;
+            continue;
+        }
+        if (isset($args[$i + 1]) && !str_starts_with((string) $args[$i + 1], '--')) {
+            $options[$pair] = (string) $args[++$i];
+            continue;
+        }
+        $options[$pair] = '1';
+    }
+    return $options;
+}
+
+function cli_truthy(mixed $value): bool
+{
+    return in_array(strtolower((string) $value), ['1', 'true', 'yes', 'on'], true);
+}

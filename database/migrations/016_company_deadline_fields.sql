@@ -1,0 +1,2 @@
+ALTER TABLE companies ADD COLUMN deadline_day TEXT NOT NULL DEFAULT '';
+ALTER TABLE companies ADD COLUMN deadline_at TEXT NOT NULL DEFAULT '';

@@ -1,0 +1,2 @@
+company_code,round_sequence,round_label,sequence,room,schedule_day,starts_at,ends_at,capacity,schedule_status,notes
+KITE,1,Case discussion,1,Room A1,1,09:00,09:45,2,active,Case packets ready
