@@ -44,6 +44,15 @@
 /.playwright-cli/
 /output/playwright/
 
+# Public website dependencies and generated QA/build output. Website source is
+# tracked, but the self-hosted PHP release remains dependency-light.
+/website/node_modules/
+/website/dist/
+/website/coverage/
+/website/.playwright-cli/
+/website/playwright-report/
+/website/test-results/
+
 # Generated release archives; verify these before publishing them externally.
 /dist/
 

@@ -1928,7 +1928,24 @@ function publication_forbidden_files(string $root): array
                     return true;
                 }
                 $relative = publication_relative_path($root, $file->getPathname());
-                return !in_array($relative, ['.git', '.legacy-private', '.playwright-cli', 'data/backups', 'data/config', 'data/exports', 'data/imports', 'data/privacy', 'dist', 'http'], true);
+                return !in_array($relative, [
+                    '.git',
+                    '.legacy-private',
+                    '.playwright-cli',
+                    'data/backups',
+                    'data/config',
+                    'data/exports',
+                    'data/imports',
+                    'data/privacy',
+                    'dist',
+                    'http',
+                    'website/.playwright-cli',
+                    'website/coverage',
+                    'website/dist',
+                    'website/node_modules',
+                    'website/playwright-report',
+                    'website/test-results',
+                ], true);
             }
         )
     );
@@ -2015,7 +2032,23 @@ function publication_secret_patterns(): array
 function publication_secret_scan_files(string $root): array
 {
     $files = [];
-    $skipDirs = ['.git', '.legacy-private', '.playwright-cli', 'data', 'dist', 'http', 'node_modules', 'output', 'vendor'];
+    $skipDirs = [
+        '.git',
+        '.legacy-private',
+        '.playwright-cli',
+        'data',
+        'dist',
+        'http',
+        'node_modules',
+        'output',
+        'vendor',
+        'website/.playwright-cli',
+        'website/coverage',
+        'website/dist',
+        'website/node_modules',
+        'website/playwright-report',
+        'website/test-results',
+    ];
     $iterator = new RecursiveIteratorIterator(
         new RecursiveCallbackFilterIterator(
             new RecursiveDirectoryIterator($root, FilesystemIterator::SKIP_DOTS),
