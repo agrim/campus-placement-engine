@@ -103,9 +103,9 @@ First-run installation is transactional after migrations and validates an IANA
 timezone such as `Asia/Kolkata`; the installer lock is written only after the
 administrator, optional demo data, portal kernel, and workflow setup succeed.
 
-Do not use shared schemas or a `tenant_id` column as the hosted isolation model.
-Each hosted institution resolves to its own PostgreSQL database. See
-`hosted-operations.md`.
+Do not use shared schemas or a `tenant_id` column as a managed-hosting isolation
+model. Each hosted institution resolves to its own PostgreSQL database through
+the external adapter documented in `managed-hosting-contract.md`.
 
 ## Apache Or Shared PHP Hosting
 

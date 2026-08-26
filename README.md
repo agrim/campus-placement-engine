@@ -3,9 +3,10 @@
 A lightweight placement-day operations engine for colleges, and the first
 flagship module of an open-source Career Services Portal.
 
-The same application now supports a downloadable self-hosted edition and the
-data plane for a managed hosted service without forking placement behaviour. The accepted
-architecture and staged implementation gates are documented in
+This public repository is the complete downloadable, self-hosted product. It
+also exposes a small versioned integration contract through which a separate
+management plane can run the same Engine release as a hosted service without
+forking placement behaviour. The accepted architecture and staged implementation gates are documented in
 [docs/career-services-portal-architecture.md](docs/career-services-portal-architecture.md).
 
 This modernization is intentionally dependency-light:
@@ -168,10 +169,10 @@ decisions.
 - `public/` - web entrypoints and tiny static assets.
 - `app/Core/` - shared portal contracts, module lifecycle, events, privacy, and portability.
 - `app/Modules/` - Placement Operations and Career Advising module ownership.
-- `app/Hosted/` - metadata-only hosted control plane, tenant resolution, provisioning, and fleet operations.
+- `app/Hosted/` - managed-hosting integration contract and tenant-bound runtime context.
 - `app/` - controllers, domain logic, installer, imports, and security helpers.
 - `config/` - default app and workflow configuration.
-- `database/` - SQLite/PostgreSQL data-plane migrations and control-plane migrations.
+- `database/` - SQLite/PostgreSQL institution data-plane migrations.
 - `examples/config-templates/` - portable starter configuration JSON files.
 - `data/` - local runtime database files, ignored by Git.
 - `docs/` - modernization and deployment notes.
@@ -184,10 +185,10 @@ For Apache, Nginx, shared-hosting, and release-package deployment, see
 For supported environment variables and local secret-file boundaries, see
 [docs/environment.md](docs/environment.md) and
 [examples/env/local.env.example](examples/env/local.env.example).
-The separate [hosted environment example](examples/env/hosted.env.example)
-keeps advanced SaaS variables out of the normal college setup path.
-For hosted tenant provisioning, entitlements, and fleet upgrades, see
-[docs/hosted-operations.md](docs/hosted-operations.md). For tested backup and
+For the stable boundary used by a separate managed service, see
+[docs/managed-hosting-contract.md](docs/managed-hosting-contract.md). Managed
+tenant provisioning, billing, infrastructure, entitlements, and fleet operations
+are intentionally not part of this public repository. For tested backup and
 restore procedures, see [docs/disaster-recovery.md](docs/disaster-recovery.md).
 For module boundaries and extension rules, see
 [docs/module-development.md](docs/module-development.md). For health, metrics,

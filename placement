@@ -16,10 +16,6 @@ use App\Core\Privacy\PortalPrivacyService;
 use App\Core\Backup\DatabaseBackupService;
 use App\Core\Backup\DatabaseRestoreService;
 use App\Core\Events\DomainEventOutboxWorker;
-use App\Hosted\ControlPlane\HostedControlPlane;
-use App\Hosted\Operations\FleetUpgradeService;
-use App\Hosted\Operations\ProvisioningService;
-use App\Hosted\Tenant\TenantDatabaseResolver;
 use App\Domain\ConfigurationSnapshotService;
 use App\Domain\NotificationDeliveryService;
 use App\Domain\ReadinessService;
@@ -72,16 +68,6 @@ try {
         'module-list' => module_list(),
         'module-enable' => module_enable(array_slice($argv, 2)),
         'module-disable' => module_disable(array_slice($argv, 2)),
-        'hosted-control-migrate' => hosted_control_migrate(),
-        'hosted-tenant-create' => hosted_tenant_create(array_slice($argv, 2)),
-        'hosted-tenant-list' => hosted_tenant_list(),
-        'hosted-provision' => hosted_provision(array_slice($argv, 2)),
-        'hosted-entitle' => hosted_entitle(array_slice($argv, 2)),
-        'hosted-fleet-plan' => hosted_fleet_plan(array_slice($argv, 2)),
-        'hosted-fleet-run' => hosted_fleet_run(array_slice($argv, 2)),
-        'hosted-support-grant' => hosted_support_grant(array_slice($argv, 2)),
-        'hosted-support-revoke' => hosted_support_revoke(array_slice($argv, 2)),
-        'hosted-support-list' => hosted_support_list(array_slice($argv, 2)),
         'sso-link' => sso_link(array_slice($argv, 2)),
         'export' => export_snapshot(array_slice($argv, 2)),
         'package' => package_release(array_slice($argv, 2)),
@@ -650,168 +636,6 @@ function module_disable(array $args): void
     }
     (new ModuleLifecycleService(Database::connection()))->disable($moduleKey);
     echo "Module disabled; data retained: {$moduleKey}\n";
-}
-
-function hosted_control_migrate(): void
-{
-    $controlPlane = HostedControlPlane::fromEnvironment();
-    $controlPlane->migrate();
-    echo "Hosted control-plane migrations applied ({$controlPlane->driver()}).\n";
-    echo "Control plane: {$controlPlane->identifier()}\n";
-}
-
-function hosted_tenant_create(array $args): void
-{
-    $options = cli_options($args);
-    $controlPlane = HostedControlPlane::fromEnvironment();
-    $tenant = $controlPlane->createTenant([
-        'slug' => (string) ($options['slug'] ?? ''),
-        'name' => (string) ($options['name'] ?? ''),
-        'domain' => (string) ($options['domain'] ?? ''),
-        'plan_key' => (string) ($options['plan'] ?? 'community'),
-        'database_reference' => (string) ($options['database-ref'] ?? ''),
-        'region' => (string) ($options['region'] ?? 'local'),
-    ], hosted_operator());
-    echo "Hosted tenant recorded: {$tenant['slug']} ({$tenant['tenant_public_id']})\n";
-    echo "Domain: {$tenant['hostname']}\n";
-    echo "Database secret: CPE_TENANT_DATABASE_URL_{$tenant['database_reference']}\n";
-    echo "Status: {$tenant['tenant_status']}\n";
-}
-
-function hosted_tenant_list(): void
-{
-    $rows = HostedControlPlane::fromEnvironment()->tenants();
-    echo "slug,name,domain,plan,status,deployment,release,database_reference\n";
-    $handle = fopen('php://output', 'w');
-    foreach ($rows as $row) {
-        Csv::writeRow($handle, [
-            $row['slug'],
-            $row['name'],
-            $row['hostname'],
-            $row['plan_key'],
-            $row['tenant_status'],
-            $row['deployment_status'],
-            $row['release_version'],
-            $row['database_reference'],
-        ]);
-    }
-    fclose($handle);
-}
-
-function hosted_provision(array $args): void
-{
-    $options = cli_options($args);
-    $tenantKey = trim((string) ($options['tenant'] ?? ''));
-    $password = (string) (getenv('CPE_ADMIN_PASSWORD') ?: '');
-    if ($tenantKey === '' || $password === '') {
-        throw new RuntimeException('Use hosted-provision --tenant=SLUG with CPE_ADMIN_PASSWORD set.');
-    }
-    $controlPlane = HostedControlPlane::fromEnvironment();
-    $result = (new ProvisioningService($controlPlane, new TenantDatabaseResolver($controlPlane)))->provision($tenantKey, [
-        'site_name' => (string) ($options['site-name'] ?? 'Career Services Portal'),
-        'timezone' => (string) ($options['timezone'] ?? 'UTC'),
-        'cycle_name' => (string) ($options['cycle-name'] ?? ''),
-        'workflow' => (string) ($options['workflow'] ?? 'default'),
-        'admin_name' => (string) ($options['admin-name'] ?? ''),
-        'admin_email' => (string) ($options['admin-email'] ?? ''),
-        'admin_password' => $password,
-        'seed_demo' => cli_truthy($options['seed-demo'] ?? ''),
-    ], hosted_operator());
-    echo "Hosted tenant provisioned: {$result['tenant']['slug']}\n";
-    echo "Release: {$result['release_version']}\n";
-}
-
-function hosted_entitle(array $args): void
-{
-    $options = cli_options($args);
-    $tenant = trim((string) ($options['tenant'] ?? ''));
-    $module = strtolower(trim((string) ($options['module'] ?? '')));
-    $enabled = strtolower(trim((string) ($options['enabled'] ?? '')));
-    if ($tenant === '' || !array_key_exists($module, cpe_config('modules', [])) || !in_array($enabled, ['0', '1'], true)) {
-        throw new RuntimeException('Use hosted-entitle --tenant=SLUG --module=MODULE --enabled=0|1.');
-    }
-    HostedControlPlane::fromEnvironment()->setEntitlement($tenant, $module, $enabled === '1', hosted_operator());
-    echo "Hosted entitlement updated: {$tenant} {$module}=" . ($enabled === '1' ? 'enabled' : 'disabled') . "\n";
-}
-
-function hosted_fleet_plan(array $args): void
-{
-    $options = cli_options($args);
-    $version = (string) ($options['version'] ?? cpe_config('app.version', '0.0.0'));
-    $controlPlane = HostedControlPlane::fromEnvironment();
-    $jobs = (new FleetUpgradeService($controlPlane, new TenantDatabaseResolver($controlPlane)))->plan($version);
-    echo "Fleet upgrade jobs planned: " . count($jobs) . "\n";
-    echo "Target release: {$version}\n";
-}
-
-function hosted_fleet_run(array $args): void
-{
-    $options = cli_options($args);
-    $limit = (int) ($options['limit'] ?? 10);
-    $controlPlane = HostedControlPlane::fromEnvironment();
-    $results = (new FleetUpgradeService($controlPlane, new TenantDatabaseResolver($controlPlane)))->run($limit);
-    $failed = false;
-    foreach ($results as $result) {
-        echo strtoupper($result['status']) . " {$result['tenant']}";
-        echo isset($result['version']) ? " -> {$result['version']}" : '';
-        echo isset($result['backup']) ? " backup={$result['backup']}" : '';
-        echo isset($result['error']) ? " error={$result['error']}" : '';
-        echo "\n";
-        $failed = $failed || $result['status'] === 'failed';
-    }
-    if ($results === []) {
-        echo "No pending fleet upgrade jobs.\n";
-    }
-    if ($failed) {
-        throw new RuntimeException('One or more fleet upgrades failed.');
-    }
-}
-
-function hosted_support_grant(array $args): void
-{
-    $options = cli_options($args);
-    if ((string) ($options['confirm'] ?? '') !== 'GRANT') {
-        throw new RuntimeException('Support access requires --confirm=GRANT.');
-    }
-    $result = HostedControlPlane::fromEnvironment()->grantSupportAccess(
-        (string) ($options['tenant'] ?? ''),
-        (string) ($options['subject'] ?? ''),
-        (string) ($options['reason'] ?? ''),
-        (string) ($options['expires-at'] ?? ''),
-        hosted_operator(),
-    );
-    echo "Support access grant recorded: {$result['public_id']} until {$result['expires_at']} UTC\n";
-}
-
-function hosted_support_revoke(array $args): void
-{
-    $options = cli_options($args);
-    $grant = (string) ($options['grant'] ?? '');
-    if ($grant === '' || (string) ($options['confirm'] ?? '') !== $grant) {
-        throw new RuntimeException('Use hosted-support-revoke --grant=PUBLIC_ID --confirm=PUBLIC_ID.');
-    }
-    HostedControlPlane::fromEnvironment()->revokeSupportAccess($grant, hosted_operator());
-    echo "Support access revoked: {$grant}\n";
-}
-
-function hosted_support_list(array $args): void
-{
-    $options = cli_options($args);
-    $tenant = (string) ($options['tenant'] ?? '');
-    if ($tenant === '') {
-        throw new RuntimeException('Use hosted-support-list --tenant=SLUG.');
-    }
-    echo "public_id,subject,reason,expires_at,created_at\n";
-    $handle = fopen('php://output', 'w');
-    foreach (HostedControlPlane::fromEnvironment()->activeSupportGrants($tenant) as $grant) {
-        Csv::writeRow($handle, $grant);
-    }
-    fclose($handle);
-}
-
-function hosted_operator(): string
-{
-    return trim((string) (getenv('CPE_OPERATOR_ID') ?: 'cli-operator'));
 }
 
 function sso_link(array $args): void
@@ -1886,7 +1710,7 @@ function publication_check(): void
     }
 
     $gitignore = is_file(__DIR__ . '/.gitignore') ? (string) file_get_contents(__DIR__ . '/.gitignore') : '';
-    foreach (['/.legacy-private/', '/http/', '/dist/', '/.env', '/.env.*', '/config/local.php', '/data/*.sqlite', '/data/backups/', '/data/config/', '/data/imports/', '*.zip', '*.7z', '*.rar', '*.xlsx', '*.docx', '*.sql', '!/database/migrations/*.sql', '!/database/migrations/pgsql/*.sql', '!/database/control-plane/**/*.sql'] as $pattern) {
+    foreach (['/.legacy-private/', '/http/', '/dist/', '/.env', '/.env.*', '/config/local.php', '/data/*.sqlite', '/data/backups/', '/data/config/', '/data/imports/', '*.zip', '*.7z', '*.rar', '*.xlsx', '*.docx', '*.sql', '!/database/migrations/*.sql', '!/database/migrations/pgsql/*.sql'] as $pattern) {
         if (!str_contains($gitignore, $pattern)) {
             $failures[] = "Missing .gitignore protection: {$pattern}";
         }
@@ -1917,7 +1741,6 @@ function publication_forbidden_files(string $root): array
     $forbiddenExtensions = ['7z', 'rar', 'zip', 'tar', 'gz', 'tgz', 'xlsx', 'xls', 'docx', 'doc', 'pptx', 'ppt', 'pdf', 'sql'];
     $allowedSqlPrefixes = [
         $root . '/database/migrations/',
-        $root . '/database/control-plane/',
     ];
     $failures = [];
     $iterator = new RecursiveIteratorIterator(
@@ -2145,16 +1968,6 @@ function help(): void
     echo "  php placement module-list\n";
     echo "  php placement module-enable --module=MODULE_KEY\n";
     echo "  php placement module-disable --module=MODULE_KEY --confirm=MODULE_KEY\n";
-    echo "  php placement hosted-control-migrate\n";
-    echo "  php placement hosted-tenant-create --slug=COLLEGE --name=\"College\" --domain=college.example --plan=community --database-ref=COLLEGE\n";
-    echo "  php placement hosted-tenant-list\n";
-    echo "  CPE_ADMIN_PASSWORD=... php placement hosted-provision --tenant=COLLEGE --admin-name=Admin --admin-email=admin@example.edu\n";
-    echo "  php placement hosted-entitle --tenant=COLLEGE --module=MODULE --enabled=0|1\n";
-    echo "  php placement hosted-fleet-plan [--version=CURRENT_VERSION]\n";
-    echo "  php placement hosted-fleet-run [--limit=10]\n";
-    echo "  php placement hosted-support-grant --tenant=COLLEGE --subject=USER --reason=REASON --expires-at=\"YYYY-MM-DD HH:MM:SS\" --confirm=GRANT\n";
-    echo "  php placement hosted-support-revoke --grant=PUBLIC_ID --confirm=PUBLIC_ID\n";
-    echo "  php placement hosted-support-list --tenant=COLLEGE\n";
     echo "  php placement sso-link --provider=oidc_proxy --subject=SUBJECT --user-email=USER_EMAIL\n";
     echo "  php placement export [target-directory] [--profile=full|operations|summary|custom]\n";
     echo "  php placement package [--target=dist] [--force]\n";

@@ -4,11 +4,13 @@ Status: accepted implementation direction
 
 Date: 2026-07-15
 
-Implementation state: the portal kernel, Placement Operations module, Career
-Advising proof module, dual database contract, logical portability bundle, and
-hosted control plane described here are implemented. The product remains
-pre-1.0 while broader institutional pilots, release governance, provider
-integrations, and operational recovery exercises mature.
+Implementation state: the public Engine contains the portal kernel, Placement
+Operations module, Career Advising proof module, dual database contract, logical
+portability bundle, and versioned managed-hosting seam. The hosted control plane
+described here is implemented in a separate private Cloud repository that
+consumes pinned Engine releases. The product remains pre-1.0 while broader
+institutional pilots, release governance, provider integrations, and operational
+recovery exercises mature.
 
 ## Product Direction
 
@@ -203,9 +205,9 @@ used at import, export, API, and cross-database boundaries.
     monitoring, disaster recovery, outbox delivery, load probes, and security
     gates.
 
-Steps 1 through 11 now have working implementations and automated contracts.
-The next work is release qualification and pilot feedback, not a new platform
-rewrite.
+Steps 1 through 11 have working implementations and automated contracts across
+the public Engine and separate Cloud management plane. The next work is release
+qualification and pilot feedback, not a product fork or platform rewrite.
 
 ## Non-goals During Placement 1.0
 

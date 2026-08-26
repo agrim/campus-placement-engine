@@ -9,14 +9,16 @@ the two supported database shapes and real HTTP behavior.
 php placement doctor
 php tests/run.php
 php tests/database_contract.php
-php tests/hosted_control_plane.php
+php tests/managed_hosting_contract.php
 php placement publication-check
 ```
 
 `tests/run.php` is the broad SQLite integration suite. The database contract is
-the same behavioral slice run against SQLite or PostgreSQL. The hosted contract
-proves control/data-plane separation, domain resolution, entitlements, session
-tenant binding, support grants, and backup-first fleet upgrades.
+the same behavioral slice run against SQLite or PostgreSQL. The managed-hosting
+contract proves that an external resolver can activate an isolated institution
+context while missing adapters, mismatched identities, and cross-tenant sessions
+fail closed. Control-plane and fleet-operation tests belong to the separate
+management-plane repository.
 
 ## PostgreSQL Contract
 

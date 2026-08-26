@@ -1350,7 +1350,7 @@ test_case('open-source release governance files and ignore protections exist', f
         assert_true(str_contains($nginx, $snippet), "Missing Nginx deployment safeguard: {$snippet}");
     }
     $gitignore = (string) file_get_contents($root . '/.gitignore');
-    foreach (['/.legacy-private/', '/http/', '/dist/', '/website/node_modules/', '/website/dist/', '/website/coverage/', '/website/playwright-report/', '/website/test-results/', '/.env', '/.env.*', '/config/local.php', '/data/*.sqlite', '/data/backups/', '/data/config/', '/data/imports/', '/data/privacy/', '*.zip', '*.7z', '*.rar', '*.xlsx', '*.docx', '*.sql', '!/database/migrations/*.sql', '!/database/migrations/pgsql/*.sql', '!/database/control-plane/**/*.sql'] as $pattern) {
+    foreach (['/.legacy-private/', '/http/', '/dist/', '/website/node_modules/', '/website/dist/', '/website/coverage/', '/website/playwright-report/', '/website/test-results/', '/.env', '/.env.*', '/config/local.php', '/data/*.sqlite', '/data/backups/', '/data/config/', '/data/imports/', '/data/privacy/', '*.zip', '*.7z', '*.rar', '*.xlsx', '*.docx', '*.sql', '!/database/migrations/*.sql', '!/database/migrations/pgsql/*.sql'] as $pattern) {
         assert_true(str_contains($gitignore, $pattern), "Missing .gitignore protection: {$pattern}");
     }
     $migrationGuide = (string) file_get_contents($root . '/docs/migration-from-legacy.md');

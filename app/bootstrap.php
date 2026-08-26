@@ -233,9 +233,22 @@ function view(string $template, array $data = []): void
     require $viewFile;
 }
 
+function cpe_load_platform_bootstrap(): void
+{
+    $file = trim((string) (getenv('CPE_PLATFORM_BOOTSTRAP') ?: ''));
+    if ($file === '') {
+        return;
+    }
+    if (!str_starts_with($file, DIRECTORY_SEPARATOR) || !is_file($file) || !is_readable($file)) {
+        throw new RuntimeException('CPE_PLATFORM_BOOTSTRAP must identify a readable absolute file.');
+    }
+    require_once $file;
+}
+
 cpe_send_security_headers();
 if (!defined('CPE_SKIP_HTTP_BOOTSTRAP')) {
     try {
+        cpe_load_platform_bootstrap();
         \App\Hosted\HostedBootstrap::resolveHttpRequest();
     } catch (\App\Hosted\Tenant\HostedResolutionException $e) {
         error_log('Hosted tenant resolution failed: ' . $e->getMessage());
@@ -244,6 +257,14 @@ if (!defined('CPE_SKIP_HTTP_BOOTSTRAP')) {
             header('Content-Type: text/plain; charset=UTF-8');
         }
         echo $e->httpStatus() === 404 ? "Hosted site not found.\n" : "Hosted site temporarily unavailable.\n";
+        exit;
+    } catch (Throwable $e) {
+        error_log('Managed-hosting bootstrap failed: ' . $e->getMessage());
+        if (!headers_sent()) {
+            http_response_code(503);
+            header('Content-Type: text/plain; charset=UTF-8');
+        }
+        echo "Hosted site temporarily unavailable.\n";
         exit;
     }
     cpe_start_session();

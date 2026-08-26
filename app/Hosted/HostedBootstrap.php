@@ -4,17 +4,33 @@ declare(strict_types=1);
 
 namespace App\Hosted;
 
-use App\Hosted\ControlPlane\HostedControlPlane;
 use App\Hosted\Tenant\HostedResolutionException;
-use App\Hosted\Tenant\TenantDatabaseResolver;
+use App\Hosted\Tenant\TenantResolver;
 use App\Support\Database;
 use RuntimeException;
 
 final class HostedBootstrap
 {
+    public const CONTRACT_VERSION = 1;
+
+    private static ?TenantResolver $resolver = null;
+
     public static function enabled(): bool
     {
         return in_array(strtolower(trim((string) (getenv('CPE_HOSTED_MODE') ?: ''))), ['1', 'true', 'yes', 'on'], true);
+    }
+
+    public static function registerResolver(TenantResolver $resolver): void
+    {
+        if (self::$resolver !== null && self::$resolver !== $resolver) {
+            throw new RuntimeException('A managed-hosting tenant resolver is already registered.');
+        }
+        self::$resolver = $resolver;
+    }
+
+    public static function resetResolver(): void
+    {
+        self::$resolver = null;
     }
 
     public static function resolveHttpRequest(): void
@@ -26,7 +42,15 @@ final class HostedBootstrap
         if ($host === '') {
             throw new HostedResolutionException('Hosted requests require an exact Host header.', 400);
         }
-        $resolved = (new TenantDatabaseResolver(HostedControlPlane::fromEnvironment()))->resolveHost($host);
+        self::resolveHost($host);
+    }
+
+    public static function resolveHost(string $host): void
+    {
+        if (self::$resolver === null) {
+            throw new HostedResolutionException('Managed hosting is enabled without a tenant resolver.', 503);
+        }
+        $resolved = self::$resolver->resolveHost($host);
         Database::useProvider($resolved->provider());
         HostedContext::activate($resolved);
         if (Database::isInstalled()) {
