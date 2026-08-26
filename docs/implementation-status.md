@@ -2,6 +2,14 @@
 
 Date: 2026-07-18
 
+> Repository-boundary update, 2026-08-26: hosted control-plane, tenant
+> provisioning, fleet-operation, and support-management implementation now lives
+> in a separate private Cloud repository. This public repository retains the
+> independently installable Engine and its versioned managed-hosting contract.
+> The dated verification evidence below describes the combined implementation
+> before that mechanical extraction; equivalent cross-repository contracts must
+> continue to pass.
+
 ## Implemented
 
 ### Career Services Portal Productization

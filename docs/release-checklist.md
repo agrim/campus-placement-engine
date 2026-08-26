@@ -11,8 +11,9 @@ Use this before a public alpha tag or downloadable archive.
 - Run `php tests/run.php`.
 - Run `php tests/database_contract.php` against SQLite and a fresh PostgreSQL 17
   database.
-- Run `php tests/hosted_control_plane.php` and migrate a fresh PostgreSQL control
-  plane; confirm it has no operational candidate/application tables.
+- Run `php tests/managed_hosting_contract.php` and confirm the external resolver
+  seam, tenant database identity, module entitlements, and session binding fail
+  closed as documented.
 - Run PHP syntax lint over app, config, public, tests, and `placement`.
 - Run `php placement publication-check` and investigate any forbidden-file or
   potential-secret finding before packaging.
@@ -114,8 +115,8 @@ Use this before a public alpha tag or downloadable archive.
 - `SECURITY.md`, `CONTRIBUTING.md`, `CODE_OF_CONDUCT.md`, and `LICENSE` are
   present.
 - Implementation status lists known gaps honestly.
-- Hosted operations, disaster recovery, security operations, module development,
-  and testing runbooks are current.
+- Managed-hosting contract, disaster recovery, security operations, module
+  development, and testing runbooks are current.
 
 ## Operational Smoke
 

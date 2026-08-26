@@ -49,26 +49,13 @@ jobs:
         run: |
           php tests/run.php
           php tests/database_contract.php
-          php tests/hosted_control_plane.php
+          php tests/managed_hosting_contract.php
 
       - name: Run PostgreSQL database contract
         env:
           CPE_DB_DRIVER: pgsql
           CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_contract?sslmode=disable
         run: php tests/database_contract.php
-
-      - name: Validate PostgreSQL control-plane migrations
-        env:
-          PGPASSWORD: cpe-contract-password
-        run: psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_control'
-
-      - name: Validate PostgreSQL control-plane isolation
-        env:
-          CPE_CONTROL_PLANE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_control?sslmode=disable
-          PGPASSWORD: cpe-contract-password
-        run: |
-          php placement hosted-control-migrate
-          test "$(psql -h 127.0.0.1 -U cpe -d cpe_control -tAc "SELECT to_regclass('public.candidates') IS NULL")" = t
 
       - name: Check publication hygiene
         run: |

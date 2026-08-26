@@ -6,8 +6,8 @@ PHP-FPM pool, web host control panel, or secret manager. Never commit live
 passwords, tokens, database URLs, phone routes, or gateway credentials.
 
 The default self-hosted install needs no variables. Start from
-`examples/env/local.env.example` only when an override is useful. Hosted
-operators can review the synthetic `examples/env/hosted.env.example` separately.
+`examples/env/local.env.example` only when an override is useful. Managed-service
+control-plane and infrastructure variables live outside this public repository.
 
 ## Local Setup
 
@@ -89,21 +89,16 @@ Run `php placement work-outbox` from cron or the hosted scheduler. With no
 external sink, the command acknowledges events as internal after in-process
 module subscribers have run.
 
-## Hosted Control Plane
+## Managed-hosting adapter
 
 | Variable | Purpose |
 |---|---|
-| `CPE_HOSTED_MODE` | Enables HTTP tenant resolution. |
-| `CPE_CONTROL_PLANE_DATABASE_URL` | Preferred PostgreSQL control-plane URL. |
-| `CPE_CONTROL_PLANE_DB_PATH` | SQLite control-plane path for local contracts only. |
-| `CPE_TENANT_DATABASE_URL_<REF>` | PostgreSQL secret for the opaque tenant database reference. |
-| `CPE_TENANT_DB_PATH_<REF>` | Local SQLite tenant path, accepted only with the test-only switch below. |
-| `CPE_HOSTED_ALLOW_SQLITE_TENANTS` | Allows local hosted-contract SQLite tenants. Never enable in production. |
-| `CPE_HOSTED_BACKUP_DIR` | Fleet-upgrade backup destination. |
+| `CPE_HOSTED_MODE` | Enables the registered managed-hosting tenant resolver. |
+| `CPE_PLATFORM_BOOTSTRAP` | Readable absolute path to the management plane's Engine adapter. |
 
-The suffix `<REF>` is the uppercase database reference stored in the control
-plane, using letters, digits, and underscores. The control plane never stores
-the resolved database URL or administrator password.
+These variables are not used by ordinary self-hosted installations. Tenant,
+domain, database-secret, provisioning, and fleet configuration belongs to the
+separate management plane. See `managed-hosting-contract.md`.
 
 ## Imports And QA
 
