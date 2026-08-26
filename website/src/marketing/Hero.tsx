@@ -10,7 +10,7 @@ export function Hero() {
           <p>Prevent missed interviews. Resolve scheduling clashes. Help more candidates get placed.</p>
           <div className="hero-actions">
             <a className="button button-primary" href="#demo">Start the placement-day demo <Icon name="arrow" /></a>
-            <a className="text-link" href="https://github.com/agrim/campus-placement-engine">View source <Icon name="external" size={17} /></a>
+            <a className="text-link" href="https://github.com/agrim/campus-placement-engine/releases">Download the self-hosted alpha <Icon name="external" size={17} /></a>
           </div>
         </div>
 

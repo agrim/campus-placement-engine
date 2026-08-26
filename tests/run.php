@@ -294,6 +294,8 @@ test_case('module lifecycle disables routes without deleting placement data', fu
     $manifest = ModuleManifest::fromArray('placement', cpe_config('modules.placement'));
     assert_same('Placement Operations', $manifest->name(), 'Placement manifest name');
     assert_same('0.1.0', $manifest->version(), 'Placement manifest version');
+    assert_same('>=0.1.0-alpha.1', $manifest->coreRequires(), 'Placement manifest prerelease core requirement');
+    $manifest->assertCompatible('0.1.0-alpha.1', cpe_config('modules'));
     assert_true(in_array('placement.application.transition', $manifest->capabilities(), true), 'Placement manifest capabilities');
 
     $service = new ModuleLifecycleService($pdo);
@@ -1307,6 +1309,8 @@ test_case('open-source release governance files and ignore protections exist', f
         'docs/migration-from-legacy.md',
         'docs/privacy-retention.md',
         'docs/release-checklist.md',
+        'docs/releases/v0.1.0-alpha.1.md',
+        'INSTALL.md',
         'examples/csv-templates/README.md',
         'examples/csv-templates/candidate_unavailability_windows.csv',
         'examples/config-templates/default-placement-day.json',
@@ -1320,13 +1324,14 @@ test_case('open-source release governance files and ignore protections exist', f
         'examples/deployment/apache-vhost.conf',
         'examples/deployment/nginx-server.conf',
         '.github/workflows/ci.yml',
+        '.github/workflows/release.yml',
         '.github/ISSUE_TEMPLATE/bug_report.md',
         '.github/ISSUE_TEMPLATE/feature_request.md',
     ] as $path) {
         assert_true(is_file($root . '/' . $path), "Missing release governance file: {$path}");
     }
     $ci = (string) file_get_contents($root . '/.github/workflows/ci.yml');
-    foreach (['php tests/run.php', 'php placement publication-check', 'php placement package', 'php placement verify-package', 'php placement install', 'php placement upgrade', 'php placement serve --help', 'php placement install-demo', 'php placement seed-large-demo', 'php placement browser-qa-plan', 'php placement smoke-http', 'php placement readiness', 'php placement metrics', 'php placement placement-report', 'php placement privacy-report', 'php placement export', 'php placement rollback-import', 'php placement config-export', 'php placement config-validate', 'php placement config-import', 'php placement deliver-notifications', 'php placement certify-notifications', 'php placement optimize-slots', 'php placement assign-optimized-slots', 'php -l placement'] as $command) {
+    foreach (['php tests/run.php', 'php placement publication-check', 'php placement package', 'php placement verify-package', 'php placement install', 'php placement upgrade', 'php placement setup --check', 'php placement serve --help', 'php placement install-demo', 'php placement seed-large-demo', 'php placement browser-qa-plan', 'php placement smoke-http', 'php placement readiness', 'php placement metrics', 'php placement placement-report', 'php placement privacy-report', 'php placement export', 'php placement rollback-import', 'php placement config-export', 'php placement config-validate', 'php placement config-import', 'php placement deliver-notifications', 'php placement certify-notifications', 'php placement optimize-slots', 'php placement assign-optimized-slots', 'php -l placement'] as $command) {
         assert_true(str_contains($ci, $command), "Missing CI command: {$command}");
     }
     $deployment = (string) file_get_contents($root . '/docs/deployment.md');
@@ -1394,13 +1399,22 @@ test_case('release package includes public source and excludes private runtime d
         [$code, $stdout, $stderr] = run_cli(['package', '--target=' . $target]);
         assert_same(0, $code, 'Package command should succeed: ' . $stderr);
         assert_true(str_contains($stdout, 'Release package written'), 'Package command should report archive path');
-        $archivePath = $target . '/campus-placement-engine-' . cpe_config('app.version', '0.1.0') . '.tar.gz';
-        $checksumPath = $archivePath . '.sha256';
-        assert_true(is_file($archivePath), 'Release package archive should exist');
-        assert_true(is_file($checksumPath), 'Release package checksum should exist');
-        assert_true(str_contains((string) file_get_contents($checksumPath), hash_file('sha256', $archivePath)), 'Release package checksum should match archive');
+        $rootName = 'campus-placement-engine-' . cpe_config('app.version', '0.1.0');
+        $tarPath = $target . '/' . $rootName . '.tar.gz';
+        $zipPath = $target . '/' . $rootName . '.zip';
+        $checksumManifestPath = $target . '/SHA256SUMS';
+        foreach ([$tarPath, $zipPath] as $archivePath) {
+            $checksumPath = $archivePath . '.sha256';
+            assert_true(is_file($archivePath), 'Release package archive should exist: ' . $archivePath);
+            assert_true(is_file($checksumPath), 'Release package checksum should exist: ' . $checksumPath);
+            assert_true(str_contains((string) file_get_contents($checksumPath), hash_file('sha256', $archivePath)), 'Release package checksum should match archive: ' . $archivePath);
+        }
+        assert_true(is_file($checksumManifestPath), 'Release checksum manifest should exist');
+        $checksumManifest = (string) file_get_contents($checksumManifestPath);
+        assert_true(str_contains($checksumManifest, hash_file('sha256', $tarPath) . '  ' . basename($tarPath)), 'Checksum manifest should include tarball');
+        assert_true(str_contains($checksumManifest, hash_file('sha256', $zipPath) . '  ' . basename($zipPath)), 'Checksum manifest should include ZIP');
 
-        $archive = new PharData($archivePath);
+        $archive = new PharData($tarPath);
         $paths = [];
         foreach (new RecursiveIteratorIterator($archive) as $file) {
             if ($file instanceof SplFileInfo) {
@@ -1409,6 +1423,7 @@ test_case('release package includes public source and excludes private runtime d
         }
         $joined = implode("\n", $paths);
         assert_true(str_contains($joined, '/README.md'), 'Package should include README');
+        assert_true(str_contains($joined, '/INSTALL.md'), 'Package should include the short installation guide');
         assert_true(str_contains($joined, '/.htaccess'), 'Package should include root Apache fallback rules');
         assert_true(str_contains($joined, '/public/.htaccess'), 'Package should include public Apache rules');
         assert_true(str_contains($joined, '/data/.htaccess'), 'Package should deny direct access to runtime data');
@@ -1428,13 +1443,16 @@ test_case('release package includes public source and excludes private runtime d
         assert_true(!str_contains($joined, '.playwright-cli'), 'Package should exclude local browser QA scratch files');
         assert_true(!str_contains($joined, '/website/'), 'Self-hosted package should exclude the public website build project');
 
-        [$verifyCode, $verifyOut, $verifyErr] = run_cli(['verify-package', $archivePath]);
-        assert_same(0, $verifyCode, 'Package verifier should accept matching checksum: ' . $verifyErr);
-        assert_true(str_contains($verifyOut, 'Package checksum verified'), 'Package verifier should report checksum verification');
-        assert_true(str_contains($verifyOut, 'Package archive inspected'), 'Package verifier should inspect archive structure');
+        foreach ([$tarPath, $zipPath] as $archivePath) {
+            [$verifyCode, $verifyOut, $verifyErr] = run_cli(['verify-package', $archivePath]);
+            assert_same(0, $verifyCode, 'Package verifier should accept matching checksum: ' . $archivePath . ' ' . $verifyErr);
+            assert_true(str_contains($verifyOut, 'Package checksum verified'), 'Package verifier should report checksum verification');
+            assert_true(str_contains($verifyOut, 'Package archive inspected'), 'Package verifier should inspect archive structure');
+        }
 
-        $archive->extractTo($extractDir);
-        $packageRoot = $extractDir . '/campus-placement-engine-' . cpe_config('app.version', '0.1.0');
+        $zipArchive = new PharData($zipPath);
+        $zipArchive->extractTo($extractDir);
+        $packageRoot = $extractDir . '/' . $rootName;
         assert_true(is_file($packageRoot . '/placement'), 'Extracted package should include CLI entrypoint');
         assert_true(is_file($packageRoot . '/public/index.php'), 'Extracted package should include web entrypoint');
 
@@ -1466,8 +1484,9 @@ test_case('release package includes public source and excludes private runtime d
         assert_true(str_contains($exportOut, 'Export written'), 'Extracted package export should report output');
         assert_true(is_file($packageExport . '/manifest.csv'), 'Extracted package export should write manifest');
 
-        file_put_contents($checksumPath, str_repeat('0', 64) . '  ' . basename($archivePath) . "\n");
-        [$badVerifyCode, $badVerifyOut, $badVerifyErr] = run_cli(['verify-package', $archivePath]);
+        $tarChecksumPath = $tarPath . '.sha256';
+        file_put_contents($tarChecksumPath, str_repeat('0', 64) . '  ' . basename($tarPath) . "\n");
+        [$badVerifyCode, $badVerifyOut, $badVerifyErr] = run_cli(['verify-package', $tarPath]);
         assert_same(1, $badVerifyCode, 'Package verifier should reject mismatched checksum');
         assert_true(str_contains($badVerifyErr, 'Release package checksum verification failed'), 'Package verifier should explain checksum failure');
     } finally {
@@ -1711,6 +1730,18 @@ test_case('serve command documents the local PHP server wrapper', function (): v
     assert_same(1, $badCode, 'Invalid serve address should fail');
     assert_true(str_contains($badOut, 'Start the local PHP development server'), 'Invalid serve address should print help');
     assert_true(str_contains($badErr, 'Serve address'), 'Invalid serve address should explain failure');
+});
+
+test_case('setup command provides a non-destructive guided-install preflight', function (): void {
+    [$helpCode, $helpOut, $helpErr] = run_cli(['setup', '--help']);
+    assert_same(0, $helpCode, 'Setup help should exit cleanly: ' . $helpErr);
+    assert_true(str_contains($helpOut, 'php placement setup'), 'Setup help should show the one-command path');
+    assert_true(str_contains($helpOut, 'does not install silently'), 'Setup help should state the mutation boundary');
+
+    [$checkCode, $checkOut, $checkErr] = run_cli(['setup', '--check']);
+    assert_same(0, $checkCode, 'Setup preflight should exit cleanly: ' . $checkErr);
+    assert_true(str_contains($checkOut, 'Checking this computer before setup'), 'Setup preflight should explain its check');
+    assert_true(str_contains($checkOut, 'Setup check complete'), 'Setup preflight should stop before launching a server');
 });
 
 test_case('http smoke cli documents options and validates base url before network access', function (): void {

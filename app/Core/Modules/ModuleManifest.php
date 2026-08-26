@@ -31,8 +31,8 @@ final class ModuleManifest
         if ($name === '' || preg_match('/^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/', $version) !== 1) {
             throw new RuntimeException('Module manifest requires a name and semantic version: ' . $key);
         }
-        if (preg_match('/^>=\d+\.\d+\.\d+$/', $coreRequires) !== 1) {
-            throw new RuntimeException('Module core requirement must use >=x.y.z: ' . $key);
+        if (preg_match('/^>=\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/', $coreRequires) !== 1) {
+            throw new RuntimeException('Module core requirement must use >= followed by a semantic version: ' . $key);
         }
         $requires = self::keys((array) ($definition['requires_modules'] ?? []), 'module dependency');
         if (in_array($key, $requires, true)) {

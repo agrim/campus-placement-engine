@@ -6,7 +6,7 @@ return [
     'placement' => [
         'name' => 'Placement Operations',
         'version' => '0.1.0',
-        'core_requires' => '>=0.1.0',
+        'core_requires' => '>=0.1.0-alpha.1',
         'requires_modules' => [],
         'capabilities' => [
             'placement.board.view',
@@ -27,7 +27,7 @@ return [
     'advising' => [
         'name' => 'Career Advising',
         'version' => '0.1.0',
-        'core_requires' => '>=0.1.0',
+        'core_requires' => '>=0.1.0-alpha.1',
         'requires_modules' => [],
         'capabilities' => [
             'advising.appointments.view',

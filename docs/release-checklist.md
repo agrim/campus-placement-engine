@@ -8,6 +8,8 @@ Use this before a public alpha tag or downloadable archive.
   SQLite, and writable data/database locations.
 - Run `php placement serve --help` and confirm it documents the PHP built-in
   server wrapper without starting a long-running process.
+- Run `php placement setup --check` and confirm the one-command guided-install
+  preflight exits without creating an installation or starting a server.
 - Run `php tests/run.php`.
 - Run `php tests/database_contract.php` against SQLite and a fresh PostgreSQL 17
   database.
@@ -18,8 +20,9 @@ Use this before a public alpha tag or downloadable archive.
 - Run `php placement publication-check` and investigate any forbidden-file or
   potential-secret finding before packaging.
 - Run `php placement package --target=dist --force`.
-- Confirm the package `.sha256` sidecar exists and run
-  `php placement verify-package dist/campus-placement-engine-<version>.tar.gz`.
+- Confirm the ZIP and tarball each have a `.sha256` sidecar, the combined
+  `SHA256SUMS` contains both archives, and run `php placement verify-package`
+  against both formats.
 - Run CLI first-run install against a throwaway database with
   `CPE_ADMIN_PASSWORD=... php placement install ...`.
 - Run `php placement upgrade` against a throwaway installed database and confirm
@@ -103,6 +106,8 @@ Use this before a public alpha tag or downloadable archive.
 ## Documentation
 
 - README quickstart is current.
+- `INSTALL.md` starts with the ZIP and guided browser setup path before server
+  implementation details.
 - Deployment docs keep PHP + SQLite as the default self-hosted stack and describe
   PostgreSQL/hosted operation as optional, separate infrastructure.
 - Apache/Nginx examples and `.htaccess` files still point at or route through
@@ -120,7 +125,7 @@ Use this before a public alpha tag or downloadable archive.
 
 ## Operational Smoke
 
-- Build a release package and confirm it excludes `.legacy-private/` and
+- Build the ZIP and tarball and confirm both exclude `.legacy-private/` and
   runtime SQLite data.
 - Verify the release package checksum sidecar with `php placement
   verify-package`.

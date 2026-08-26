@@ -324,20 +324,24 @@ Build a publication-safe source archive with:
 php placement package --target=dist --force
 ```
 
-The package command writes `campus-placement-engine-<version>.tar.gz` and uses an
-allowlist of public app, config, migration, doc, example, test, and CI files. It
+The package command writes both `campus-placement-engine-<version>.zip` and
+`campus-placement-engine-<version>.tar.gz`. The ZIP is the simplest download
+for most evaluators and shared-hosting users; the tarball is convenient for
+server operators. Both contain the same allowlisted public app, config,
+migration, doc, example, test, and CI files. The package
 includes `data/.gitkeep` but excludes runtime SQLite files, backups, exports,
 `.legacy-private/`, `config/local.php`, symbolic links, and local browser-QA
 scratch directories. Packaging runs the publication check first. Verification
 also rejects unsafe paths, multiple archive roots, duplicate entries, and
 oversized expanded content before extraction.
-It also writes a matching `.sha256` sidecar. Keep the archive and sidecar
-together when moving the release package between machines.
+It also writes a matching `.sha256` sidecar for each archive and a combined
+`SHA256SUMS` manifest. Keep the selected archive and sidecar together when
+moving the release package between machines.
 
 Verify the package before publishing or installing it elsewhere:
 
 ```bash
-php placement verify-package dist/campus-placement-engine-0.1.0.tar.gz
+php placement verify-package dist/campus-placement-engine-0.1.0-alpha.1.zip
 ```
 
 Before publishing a package, extract it into a clean temp directory and run:
