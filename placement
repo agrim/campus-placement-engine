@@ -37,6 +37,7 @@ try {
         'doctor' => doctor(),
         'migrate' => migrate(),
         'upgrade' => upgrade(array_slice($argv, 2)),
+        'setup' => setup(array_slice($argv, 2)),
         'serve' => serve(array_slice($argv, 2)),
         'install' => install_app(array_slice($argv, 2)),
         'seed-demo' => seed_demo(),
@@ -158,6 +159,40 @@ function serve(array $args): void
     echo "Press Ctrl+C to stop.\n";
     passthru(escapeshellarg(PHP_BINARY) . ' -S ' . escapeshellarg($address) . ' -t ' . escapeshellarg(cpe_path('public')), $exitCode);
     exit((int) $exitCode);
+}
+
+function setup(array $args): void
+{
+    if (in_array('--help', $args, true) || in_array('-h', $args, true)) {
+        setup_help();
+        return;
+    }
+
+    $checkOnly = false;
+    $serveArgs = [];
+    foreach ($args as $arg) {
+        if ($arg === '--check') {
+            $checkOnly = true;
+            continue;
+        }
+        $serveArgs[] = $arg;
+    }
+
+    echo "Checking this computer before setup...\n";
+    doctor();
+    echo "\n";
+    if (Database::isInstalled()) {
+        echo "An installation already exists. The site will open at the address below.\n";
+    } else {
+        echo "Ready. Open the address below and follow the guided setup.\n";
+        echo "You can try synthetic sample data or start with an empty installation.\n";
+    }
+
+    if ($checkOnly) {
+        echo "Setup check complete. Run `php placement setup` to start the site.\n";
+        return;
+    }
+    serve($serveArgs);
 }
 
 function install_app(array $args): void
@@ -791,8 +826,17 @@ function package_release(array $args): void
     $rootName = 'campus-placement-engine-' . $version;
     $tarPath = rtrim($targetDir, '/') . '/' . $rootName . '.tar';
     $gzPath = $tarPath . '.gz';
-    $checksumPath = release_package_checksum_path($gzPath);
-    foreach ([$tarPath, $gzPath, $checksumPath] as $path) {
+    $zipPath = rtrim($targetDir, '/') . '/' . $rootName . '.zip';
+    $checksumManifestPath = rtrim($targetDir, '/') . '/SHA256SUMS';
+    $replacePaths = [
+        $tarPath,
+        $gzPath,
+        $zipPath,
+        release_package_checksum_path($gzPath),
+        release_package_checksum_path($zipPath),
+        $checksumManifestPath,
+    ];
+    foreach ($replacePaths as $path) {
         if (is_file($path)) {
             if (!$force) {
                 throw new RuntimeException('Package already exists; rerun with --force: ' . $path);
@@ -803,9 +847,10 @@ function package_release(array $args): void
         }
     }
 
+    $files = release_package_files();
     $archive = new PharData($tarPath);
     $count = 0;
-    foreach (release_package_files() as $relative) {
+    foreach ($files as $relative) {
         $archive->addFile(__DIR__ . '/' . $relative, $rootName . '/' . $relative);
         $count++;
     }
@@ -814,10 +859,23 @@ function package_release(array $args): void
     if (is_file($tarPath) && !unlink($tarPath)) {
         throw new RuntimeException('Could not remove intermediate package: ' . $tarPath);
     }
+
+    $zip = new PharData($zipPath, 0, null, Phar::ZIP);
+    foreach ($files as $relative) {
+        $zip->addFile(__DIR__ . '/' . $relative, $rootName . '/' . $relative);
+    }
+    $zip->compressFiles(Phar::GZ);
+    unset($zip);
+
     write_release_package_checksum($gzPath);
+    write_release_package_checksum($zipPath);
+    write_release_checksum_manifest([$gzPath, $zipPath], $checksumManifestPath);
 
     echo "Release package written: {$gzPath}\n";
-    echo "Checksum written: {$checksumPath}\n";
+    echo "Release package written: {$zipPath}\n";
+    echo "Checksum written: " . release_package_checksum_path($gzPath) . "\n";
+    echo "Checksum written: " . release_package_checksum_path($zipPath) . "\n";
+    echo "Checksum manifest written: {$checksumManifestPath}\n";
     echo "Files included: {$count}\n";
 }
 
@@ -836,6 +894,24 @@ function write_release_package_checksum(string $path): void
     $line = $hash . '  ' . basename($path) . "\n";
     if (file_put_contents($checksumPath, $line) === false) {
         throw new RuntimeException('Could not write release package checksum: ' . $checksumPath);
+    }
+}
+
+/**
+ * @param array<int, string> $paths
+ */
+function write_release_checksum_manifest(array $paths, string $target): void
+{
+    $lines = [];
+    foreach ($paths as $path) {
+        $hash = hash_file('sha256', $path);
+        if ($hash === false) {
+            throw new RuntimeException('Could not checksum release package: ' . $path);
+        }
+        $lines[] = $hash . '  ' . basename($path);
+    }
+    if (file_put_contents($target, implode("\n", $lines) . "\n") === false) {
+        throw new RuntimeException('Could not write release checksum manifest: ' . $target);
     }
 }
 
@@ -904,7 +980,7 @@ function verify_release_package(string $path): void
         }
         $entries[$relative] = true;
     }
-    foreach (['.htaccess', 'README.md', 'placement', 'public/.htaccess', 'public/index.php', 'database/.htaccess', 'database/migrations/001_initial.sql', 'database/migrations/pgsql/001_portal_baseline.sql', 'docs/environment.md', 'examples/env/local.env.example', 'examples/deployment/apache-vhost.conf', 'examples/deployment/nginx-server.conf', 'tests/.htaccess', 'data/.gitkeep', 'data/.htaccess'] as $required) {
+    foreach (['.htaccess', 'README.md', 'INSTALL.md', 'placement', 'public/.htaccess', 'public/index.php', 'database/.htaccess', 'database/migrations/001_initial.sql', 'database/migrations/pgsql/001_portal_baseline.sql', 'docs/environment.md', 'examples/env/local.env.example', 'examples/deployment/apache-vhost.conf', 'examples/deployment/nginx-server.conf', 'tests/.htaccess', 'data/.gitkeep', 'data/.htaccess'] as $required) {
         if (!isset($entries[$required])) {
             throw new RuntimeException('Release package is missing required file: ' . $required);
         }
@@ -927,6 +1003,7 @@ function release_package_files(): array
         '.htaccess',
         '.gitignore',
         'README.md',
+        'INSTALL.md',
         'LICENSE',
         'SECURITY.md',
         'CONTRIBUTING.md',
@@ -1937,6 +2014,7 @@ function help(): void
     echo "  php placement doctor\n";
     echo "  php placement migrate\n";
     echo "  php placement upgrade\n";
+    echo "  php placement setup [127.0.0.1:8000] [--check]\n";
     echo "  php placement serve [127.0.0.1:8000]\n";
     echo "  php placement install --college=\"College\" --admin-name=\"Admin\" --admin-email=admin@example.test\n";
     echo "  php placement seed-demo\n";
@@ -1971,7 +2049,7 @@ function help(): void
     echo "  php placement sso-link --provider=oidc_proxy --subject=SUBJECT --user-email=USER_EMAIL\n";
     echo "  php placement export [target-directory] [--profile=full|operations|summary|custom]\n";
     echo "  php placement package [--target=dist] [--force]\n";
-    echo "  php placement verify-package /path/to/campus-placement-engine-version.tar.gz\n";
+    echo "  php placement verify-package /path/to/campus-placement-engine-version.tar.gz|.zip\n";
     echo "  php placement deliver-notifications [--channel=file|webhook|email|sms|whatsapp] [--limit=100] [--dry-run]\n";
     echo "  php placement work-outbox [--limit=100]\n";
     echo "  php placement certify-notifications --channel=sms|whatsapp [--require-live]\n";
@@ -1983,6 +2061,17 @@ function help(): void
     echo "  php placement assign-slots [COMPANY]\n";
     echo "  php placement assign-optimized-slots [COMPANY]\n";
     echo "  php placement publication-check\n";
+}
+
+function setup_help(): void
+{
+    echo "Check requirements and start the guided browser installer:\n";
+    echo "  php placement setup\n";
+    echo "  php placement setup localhost:8000\n";
+    echo "  php placement setup --check\n";
+    echo "\n";
+    echo "Setup does not install silently. It runs the system preflight, then starts\n";
+    echo "the local site so you can review and submit the guided setup form.\n";
 }
 
 function upgrade_help(): void

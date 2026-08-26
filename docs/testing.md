@@ -79,7 +79,8 @@ backup, and verify the original value plus readiness. PostgreSQL drills require
 
 ```bash
 php placement package --target=dist --force
-php placement verify-package dist/campus-placement-engine-0.1.0.tar.gz
+php placement verify-package dist/campus-placement-engine-0.1.0-alpha.1.tar.gz
+php placement verify-package dist/campus-placement-engine-0.1.0-alpha.1.zip
 ```
 
 Extract the package into a clean directory, install a throwaway database, and

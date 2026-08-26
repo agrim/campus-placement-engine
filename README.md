@@ -3,6 +3,21 @@
 A lightweight placement-day operations engine for colleges, and the first
 flagship module of an open-source Career Services Portal.
 
+## Download and install
+
+Download the newest self-hosted alpha ZIP and its checksum from
+[GitHub Releases](https://github.com/agrim/campus-placement-engine/releases),
+extract it, and run:
+
+```bash
+php placement setup
+```
+
+Open the address printed in the terminal. The guided setup checks the system,
+then helps you configure your institution, placement cycle, workflow,
+terminology, first administrator, and optional synthetic sample data. See
+[INSTALL.md](INSTALL.md) for local and university-hosting instructions.
+
 This public repository is the complete downloadable, self-hosted product. It
 also exposes a small versioned integration contract through which a separate
 management plane can run the same Engine release as a hosted service without
@@ -18,7 +33,7 @@ This modernization is intentionally dependency-light:
 - No framework, Node build, Redis, external queue service, image assets, or
   database server required for the default self-hosted install.
 
-## Run Locally
+## Requirements and manual local start
 
 Requirements:
 
@@ -32,9 +47,8 @@ On macOS, if PHP is missing or too old, the maintainable local install path is:
 brew install php
 ```
 
-```bash
-php placement serve
-```
+Repository contributors can start the same local server directly with
+`php placement serve`.
 
 Open `http://localhost:8000/` and complete the installer.
 The browser installer shows the same PHP, SQLite, and writable-directory
@@ -95,6 +109,7 @@ testing.
 ## Test
 
 ```bash
+php placement setup --check
 php placement doctor
 php tests/run.php
 ```
@@ -107,6 +122,7 @@ setup run. The first-run browser installer uses the same checks.
 ## Useful CLI Commands
 
 ```bash
+php placement setup [127.0.0.1:8000] [--check]
 php placement doctor
 php placement migrate
 php placement upgrade
@@ -132,7 +148,7 @@ php placement bundle-validate /path/to/bundle
 php placement bundle-import /path/to/bundle --confirm=IMPORT
 php placement export [target-directory] [--profile=full|operations|summary|custom]
 php placement package --target=dist --force
-php placement verify-package /path/to/campus-placement-engine-version.tar.gz
+php placement verify-package /path/to/campus-placement-engine-version.zip
 php placement deliver-notifications [--channel=file|webhook|email|sms|whatsapp] [--dry-run]
 php placement work-outbox [--limit=100]
 php placement certify-notifications --channel=sms|whatsapp [--require-live]

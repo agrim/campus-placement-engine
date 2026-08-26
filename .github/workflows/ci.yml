@@ -59,12 +59,17 @@ jobs:
 
       - name: Check publication hygiene
         run: |
+          CPE_PACKAGE_VERSION="$(php -r '$config = require "config/defaults.php"; echo $config["app"]["version"];')"
           php placement publication-check
           php placement package --target="$RUNNER_TEMP/cpe-package"
-          php placement verify-package "$RUNNER_TEMP/cpe-package/campus-placement-engine-0.1.0.tar.gz"
+          php placement verify-package "$RUNNER_TEMP/cpe-package/campus-placement-engine-${CPE_PACKAGE_VERSION}.tar.gz"
+          php placement verify-package "$RUNNER_TEMP/cpe-package/campus-placement-engine-${CPE_PACKAGE_VERSION}.zip"
+          cd "$RUNNER_TEMP/cpe-package"
+          sha256sum --check SHA256SUMS
 
       - name: Smoke demo install and operations
         run: |
+          php placement setup --check
           export CPE_DB_PATH="$RUNNER_TEMP/cpe-cli-install.sqlite"
           CPE_ADMIN_PASSWORD=password123 php placement install --college="CI College" --admin-name="CI Admin" --admin-email=ci-admin@example.test
           php placement doctor

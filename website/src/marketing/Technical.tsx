@@ -14,7 +14,7 @@ export function Technical() {
         <div className="technical-ledger">
           <span>PHP 8.2+</span><span>SQLite by default</span><span>PostgreSQL supported</span><span>Server-rendered HTML</span><span>Vanilla CSS + JavaScript</span><span>No mandatory external services</span><span>Portable CSV + JSON</span><span>Backups checked before restore</span>
         </div>
-        <a className="button button-primary" href="https://github.com/agrim/campus-placement-engine">View source and setup guide <Icon name="external" /></a>
+        <a className="button button-primary" href="https://github.com/agrim/campus-placement-engine/releases">Download the self-hosted alpha <Icon name="external" /></a>
       </div>
     </section>
   );
