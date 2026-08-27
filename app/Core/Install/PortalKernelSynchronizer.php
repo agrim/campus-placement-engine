@@ -10,13 +10,13 @@ use PDO;
 
 final class PortalKernelSynchronizer
 {
-    public function synchronize(PDO $pdo): void
+    public function synchronize(PDO $pdo, ?string $institutionPublicId = null): void
     {
         if (!$this->hasKernelTables($pdo)) {
             return;
         }
 
-        $this->ensureInstitution($pdo);
+        $this->ensureInstitution($pdo, $institutionPublicId);
         $this->ensureCycle($pdo);
         (new InstitutionRepository($pdo))->synchronizeFromSettings();
         $this->synchronizeCycle($pdo);
@@ -24,7 +24,7 @@ final class PortalKernelSynchronizer
         $this->synchronizeRoles($pdo);
     }
 
-    private function ensureInstitution(PDO $pdo): void
+    private function ensureInstitution(PDO $pdo, ?string $institutionPublicId): void
     {
         $settings = new SettingRepository($pdo);
         $now = cpe_now();
@@ -32,8 +32,11 @@ final class PortalKernelSynchronizer
             'INSERT INTO institutions (public_id, slug, name, timezone, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?) ON CONFLICT(slug) DO NOTHING'
         );
+        $defaultPublicId = $settings->get('installed_at', '') === ''
+            ? 'unbound_' . bin2hex(random_bytes(16))
+            : 'inst_' . bin2hex(random_bytes(16));
         $stmt->execute([
-            'inst_' . bin2hex(random_bytes(16)),
+            $institutionPublicId ?? $defaultPublicId,
             'default',
             trim($settings->get('college_name', 'Demo College')) ?: 'Demo College',
             trim($settings->get('timezone', 'Asia/Kolkata')) ?: 'Asia/Kolkata',

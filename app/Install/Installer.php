@@ -4,7 +4,11 @@ declare(strict_types=1);
 
 namespace App\Install;
 
+use App\Core\Http\UserVisibleException;
 use App\Core\Install\PortalKernelSynchronizer;
+use App\Core\Persistence\DatabaseLock;
+use App\Core\Persistence\DatabaseLockException;
+use App\Core\Persistence\TransactionRollbackGuard;
 use App\Modules\Placement\Install\LegacyDomainSynchronizer;
 use App\Modules\Placement\Application\PlacementService;
 use App\Modules\Placement\Workflow\WorkflowPublisher;
@@ -13,79 +17,233 @@ use App\Support\Database;
 use App\Support\TimezoneValidator;
 use PDO;
 use RuntimeException;
+use Throwable;
 
 final class Installer
 {
+    public const HOSTED_INSTALL_CONTRACT_VERSION = 1;
+    public const ERROR_ALREADY_INSTALLED = 'CPE_INSTALLATION_ALREADY_COMPLETED';
+    public const LOCK_NAMESPACE = 'cpe.engine-installation';
+
+    private const LOCK_TIMEOUT_MILLISECONDS = 60000;
+
+    public function __construct(private readonly ?InstallationStepObserver $stepObserver = null)
+    {
+    }
+
     public function install(array $input): int
     {
-        if (Database::isInstalled()) {
-            throw new RuntimeException('App is already installed. Use upgrade, configuration import, or a different CPE_DB_PATH for a fresh setup.');
-        }
+        return $this->performInstall($input, null);
+    }
 
+    /**
+     * Installs a hosted data plane and binds its immutable tenant identity in
+     * the same transaction as the installation marker.
+     */
+    public function installHosted(array $input, string $tenantPublicId): int
+    {
+        if (preg_match('/^tenant_[a-f0-9]{32}$/', $tenantPublicId) !== 1) {
+            throw new RuntimeException('Hosted tenant public ID is invalid.');
+        }
+        return $this->performInstall($input, $tenantPublicId);
+    }
+
+    private function performInstall(array $input, ?string $tenantPublicId): int
+    {
         $college = trim((string) ($input['college_name'] ?? ''));
-        $timezone = TimezoneValidator::normalize((string) ($input['timezone'] ?? 'Asia/Kolkata'), 'Asia/Kolkata');
+        try {
+            $timezone = TimezoneValidator::normalize((string) ($input['timezone'] ?? 'Asia/Kolkata'), 'Asia/Kolkata');
+        } catch (Throwable $e) {
+            throw new UserVisibleException(
+                'SETUP_TIMEZONE_INVALID',
+                'Timezone must be a valid IANA timezone such as Asia/Kolkata.',
+                $e,
+            );
+        }
         $name = trim((string) ($input['admin_name'] ?? ''));
         $email = trim((string) ($input['admin_email'] ?? ''));
         $password = (string) ($input['admin_password'] ?? '');
 
         if ($college === '' || $name === '' || !filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($password) < 8) {
-            throw new RuntimeException('College, admin name, valid email, and an 8+ character password are required.');
+            throw new UserVisibleException(
+                'SETUP_ADMIN_DETAILS_INVALID',
+                'College, admin name, valid email, and an 8+ character password are required.',
+            );
         }
 
-        Database::migrate();
-        $pdo = Database::connection();
-        $pdo->beginTransaction();
-        try {
-            $this->set($pdo, 'college_name', $college);
-            $this->set($pdo, 'site_name', $this->normalizeIdentityText((string) ($input['site_name'] ?? cpe_config('settings.site_name', cpe_config('app.name'))), (string) cpe_config('app.name'), 80, 'Site name'));
-            $this->set($pdo, 'site_tagline', $this->normalizeIdentityText((string) ($input['site_tagline'] ?? cpe_config('settings.site_tagline', '')), '', 120, 'Site tagline', true));
-            $this->set($pdo, 'public_placements_title', $this->normalizeIdentityText((string) ($input['public_placements_title'] ?? cpe_config('settings.public_placements_title', 'Public Placements')), 'Public Placements', 80, 'Public placements title'));
-            $this->set($pdo, 'candidate_status_title', $this->normalizeIdentityText((string) ($input['candidate_status_title'] ?? cpe_config('settings.candidate_status_title', '')), '', 80, 'Candidate status title', true));
-            $this->set($pdo, 'timezone', $timezone);
-            $this->set($pdo, 'cycle_name', trim((string) ($input['cycle_name'] ?? $college . ' Placement Cycle')));
-            $this->set($pdo, 'cycle_type', $this->normalizeCycleType((string) ($input['cycle_type'] ?? 'final')));
-            $this->set($pdo, 'cycle_start_date', $this->normalizeDate((string) ($input['cycle_start_date'] ?? '')));
-            $this->set($pdo, 'cycle_end_date', $this->normalizeDate((string) ($input['cycle_end_date'] ?? '')));
-            $this->set($pdo, 'calendar_non_operating_weekdays', $this->normalizeWeekdayList((string) ($input['calendar_non_operating_weekdays'] ?? cpe_config('settings.calendar_non_operating_weekdays', ''))));
-            $this->set($pdo, 'calendar_non_operating_dates', $this->normalizeDateList((string) ($input['calendar_non_operating_dates'] ?? cpe_config('settings.calendar_non_operating_dates', ''))));
-            $this->set($pdo, 'audit_request_metadata', $this->normalizeAuditRequestMetadata((string) ($input['audit_request_metadata'] ?? cpe_config('settings.audit_request_metadata', 'none'))));
-            $workflow = (string) ($input['workflow'] ?? 'default');
-            if (!array_key_exists($workflow, cpe_config('workflows'))) {
-                $workflow = 'default';
-            }
-            $this->set($pdo, 'workflow', $workflow);
-            $this->set($pdo, 'scheduling_buffer_minutes', '0');
-            $this->set($pdo, 'slot_planner_strategy', 'sequence');
-            $this->set($pdo, 'slot_optimizer_exact_limit', '10');
-            $this->set($pdo, 'configuration_freeze', (string) cpe_config('settings.configuration_freeze', '0'));
-            $this->set($pdo, 'terminology_candidate_label', $this->normalizeTerminologyLabel((string) ($input['terminology_candidate_label'] ?? cpe_config('settings.terminology_candidate_label', 'Candidate')), 'Candidate'));
-            $this->set($pdo, 'terminology_candidates_label', $this->normalizeTerminologyLabel((string) ($input['terminology_candidates_label'] ?? cpe_config('settings.terminology_candidates_label', 'Candidates')), 'Candidates'));
-            $this->set($pdo, 'terminology_company_label', $this->normalizeTerminologyLabel((string) ($input['terminology_company_label'] ?? cpe_config('settings.terminology_company_label', 'Company')), 'Company'));
-            $this->set($pdo, 'terminology_companies_label', $this->normalizeTerminologyLabel((string) ($input['terminology_companies_label'] ?? cpe_config('settings.terminology_companies_label', 'Companies')), 'Companies'));
-            $this->set($pdo, 'board_refresh_seconds', (string) cpe_config('settings.board_refresh_seconds', '45'));
-            $this->set($pdo, 'export_profile_custom_datasets', (string) cpe_config('settings.export_profile_custom_datasets', 'placement_totals,application_status_counts,placements_by_company'));
-            $this->set($pdo, 'import_header_aliases_json', (string) cpe_config('settings.import_header_aliases_json', ''));
-            $this->set(
-                $pdo,
-                'board_card_fields',
-                (string) cpe_config('settings.board_card_fields', 'candidate_id,program,tags,company,process,tracker,active_cap,rounds,schedule,slot,panel,route,location,accommodation,waitlist')
+        (new SystemRequirements())->assertReady();
+        if (Database::hasInstalledMarkerStrict()) {
+            throw new RuntimeException(
+                self::ERROR_ALREADY_INSTALLED
+                . ': App is already installed. Use upgrade, configuration import, or a different CPE_DB_PATH for a fresh setup.',
             );
-            $adminId = Auth::createAdmin($name, $email, $password);
-            if (!empty($input['seed_demo'])) {
-                (new PlacementService($pdo))->seedDemo();
+        }
+        Database::migrate(false);
+        $pdo = Database::connection();
+        $driver = strtolower((string) $pdo->getAttribute(PDO::ATTR_DRIVER_NAME));
+        $institutionPublicId = $tenantPublicId ?? 'inst_' . bin2hex(random_bytes(16));
+
+        try {
+            return DatabaseLock::synchronized(
+                $pdo,
+                self::LOCK_NAMESPACE,
+                function (?string $lockBackendPid) use (
+                $pdo,
+                $driver,
+                $input,
+                $tenantPublicId,
+                $institutionPublicId,
+                $college,
+                $timezone,
+                $name,
+                $email,
+                $password,
+                ): int {
+                $this->assertInstallAvailable($pdo);
+                $started = false;
+                try {
+                    $pdo->beginTransaction();
+                    $started = true;
+                    if ($driver === 'pgsql') {
+                        if ($lockBackendPid === null) {
+                            throw DatabaseLockException::sessionChanged();
+                        }
+                        DatabaseLock::assertPostgresSession($pdo, $lockBackendPid);
+                    }
+                    $this->assertInstallAvailable($pdo);
+
+                    // Installation runs every post-migration synchronizer inside
+                    // the same transaction as the marker and identity check.
+                    $this->set($pdo, 'college_name', $college);
+                    $this->set($pdo, 'site_name', $this->normalizeIdentityText((string) ($input['site_name'] ?? cpe_config('settings.site_name', cpe_config('app.name'))), (string) cpe_config('app.name'), 80, 'Site name'));
+                    $this->set($pdo, 'site_tagline', $this->normalizeIdentityText((string) ($input['site_tagline'] ?? cpe_config('settings.site_tagline', '')), '', 120, 'Site tagline', true));
+                    $this->set($pdo, 'public_placements_title', $this->normalizeIdentityText((string) ($input['public_placements_title'] ?? cpe_config('settings.public_placements_title', 'Public Placements')), 'Public Placements', 80, 'Public placements title'));
+                    $this->set($pdo, 'candidate_status_title', $this->normalizeIdentityText((string) ($input['candidate_status_title'] ?? cpe_config('settings.candidate_status_title', '')), '', 80, 'Candidate status title', true));
+                    $this->set($pdo, 'timezone', $timezone);
+                    $this->set($pdo, 'cycle_name', trim((string) ($input['cycle_name'] ?? $college . ' Placement Cycle')));
+                    $this->set($pdo, 'cycle_type', $this->normalizeCycleType((string) ($input['cycle_type'] ?? 'final')));
+                    $this->set($pdo, 'cycle_start_date', $this->normalizeDate((string) ($input['cycle_start_date'] ?? '')));
+                    $this->set($pdo, 'cycle_end_date', $this->normalizeDate((string) ($input['cycle_end_date'] ?? '')));
+                    $this->set($pdo, 'calendar_non_operating_weekdays', $this->normalizeWeekdayList((string) ($input['calendar_non_operating_weekdays'] ?? cpe_config('settings.calendar_non_operating_weekdays', ''))));
+                    $this->set($pdo, 'calendar_non_operating_dates', $this->normalizeDateList((string) ($input['calendar_non_operating_dates'] ?? cpe_config('settings.calendar_non_operating_dates', ''))));
+                    $this->set($pdo, 'audit_request_metadata', $this->normalizeAuditRequestMetadata((string) ($input['audit_request_metadata'] ?? cpe_config('settings.audit_request_metadata', 'none'))));
+                    $workflow = (string) ($input['workflow'] ?? 'default');
+                    if (!array_key_exists($workflow, cpe_config('workflows'))) {
+                        $workflow = 'default';
+                    }
+                    $this->set($pdo, 'workflow', $workflow);
+                    $this->set($pdo, 'scheduling_buffer_minutes', '0');
+                    $this->set($pdo, 'slot_planner_strategy', 'sequence');
+                    $this->set($pdo, 'slot_optimizer_exact_limit', '10');
+                    $this->set($pdo, 'configuration_freeze', (string) cpe_config('settings.configuration_freeze', '0'));
+                    $this->set($pdo, 'terminology_candidate_label', $this->normalizeTerminologyLabel((string) ($input['terminology_candidate_label'] ?? cpe_config('settings.terminology_candidate_label', 'Candidate')), 'Candidate'));
+                    $this->set($pdo, 'terminology_candidates_label', $this->normalizeTerminologyLabel((string) ($input['terminology_candidates_label'] ?? cpe_config('settings.terminology_candidates_label', 'Candidates')), 'Candidates'));
+                    $this->set($pdo, 'terminology_company_label', $this->normalizeTerminologyLabel((string) ($input['terminology_company_label'] ?? cpe_config('settings.terminology_company_label', 'Company')), 'Company'));
+                    $this->set($pdo, 'terminology_companies_label', $this->normalizeTerminologyLabel((string) ($input['terminology_companies_label'] ?? cpe_config('settings.terminology_companies_label', 'Companies')), 'Companies'));
+                    $this->set($pdo, 'board_refresh_seconds', (string) cpe_config('settings.board_refresh_seconds', '45'));
+                    $this->set($pdo, 'export_profile_custom_datasets', (string) cpe_config('settings.export_profile_custom_datasets', 'placement_totals,application_status_counts,placements_by_company'));
+                    $this->set($pdo, 'import_header_aliases_json', (string) cpe_config('settings.import_header_aliases_json', ''));
+                    $this->set(
+                        $pdo,
+                        'board_card_fields',
+                        (string) cpe_config('settings.board_card_fields', 'candidate_id,program,tags,company,process,tracker,active_cap,rounds,schedule,slot,panel,route,location,accommodation,waitlist')
+                    );
+                    $this->observe(InstallationStepObserver::AFTER_SETTINGS);
+                    (new PortalKernelSynchronizer())->synchronize($pdo, $institutionPublicId);
+                    $stmt = $pdo->prepare(
+                        "UPDATE institutions SET public_id = ?, updated_at = ?
+                         WHERE slug = 'default' AND substr(public_id, 1, 8) = 'unbound_'"
+                    );
+                    $stmt->execute([$institutionPublicId, cpe_now()]);
+                    $stmt = $pdo->prepare("SELECT public_id FROM institutions WHERE slug = 'default'");
+                    $stmt->execute();
+                    $boundPublicId = $stmt->fetchColumn();
+                    if (!is_string($boundPublicId) || !hash_equals($institutionPublicId, $boundPublicId)) {
+                        throw new RuntimeException(
+                            $tenantPublicId !== null
+                                ? 'Hosted installation found a data plane reserved for a different tenant.'
+                                : 'Installation found an institution identity that is already reserved.',
+                        );
+                    }
+                    $this->observe(InstallationStepObserver::AFTER_IDENTITY);
+                    (new WorkflowPublisher($pdo))->synchronize();
+                    $adminId = Auth::createAdmin($name, $email, $password);
+                    $this->observe(InstallationStepObserver::AFTER_ADMIN);
+                    if (!empty($input['seed_demo'])) {
+                        (new PlacementService($pdo))->seedDemo();
+                    }
+                    $this->observe(InstallationStepObserver::AFTER_DEMO_SEED);
+                    (new PortalKernelSynchronizer())->synchronize($pdo, $institutionPublicId);
+                    (new LegacyDomainSynchronizer())->synchronize($pdo);
+                    (new WorkflowPublisher($pdo))->synchronize();
+                    $this->observe(InstallationStepObserver::AFTER_SYNCHRONIZERS);
+                    $this->set($pdo, 'installed_at', cpe_now());
+                    $this->observe(InstallationStepObserver::AFTER_INSTALLED_MARKER);
+                    Auth::audit($adminId, 'install', 'system', null, 'Initial installation completed');
+                    $this->observe(InstallationStepObserver::AFTER_INSTALL_AUDIT);
+                    if ($driver === 'pgsql') {
+                        DatabaseLock::assertPostgresSession($pdo, (string) $lockBackendPid);
+                    }
+                    $pdo->commit();
+                    $started = false;
+                    return $adminId;
+                } catch (Throwable $e) {
+                    if ($started) {
+                        TransactionRollbackGuard::rollbackOrRethrow(
+                            $pdo,
+                            $e,
+                            'installation',
+                            false,
+                        );
+                    }
+                    throw $e;
+                }
+                },
+                self::LOCK_TIMEOUT_MILLISECONDS,
+            );
+        } catch (Throwable $e) {
+            $rollbackUncertain = $this->rollbackUncertainFailure($e);
+            if ($rollbackUncertain !== null) {
+                Database::reset();
+                throw $rollbackUncertain;
             }
-            (new PortalKernelSynchronizer())->synchronize($pdo);
-            (new LegacyDomainSynchronizer())->synchronize($pdo);
-            (new WorkflowPublisher($pdo))->synchronize();
-            $this->set($pdo, 'installed_at', cpe_now());
-            Auth::audit($adminId, 'install', 'system', null, 'Initial installation completed');
-            $pdo->commit();
-            return $adminId;
-        } catch (\Throwable $e) {
-            if ($pdo->inTransaction()) {
-                $pdo->rollBack();
+            $lockFailure = DatabaseLockException::find($e);
+            if ($lockFailure !== null && $lockFailure->requiresConnectionReset()) {
+                Database::reset();
             }
             throw $e;
+        }
+    }
+
+    private function observe(string $stage): void
+    {
+        if ($this->stepObserver !== null) {
+            $this->stepObserver->observe($stage);
+        }
+    }
+
+    private function rollbackUncertainFailure(Throwable $failure): ?UserVisibleException
+    {
+        do {
+            if ($failure instanceof UserVisibleException
+                && $failure->publicCode() === TransactionRollbackGuard::ERROR_ROLLBACK_UNCERTAIN) {
+                return $failure;
+            }
+            $failure = $failure->getPrevious();
+        } while ($failure !== null);
+
+        return null;
+    }
+
+    private function assertInstallAvailable(PDO $pdo): void
+    {
+        $installed = $pdo->query("SELECT value FROM settings WHERE key = 'installed_at'")
+            ->fetch(PDO::FETCH_ASSOC);
+        if (is_array($installed)) {
+            throw new RuntimeException(
+                self::ERROR_ALREADY_INSTALLED
+                . ': App is already installed. Use upgrade, configuration import, or a different CPE_DB_PATH for a fresh setup.',
+            );
         }
     }
 
@@ -148,7 +306,10 @@ final class Installer
             $day = trim($part);
             $day = $aliases[$day] ?? $day;
             if ($day !== '' && !in_array($day, $valid, true)) {
-                throw new RuntimeException('Non-operating weekdays contain an unknown weekday: ' . trim($part));
+                throw new UserVisibleException(
+                    'SETUP_WEEKDAY_INVALID',
+                    'Non-operating weekdays contain an unknown weekday. Use Mon, Tue, Wed, Thu, Fri, Sat, or Sun.',
+                );
             }
             if ($day !== '') {
                 $weekdays[$day] = true;
@@ -164,7 +325,10 @@ final class Installer
             return $default;
         }
         if (mb_strlen($value) > 40) {
-            throw new RuntimeException('Terminology labels must be 40 characters or fewer.');
+            throw new UserVisibleException(
+                'SETUP_TERMINOLOGY_TOO_LONG',
+                'Terminology labels must be 40 characters or fewer.',
+            );
         }
         return $value;
     }
@@ -176,7 +340,10 @@ final class Installer
             return $allowEmpty ? '' : $default;
         }
         if (mb_strlen($value) > $maxLength) {
-            throw new RuntimeException($label . ' must be ' . $maxLength . ' characters or fewer.');
+            throw new UserVisibleException(
+                'SETUP_TEXT_TOO_LONG',
+                $label . ' must be ' . $maxLength . ' characters or fewer.',
+            );
         }
         return $value;
     }

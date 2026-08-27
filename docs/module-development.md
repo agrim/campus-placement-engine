@@ -45,9 +45,13 @@ may remain local. Emit a named event after the source transaction's durable
 state exists. Subscribers must be idempotent because an event can be retried or
 replayed.
 
-The outbox envelope is `career_services.domain_event.v1`. Add only stable,
-necessary references to payloads; do not place passwords, session IDs, gateway
-tokens, or unbounded private notes in an event.
+The outbox envelope is `career_services.domain_event.v1`. Its public event ID is
+also the stable idempotency key in file and webhook delivery, and webhook
+requests send it in `X-CPE-Idempotency-Key`. Consumers must deduplicate on that
+key: a successful side effect whose acknowledgement loses its worker claim is
+reported as outcome unknown and may be replayed after stale-claim recovery. Add
+only stable, necessary references to payloads; do not place passwords, session
+IDs, gateway tokens, or unbounded private notes in an event.
 
 ## Privacy And Portability
 

@@ -4,11 +4,13 @@ declare(strict_types=1);
 
 namespace App\Controllers;
 
+use App\Core\Http\UserVisibleException;
 use App\Domain\Workflow;
 use App\Import\CsvImporter;
 use App\Import\ImportRollbackService;
 use App\Security\Csrf;
 use App\Support\Auth;
+use App\Support\ControllerFailure;
 use App\Support\Database;
 use App\Support\Flash;
 
@@ -28,12 +30,12 @@ final class ImportController
         try {
             Csrf::verify($_POST['_token'] ?? null);
             if (!Auth::hasCapability($user, 'placement.import.manage')) {
-                throw new \RuntimeException('Your role cannot import data.');
+                throw new UserVisibleException('IMPORT_FORBIDDEN', 'Your role cannot import data.');
             }
             $type = (string) ($_POST['type'] ?? '');
             $csv = trim((string) ($_POST['csv'] ?? ''));
             if ($csv === '') {
-                throw new \RuntimeException('Paste CSV before importing.');
+                throw new UserVisibleException('IMPORT_CSV_REQUIRED', 'Paste CSV before importing.');
             }
             $action = (string) ($_POST['action'] ?? 'import');
             $pdo = Database::connection();
@@ -74,7 +76,7 @@ final class ImportController
                     'unavailability' => $importer->candidateUnavailability($csv),
                     'shortlists' => $importer->shortlists($csv, $statuses),
                     'legacy' => $importer->legacyWide($csv, $statuses),
-                    default => throw new \RuntimeException('Unknown import type.'),
+                    default => throw new UserVisibleException('IMPORT_TYPE_INVALID', 'Unknown import type.'),
                 };
                 Auth::audit((int) $user['id'], 'import', $type, null, "Imported {$count} rows; rollback snapshot {$rollback['id']}");
                 $pdo->commit();
@@ -84,7 +86,7 @@ final class ImportController
             }
             Flash::add('success', "Imported {$count} {$type} rows. Rollback snapshot: {$rollback['id']}.");
         } catch (\Throwable $e) {
-            Flash::add('error', $e->getMessage());
+            ControllerFailure::flash($e, 'CPE_IMPORT_RUN_FAILURE', 'import.run');
         }
         redirect(url('import'));
     }
@@ -95,14 +97,14 @@ final class ImportController
         try {
             Csrf::verify($_POST['_token'] ?? null);
             if (!Auth::hasCapability($user, 'placement.import.rollback')) {
-                throw new \RuntimeException('Your role cannot restore an import rollback snapshot.');
+                throw new UserVisibleException('IMPORT_ROLLBACK_FORBIDDEN', 'Your role cannot restore an import rollback snapshot.');
             }
             $id = (string) ($_POST['id'] ?? '');
             $manifest = (new ImportRollbackService())->restore($id);
             Auth::audit((int) $user['id'], 'import.rollback', 'import', null, 'Restored import rollback snapshot ' . $manifest['id']);
-            Flash::add('success', 'Restored import rollback snapshot ' . $manifest['id'] . '. Safety copy: ' . $manifest['restore_safety_path']);
+            Flash::add('success', 'Restored import rollback snapshot ' . $manifest['id'] . '. A safety backup was created.');
         } catch (\Throwable $e) {
-            Flash::add('error', $e->getMessage());
+            ControllerFailure::flash($e, 'CPE_IMPORT_ROLLBACK_FAILURE', 'import.rollback');
         }
         redirect(url('import'));
     }

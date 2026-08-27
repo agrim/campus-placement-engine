@@ -4,10 +4,12 @@ declare(strict_types=1);
 
 namespace App\Controllers;
 
+use App\Core\Http\UserVisibleException;
 use App\Domain\Workflow;
 use App\Modules\Placement\Application\PlacementService;
 use App\Security\Csrf;
 use App\Support\Auth;
+use App\Support\ControllerFailure;
 use App\Support\Flash;
 
 final class BoardController
@@ -46,7 +48,7 @@ final class BoardController
         try {
             Csrf::verify($_POST['_token'] ?? null);
             if (!Auth::hasCapability($user, 'placement.application.transition')) {
-                throw new \RuntimeException('Auditors cannot change candidate status.');
+                throw new UserVisibleException('BOARD_TRANSITION_FORBIDDEN', 'Auditors cannot change candidate status.');
             }
             $service = new PlacementService();
             $applicationId = (int) ($_POST['application_id'] ?? 0);
@@ -75,7 +77,7 @@ final class BoardController
                 );
             Flash::add('success', 'Moved to ' . (new Workflow())->statusLabel($next) . '.');
         } catch (\Throwable $e) {
-            Flash::add('error', $e->getMessage());
+            ControllerFailure::flash($e, 'CPE_BOARD_MOVE_FAILURE', 'board.move');
         }
         redirect('/');
     }
@@ -86,7 +88,7 @@ final class BoardController
         try {
             Csrf::verify($_POST['_token'] ?? null);
             if (!Auth::hasCapability($user, 'placement.application.correct')) {
-                throw new \RuntimeException('This user cannot correct candidate status.');
+                throw new UserVisibleException('BOARD_CORRECTION_FORBIDDEN', 'This user cannot correct candidate status.');
             }
             $service = new PlacementService();
             $applicationId = (int) ($_POST['application_id'] ?? 0);
@@ -105,7 +107,7 @@ final class BoardController
             );
             Flash::add('success', 'Returned application to idle.');
         } catch (\Throwable $e) {
-            Flash::add('error', $e->getMessage());
+            ControllerFailure::flash($e, 'CPE_BOARD_CORRECTION_FAILURE', 'board.return_to_idle');
         }
         redirect('/');
     }
@@ -125,7 +127,7 @@ final class BoardController
                 Flash::add('success', 'Board default saved.');
             }
         } catch (\Throwable $e) {
-            Flash::add('error', $e->getMessage());
+            ControllerFailure::flash($e, 'CPE_BOARD_PREFERENCE_FAILURE', 'board.preferences');
         }
         redirect('/');
     }

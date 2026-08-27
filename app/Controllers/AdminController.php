@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Controllers;
 
+use App\Core\Http\UserVisibleException;
 use App\Core\Install\PortalKernelSynchronizer;
 use App\Core\Portal;
 use App\Domain\ConfigurationSnapshotService;
@@ -15,6 +16,7 @@ use App\Modules\Placement\Workflow\WorkflowDefinitionValidator;
 use App\Modules\Placement\Workflow\WorkflowPublisher;
 use App\Security\Csrf;
 use App\Support\Auth;
+use App\Support\ControllerFailure;
 use App\Support\Database;
 use App\Support\Flash;
 use App\Support\TimezoneValidator;
@@ -60,7 +62,7 @@ final class AdminController
         try {
             Csrf::verify($_POST['_token'] ?? null);
             if (!Auth::hasCapability($user, 'portal.settings.manage')) {
-                throw new \RuntimeException('Only administrators can update settings.');
+                throw new UserVisibleException('ADMIN_SETTINGS_FORBIDDEN', 'Only administrators can update settings.');
             }
             $pdo = Database::connection();
             $placement = new PlacementService($pdo);
@@ -93,7 +95,7 @@ final class AdminController
             Auth::audit((int) $user['id'], 'settings.update', 'system', null, 'Updated public settings');
             Flash::add('success', 'Settings updated.');
         } catch (\Throwable $e) {
-            Flash::add('error', $e->getMessage());
+            ControllerFailure::flash($e, 'CPE_ADMIN_SETTINGS_FAILURE', 'admin.settings');
         }
         redirect(url('admin'));
     }
@@ -104,11 +106,11 @@ final class AdminController
         try {
             Csrf::verify($_POST['_token'] ?? null);
             if (!Auth::hasCapability($user, 'portal.users.manage')) {
-                throw new \RuntimeException('Only administrators can create users.');
+                throw new UserVisibleException('ADMIN_USER_CREATE_FORBIDDEN', 'Only administrators can create users.');
             }
             $role = (string) ($_POST['role'] ?? '');
             if (!array_key_exists($role, cpe_config('roles'))) {
-                throw new \RuntimeException('Unknown role.');
+                throw new UserVisibleException('ADMIN_ROLE_INVALID', 'Unknown role.');
             }
             $id = Auth::createUser(
                 trim((string) ($_POST['name'] ?? '')),
@@ -121,7 +123,7 @@ final class AdminController
             Auth::audit((int) $user['id'], 'user.create', 'user', $id, 'Created user');
             Flash::add('success', 'User created.');
         } catch (\Throwable $e) {
-            Flash::add('error', $e->getMessage());
+            ControllerFailure::flash($e, 'CPE_ADMIN_USER_CREATE_FAILURE', 'admin.user.create');
         }
         redirect(url('admin'));
     }
@@ -132,12 +134,12 @@ final class AdminController
         try {
             Csrf::verify($_POST['_token'] ?? null);
             if (!Auth::hasCapability($user, 'portal.users.manage')) {
-                throw new \RuntimeException('Only administrators can update users.');
+                throw new UserVisibleException('ADMIN_USERS_UPDATE_FORBIDDEN', 'Only administrators can update users.');
             }
             Auth::setActiveBulk($_POST['active'] ?? [], (int) $user['id']);
             Flash::add('success', 'User activation settings updated.');
         } catch (\Throwable $e) {
-            Flash::add('error', $e->getMessage());
+            ControllerFailure::flash($e, 'CPE_ADMIN_USERS_UPDATE_FAILURE', 'admin.users.update');
         }
         redirect(url('admin'));
     }
@@ -148,12 +150,12 @@ final class AdminController
         try {
             Csrf::verify($_POST['_token'] ?? null);
             if (!Auth::hasCapability($user, 'portal.users.manage')) {
-                throw new \RuntimeException('Only administrators can reset passwords.');
+                throw new UserVisibleException('ADMIN_PASSWORD_RESET_FORBIDDEN', 'Only administrators can reset passwords.');
             }
             Auth::setPassword((int) ($_POST['user_id'] ?? 0), (string) ($_POST['password'] ?? ''), (int) $user['id']);
             Flash::add('success', 'Password reset.');
         } catch (\Throwable $e) {
-            Flash::add('error', $e->getMessage());
+            ControllerFailure::flash($e, 'CPE_ADMIN_PASSWORD_RESET_FAILURE', 'admin.password.reset');
         }
         redirect(url('admin'));
     }
@@ -164,7 +166,7 @@ final class AdminController
         try {
             Csrf::verify($_POST['_token'] ?? null);
             if (!Auth::hasCapability($user, 'placement.workflow.manage')) {
-                throw new \RuntimeException('Only administrators can update workflow labels.');
+                throw new UserVisibleException('ADMIN_WORKFLOW_FORBIDDEN', 'Only administrators can update workflow labels.');
             }
             $pdo = Database::connection();
             (new ConfigurationSnapshotService($pdo))->assertConfigurationMutable();
@@ -179,7 +181,7 @@ final class AdminController
             Auth::audit((int) $user['id'], 'workflow.publish', 'workflow_version', $versionId, 'Published immutable workflow version');
             Flash::add('success', 'Workflow version published. Existing applications remain on their original version.');
         } catch (\Throwable $e) {
-            Flash::add('error', $e->getMessage());
+            ControllerFailure::flash($e, 'CPE_ADMIN_WORKFLOW_FAILURE', 'admin.workflow');
         }
         redirect(url('admin'));
     }
@@ -244,7 +246,10 @@ final class AdminController
             return;
         }
         if (($settings['configuration_freeze'] ?? '1') !== '0') {
-            throw new \RuntimeException('Configuration changes are frozen. Unfreeze configuration before changing settings.');
+            throw new UserVisibleException(
+                'CONFIGURATION_FROZEN',
+                'Configuration changes are frozen. Unfreeze configuration before changing settings.',
+            );
         }
         $changed = [];
         foreach ($settings as $key => $value) {
@@ -257,7 +262,10 @@ final class AdminController
             }
         }
         if ($changed !== []) {
-            throw new \RuntimeException('Configuration changes are frozen. Unfreeze configuration before changing other settings.');
+            throw new UserVisibleException(
+                'CONFIGURATION_UNFREEZE_ONLY',
+                'Configuration changes are frozen. Unfreeze configuration before changing other settings.',
+            );
         }
     }
 
@@ -332,7 +340,7 @@ final class AdminController
             return $default;
         }
         if (mb_strlen($value) > 40) {
-            throw new \RuntimeException('Terminology labels must be 40 characters or fewer.');
+            throw new UserVisibleException('ADMIN_TERMINOLOGY_INVALID', 'Terminology labels must be 40 characters or fewer.');
         }
         return $value;
     }
@@ -344,7 +352,7 @@ final class AdminController
             return $allowEmpty ? '' : $default;
         }
         if (mb_strlen($value) > $maxLength) {
-            throw new \RuntimeException($label . ' must be ' . $maxLength . ' characters or fewer.');
+            throw new UserVisibleException('ADMIN_IDENTITY_TEXT_INVALID', $label . ' must be ' . $maxLength . ' characters or fewer.');
         }
         return $value;
     }
@@ -372,7 +380,7 @@ final class AdminController
             $day = trim($part);
             $day = $aliases[$day] ?? $day;
             if ($day !== '' && !in_array($day, $valid, true)) {
-                throw new \RuntimeException('Non-operating weekdays contain an unknown weekday: ' . trim($part));
+                throw new UserVisibleException('ADMIN_WEEKDAY_INVALID', 'Non-operating weekdays contain an unknown weekday.');
             }
             if ($day !== '') {
                 $weekdays[$day] = true;
@@ -389,7 +397,7 @@ final class AdminController
         }
         $date = \DateTimeImmutable::createFromFormat('!Y-m-d', $value);
         if (!$date || $date->format('Y-m-d') !== $value) {
-            throw new \RuntimeException($label . ' must use YYYY-MM-DD.');
+            throw new UserVisibleException('ADMIN_DATE_INVALID', $label . ' must use YYYY-MM-DD.');
         }
         return $value;
     }
@@ -412,7 +420,7 @@ final class AdminController
     {
         $value = strtolower(trim($value));
         if (!in_array($value, ['none', 'ip', 'user_agent', 'both'], true)) {
-            throw new \RuntimeException('Audit request metadata must be none, ip, user_agent, or both.');
+            throw new UserVisibleException('ADMIN_AUDIT_METADATA_INVALID', 'Audit request metadata must be none, ip, user_agent, or both.');
         }
         return $value;
     }

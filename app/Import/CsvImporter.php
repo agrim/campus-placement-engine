@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Import;
 
+use App\Core\Http\UserVisibleException;
 use App\Modules\Placement\Install\LegacyDomainSynchronizer;
 use App\Modules\Placement\Workflow\WorkflowRepository;
 use PDO;
@@ -111,20 +112,20 @@ final class CsvImporter
         }
         $payload = json_decode($json, true);
         if (!is_array($payload) || array_is_list($payload)) {
-            throw new RuntimeException('Import header aliases must be a JSON object of canonical_field to alias list.');
+            throw new UserVisibleException('IMPORT_HEADER_ALIASES_INVALID', 'Import header aliases must be a JSON object of canonical_field to alias list.');
         }
         $known = array_fill_keys(self::KNOWN_IMPORT_FIELDS, true);
         $normalized = [];
         foreach ($payload as $canonical => $aliases) {
             $canonicalKey = $this->normalizeHeaderKey((string) $canonical);
             if ($canonicalKey === '' || !isset($known[$canonicalKey])) {
-                throw new RuntimeException('Import header aliases reference an unknown field: ' . (string) $canonical);
+                throw new UserVisibleException('IMPORT_HEADER_FIELD_UNKNOWN', 'Import header aliases reference an unknown field.');
             }
             if (is_string($aliases)) {
                 $aliases = array_map('trim', explode(',', $aliases));
             }
             if (!is_array($aliases)) {
-                throw new RuntimeException('Import header aliases for ' . $canonicalKey . ' must be a string or list.');
+                throw new UserVisibleException('IMPORT_HEADER_ALIASES_INVALID', 'Import header aliases must be a string or list for each field.');
             }
             $seen = [];
             foreach ($aliases as $alias) {
@@ -159,7 +160,7 @@ final class CsvImporter
             'unavailability' => $this->previewCandidateUnavailability($csv),
             'shortlists' => $this->previewShortlists($csv, $validStatuses),
             'legacy' => $this->previewLegacyWide($csv, $validStatuses),
-            default => throw new RuntimeException('Unknown import type.'),
+            default => throw new UserVisibleException('IMPORT_TYPE_INVALID', 'Unknown import type.'),
         };
     }
 
@@ -915,23 +916,23 @@ final class CsvImporter
 
         $headers = fgetcsv($handle, null, ',', '"', '');
         if (!$headers) {
-            throw new RuntimeException('CSV has no header row.');
+            throw new UserVisibleException('IMPORT_HEADER_REQUIRED', 'CSV has no header row.');
         }
         $rawHeaders = array_map(fn ($h) => trim((string) $h), $headers);
         $headers = [];
         foreach ($rawHeaders as $header) {
             $normalized = $this->normalizeHeader($header, $required);
             if ($normalized === '') {
-                throw new RuntimeException('CSV has an empty header column.');
+                throw new UserVisibleException('IMPORT_HEADER_EMPTY', 'CSV has an empty header column.');
             }
             if (in_array($normalized, $headers, true)) {
-                throw new RuntimeException("CSV has duplicate column after header normalization: {$normalized}");
+                throw new UserVisibleException('IMPORT_HEADER_DUPLICATE', 'CSV has duplicate column after header normalization.');
             }
             $headers[] = $normalized;
         }
         foreach ($required as $field) {
             if (!in_array($field, $headers, true)) {
-                throw new RuntimeException("CSV missing required column: {$field}");
+                throw new UserVisibleException('IMPORT_HEADER_MISSING', 'CSV is missing a required column.');
             }
         }
 
@@ -950,7 +951,7 @@ final class CsvImporter
             if (implode('', $row) !== '') {
                 if (count($rows) + 1 > $maxRows) {
                     fclose($handle);
-                    throw new RuntimeException("CSV input has too many data rows. Limit is {$maxRows}.");
+                    throw new UserVisibleException('IMPORT_ROW_LIMIT_EXCEEDED', "CSV input has too many data rows. Limit is {$maxRows}.");
                 }
                 $row['__row'] = (string) $line;
                 $rows[] = $row;
@@ -965,7 +966,7 @@ final class CsvImporter
         $maxBytes = $this->maxCsvBytes();
         $bytes = strlen($csv);
         if ($bytes > $maxBytes) {
-            throw new RuntimeException("CSV input is too large. Limit is {$maxBytes} bytes.");
+            throw new UserVisibleException('IMPORT_SIZE_LIMIT_EXCEEDED', "CSV input is too large. Limit is {$maxBytes} bytes.");
         }
     }
 
@@ -1147,8 +1148,8 @@ final class CsvImporter
     {
         try {
             $this->normalizeCustomFieldsJson((string) ($row['custom_fields_json'] ?? ''), $label, (int) ($row['__row'] ?? 0));
-        } catch (RuntimeException $e) {
-            $this->addError($report, (int) ($row['__row'] ?? 0), $e->getMessage());
+        } catch (UserVisibleException $e) {
+            $this->addError($report, (int) ($row['__row'] ?? 0), $e->publicMessage());
         }
     }
 
@@ -1159,11 +1160,11 @@ final class CsvImporter
             return '{}';
         }
         if (strlen($value) > 5000) {
-            throw new RuntimeException($label . ' JSON must be 5000 bytes or fewer.');
+            throw new UserVisibleException('IMPORT_CUSTOM_FIELDS_INVALID', $label . ' JSON must be 5000 bytes or fewer.');
         }
         $payload = json_decode($value);
         if (!$payload instanceof \stdClass) {
-            throw new RuntimeException($label . ' must be a JSON object.');
+            throw new UserVisibleException('IMPORT_CUSTOM_FIELDS_INVALID', $label . ' must be a JSON object.');
         }
         $fields = get_object_vars($payload);
         ksort($fields);
@@ -1171,10 +1172,10 @@ final class CsvImporter
         foreach ($fields as $key => $fieldValue) {
             $key = trim((string) $key);
             if ($key === '' || strlen($key) > 60) {
-                throw new RuntimeException($label . ' keys must be 1 to 60 characters.');
+                throw new UserVisibleException('IMPORT_CUSTOM_FIELDS_INVALID', $label . ' keys must be 1 to 60 characters.');
             }
             if (is_array($fieldValue) || is_object($fieldValue)) {
-                throw new RuntimeException($label . ' values must be strings, numbers, booleans, or null.');
+                throw new UserVisibleException('IMPORT_CUSTOM_FIELDS_INVALID', $label . ' values must be strings, numbers, booleans, or null.');
             }
             $normalized->{$key} = $fieldValue;
         }

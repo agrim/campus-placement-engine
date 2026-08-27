@@ -118,6 +118,22 @@ php placement deliver-notifications --channel=sms --dry-run
 php placement deliver-notifications --channel=whatsapp --dry-run
 ```
 
+Live delivery atomically claims rows with a bounded lease. Each acknowledgement
+or retry/dead-letter mutation is fenced by that claim token; a side effect that
+succeeds after its claim is lost is reported as outcome unknown and is never
+misclassified as a delivery failure. Stale claims can be reclaimed after the
+configured lease timeout. Dry runs only inspect currently available rows and do
+not claim them or increment attempts.
+
+Every delivery row receives a random `ndk_...` idempotency key that remains
+stable across retries. JSONL and gateway envelopes include `idempotency_key`;
+HTTP delivery also sends it as `X-CPE-Idempotency-Key`, and email includes the
+same value as a header. Downstream consumers must deduplicate on this value,
+because an outcome-unknown delivery can be retried after its lease becomes
+stale. Delivery state stores only fixed channel/configuration references;
+resolved email addresses, phone routes, URLs, hosts, and file paths never enter
+the delivery row, CLI output, or snapshot delivery export.
+
 Before connecting a live SMS or WhatsApp gateway, run the local certification
 preflight:
 
@@ -148,6 +164,7 @@ SMS and WhatsApp gateway payloads are JSON:
 
 ```json
 {
+  "idempotency_key": "ndk_0123456789abcdef0123456789abcdef",
   "channel": "sms",
   "to": "+910000000000",
   "text": "Wanted: C001 - Please locate candidate.",

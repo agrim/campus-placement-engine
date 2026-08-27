@@ -22,9 +22,13 @@ use App\Domain\PrivacyService;
 use App\Domain\SnapshotExporter;
 use App\Domain\Workflow;
 use App\Core\Portal;
+use App\Core\Backup\BackupMetadata;
+use App\Core\Backup\DatabaseBackupService;
+use App\Core\Backup\DatabaseRestoreService;
 use App\Core\Events\DomainEvent;
 use App\Core\Events\DomainEventOutboxWorker;
 use App\Core\Http\AuthorizationException;
+use App\Core\Http\UserVisibleException;
 use App\Core\Modules\ModuleLifecycleService;
 use App\Core\Modules\ModuleManifest;
 use App\Core\Portability\PortalPortabilityService;
@@ -403,7 +407,7 @@ test_case('domain event outbox claims delivers retries and dead letters without 
         $row = $pdo->query("SELECT processed_at, attempts, delivered_to FROM domain_event_outbox WHERE public_id = " . $pdo->quote($publicId))->fetch();
         assert_true((string) $row['processed_at'] !== '', 'Delivered event should be acknowledged');
         assert_same(1, (int) $row['attempts'], 'A claim should increment attempts exactly once');
-        assert_true(str_starts_with((string) $row['delivered_to'], 'jsonl:'), 'Delivered event should record a non-secret destination');
+        assert_same('file', (string) $row['delivered_to'], 'Delivered event should record only the fixed destination kind');
         assert_same(0, (new DomainEventOutboxWorker($pdo))->work(10)['claimed'], 'Acknowledged events should not be claimed again');
 
         cpe_context()->events()->dispatch(new DomainEvent(
@@ -439,8 +443,34 @@ test_case('logical portability bundle round trips placement data and rejects tam
     $root = sys_get_temp_dir() . '/cpe-portability-' . bin2hex(random_bytes(4));
     $bundle = $root . '/bundle';
     $targetDb = $root . '/target.sqlite';
+    $hostedTargetDb = $root . '/hosted-target.sqlite';
     $backupDir = $root . '/backups';
+    $hostedBackupDir = $root . '/hosted-backups';
     mkdir($root, 0775, true);
+
+    $snapshot = static function (PDO $pdo): array {
+        $schema = $pdo->query(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+        )->fetchAll(PDO::FETCH_ASSOC);
+        $tables = $pdo->query(
+            "SELECT name FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+        )->fetchAll(PDO::FETCH_COLUMN);
+        $rows = [];
+        foreach (array_map('strval', $tables) as $table) {
+            assert_true(preg_match('/\A[a-z_]+\z/D', $table) === 1, 'Unexpected portability table identifier');
+            $tableRows = $pdo->query('SELECT * FROM ' . $table)->fetchAll(PDO::FETCH_ASSOC);
+            foreach ($tableRows as &$row) {
+                ksort($row);
+            }
+            unset($row);
+            usort($tableRows, static fn (array $left, array $right): int => strcmp(
+                json_encode($left, JSON_THROW_ON_ERROR),
+                json_encode($right, JSON_THROW_ON_ERROR),
+            ));
+            $rows[$table] = $tableRows;
+        }
+        return ['schema' => $schema, 'rows' => $rows];
+    };
 
     $tables = [
         'candidates',
@@ -467,7 +497,13 @@ test_case('logical portability bundle round trips placement data and rejects tam
     }
     $sourceCandidateIds = $sourcePdo->query('SELECT public_id FROM candidates ORDER BY public_id')->fetchAll(PDO::FETCH_COLUMN);
     $sourceApplicationIds = $sourcePdo->query('SELECT public_id FROM applications ORDER BY public_id')->fetchAll(PDO::FETCH_COLUMN);
-    $sourceInstitutionId = (string) $sourcePdo->query("SELECT public_id FROM institutions WHERE slug = 'default'")->fetchColumn();
+    $sourcePdo->exec(
+        "UPDATE institutions SET created_at = '1999-01-01 00:00:00', updated_at = '2000-01-01 00:00:00' WHERE slug = 'default'",
+    );
+    $sourceInstitution = $sourcePdo->query(
+        "SELECT public_id, created_at, updated_at FROM institutions WHERE slug = 'default'",
+    )->fetch(PDO::FETCH_ASSOC);
+    assert_true(is_array($sourceInstitution), 'Source institution identity should exist');
 
     try {
         $export = (new PortalPortabilityService($sourcePdo))->export($bundle);
@@ -492,20 +528,67 @@ test_case('logical portability bundle round trips placement data and rejects tam
         ]);
         putenv('CPE_BACKUP_DIR=' . $backupDir);
         $targetPdo = Database::connection();
+        $targetInstitutionBefore = $targetPdo->query(
+            "SELECT public_id, created_at, updated_at FROM institutions WHERE slug = 'default'",
+        )->fetch(PDO::FETCH_ASSOC);
+        assert_true(is_array($targetInstitutionBefore), 'Target institution identity should exist');
+        $targetSchemaBefore = $targetPdo->query(
+            "SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name",
+        )->fetchAll(PDO::FETCH_ASSOC);
         $service = new PortalPortabilityService($targetPdo);
         $validation = $service->validate($bundle);
         assert_same($export['bundle_id'], $validation['bundle_id'], 'Bundle id should validate');
         $result = $service->import($bundle);
-        assert_true(is_file((string) $result['backup_path']), 'Import should create a pre-import backup');
-        assert_true(is_file((string) $result['backup_path'] . '.sha256'), 'Import backup should have a checksum');
+        assert_true(preg_match('/^backup_[a-f0-9]{24}$/', (string) $result['safety_reference']) === 1, 'Import should return an opaque safety reference');
+        assert_true(count(glob($backupDir . '/*.{sqlite,pgdump}', GLOB_BRACE) ?: []) >= 1, 'Import should create a pre-import backup');
+        assert_true(count(glob($backupDir . '/*.{sqlite,pgdump}.sha256', GLOB_BRACE) ?: []) >= 1, 'Import backup should have a checksum');
 
         foreach ($sourceCounts as $table => $count) {
             assert_same($count, (int) $targetPdo->query("SELECT COUNT(*) FROM {$table}")->fetchColumn(), 'Round-trip count for ' . $table);
         }
         assert_same($sourceCandidateIds, $targetPdo->query('SELECT public_id FROM candidates ORDER BY public_id')->fetchAll(PDO::FETCH_COLUMN), 'Candidate public ids should survive round trip');
         assert_same($sourceApplicationIds, $targetPdo->query('SELECT public_id FROM applications ORDER BY public_id')->fetchAll(PDO::FETCH_COLUMN), 'Application public ids should survive round trip');
-        assert_same($sourceInstitutionId, (string) $targetPdo->query("SELECT public_id FROM institutions WHERE slug = 'default'")->fetchColumn(), 'Institution identity should survive round trip');
+        $targetInstitutionAfter = $targetPdo->query(
+            "SELECT public_id, created_at, updated_at FROM institutions WHERE slug = 'default'",
+        )->fetch(PDO::FETCH_ASSOC);
+        assert_true(is_array($targetInstitutionAfter), 'Imported target institution identity should exist');
+        assert_same($targetInstitutionBefore['public_id'], $targetInstitutionAfter['public_id'], 'Portability must preserve the installed target public id');
+        assert_same($targetInstitutionBefore['created_at'], $targetInstitutionAfter['created_at'], 'Portability must preserve the installed target creation time');
+        assert_true($targetInstitutionAfter['public_id'] !== $sourceInstitution['public_id'], 'Cross-instance portability must not copy the source institution id');
+        assert_true($targetInstitutionAfter['updated_at'] !== $sourceInstitution['updated_at'], 'Portability must not copy the source institution update time');
+        assert_same(
+            $targetSchemaBefore,
+            $targetPdo->query("SELECT type, name, tbl_name, sql FROM sqlite_master WHERE name NOT LIKE 'sqlite_%' ORDER BY type, name")->fetchAll(PDO::FETCH_ASSOC),
+            'Logical portability must not change the target schema',
+        );
         assert_true(Auth::attempt('target-admin@test.local', 'target-password-123'), 'Target administrator should remain local to the target installation');
+
+        Database::useProvider(new SqliteConnectionProvider($hostedTargetDb));
+        (new Installer())->installHosted([
+            'college_name' => 'Hosted Target College',
+            'timezone' => 'UTC',
+            'admin_name' => 'Hosted Target Administrator',
+            'admin_email' => 'hosted-target-admin@example.test',
+            'admin_password' => 'hosted-target-password-123',
+            'seed_demo' => '1',
+        ], 'tenant_' . str_repeat('c', 32));
+        putenv('CPE_BACKUP_DIR=' . $hostedBackupDir);
+        $hostedTargetPdo = Database::connection();
+        $hostedTargetBefore = $snapshot($hostedTargetPdo);
+        try {
+            (new PortalPortabilityService($hostedTargetPdo))->import($bundle);
+            throw new RuntimeException('Hosted target accepted a self-hosted portability bundle.');
+        } catch (RuntimeException $e) {
+            assert_true(
+                str_contains($e->getMessage(), 'not compatible'),
+                'Hosted portability mismatch should fail with fixed identity guidance',
+            );
+        }
+        assert_same($hostedTargetBefore, $snapshot($hostedTargetPdo), 'Hosted portability identity rejection must be exactly non-mutating');
+        assert_true(!is_dir($hostedBackupDir) || (glob($hostedBackupDir . '/*') ?: []) === [], 'Hosted identity mismatch must fail before creating a safety backup');
+
+        Database::useProvider(new SqliteConnectionProvider($targetDb));
+        $service = new PortalPortabilityService(Database::connection());
 
         file_put_contents($bundle . '/modules/placement.json', "\n", FILE_APPEND);
         try {
@@ -617,8 +700,10 @@ test_case('portal privacy orchestrates every installed module under one safety b
     $report = $privacy->report($personPublicId);
     assert_true(isset($report['modules']['placement'], $report['modules']['advising']), 'Portal privacy report should include every installed module');
     $result = $privacy->erase($personPublicId, 'Portal privacy integration test', 1);
-    assert_true(is_file($result['backup_path']), 'Portal privacy erasure should create one safety backup');
-    assert_true(is_file($result['backup_path'] . '.sha256'), 'Portal privacy safety backup should have a checksum');
+    assert_true(preg_match('/^backup_[a-f0-9]{24}$/', (string) $result['safety_reference']) === 1, 'Portal privacy erasure should return an opaque safety reference');
+    $privacyDir = (string) getenv('CPE_PRIVACY_SNAPSHOT_DIR');
+    assert_true(count(glob($privacyDir . '/*.{sqlite,pgdump}', GLOB_BRACE) ?: []) >= 1, 'Portal privacy erasure should create one safety backup');
+    assert_true(count(glob($privacyDir . '/*.{sqlite,pgdump}.sha256', GLOB_BRACE) ?: []) >= 1, 'Portal privacy safety backup should have a checksum');
     assert_true(isset($result['modules']['placement'], $result['modules']['advising']), 'Portal privacy erasure should invoke every installed module');
     assert_same('Anonymized Person', (string) $pdo->query("SELECT display_name FROM people WHERE public_id = " . $pdo->quote($personPublicId))->fetchColumn(), 'Core person should be anonymized');
     assert_same('[redacted by privacy erasure]', (string) $pdo->query("SELECT body FROM advising_notes WHERE appointment_id = {$appointmentId}")->fetchColumn(), 'Advising data should be redacted by portal erasure');
@@ -1235,7 +1320,7 @@ test_case('spreadsheet CSV cells neutralize formula prefixes', function (): void
 });
 
 test_case('structured logs keep request correlation while redacting common secrets', function (): void {
-    $path = sys_get_temp_dir() . '/cpe-structured-log-' . bin2hex(random_bytes(4)) . '.jsonl';
+    $path = (realpath(sys_get_temp_dir()) ?: sys_get_temp_dir()) . '/cpe-structured-log-' . bin2hex(random_bytes(4)) . '.jsonl';
     try {
         putenv('CPE_LOG_PATH=' . $path);
         StructuredLogger::log('error', 'security.contract', [
@@ -1287,6 +1372,7 @@ test_case('starter configuration templates validate for every workflow', functio
 
 test_case('open-source release governance files and ignore protections exist', function (): void {
     $root = dirname(__DIR__);
+    assert_same('0.1.0-alpha.2', cpe_config('app.version'), 'Release package version');
     foreach ([
         'README.md',
         'LICENSE',
@@ -1310,6 +1396,7 @@ test_case('open-source release governance files and ignore protections exist', f
         'docs/privacy-retention.md',
         'docs/release-checklist.md',
         'docs/releases/v0.1.0-alpha.1.md',
+        'docs/releases/v0.1.0-alpha.2.md',
         'INSTALL.md',
         'examples/csv-templates/README.md',
         'examples/csv-templates/candidate_unavailability_windows.csv',
@@ -1323,6 +1410,14 @@ test_case('open-source release governance files and ignore protections exist', f
         'examples/env/local.env.example',
         'examples/deployment/apache-vhost.conf',
         'examples/deployment/nginx-server.conf',
+        'app/Core/Backup/BackupArtifact.php',
+        'app/Core/Backup/BackupMetadata.php',
+        'app/Core/Backup/LegacySqliteBackupConverter.php',
+        'app/Core/Persistence/DatabaseConnectionInvalidException.php',
+        'tests/alpha1_release_acceptance.php',
+        'tests/backup_restore_contract.php',
+        'tests/database_connection_cleanup_contract.php',
+        'tests/legacy_backup_compatibility_contract.php',
         '.github/workflows/ci.yml',
         '.github/workflows/release.yml',
         '.github/ISSUE_TEMPLATE/bug_report.md',
@@ -1331,15 +1426,53 @@ test_case('open-source release governance files and ignore protections exist', f
         assert_true(is_file($root . '/' . $path), "Missing release governance file: {$path}");
     }
     $ci = (string) file_get_contents($root . '/.github/workflows/ci.yml');
-    foreach (['php tests/run.php', 'php placement publication-check', 'php placement package', 'php placement verify-package', 'php placement install', 'php placement upgrade', 'php placement setup --check', 'php placement serve --help', 'php placement install-demo', 'php placement seed-large-demo', 'php placement browser-qa-plan', 'php placement smoke-http', 'php placement readiness', 'php placement metrics', 'php placement placement-report', 'php placement privacy-report', 'php placement export', 'php placement rollback-import', 'php placement config-export', 'php placement config-validate', 'php placement config-import', 'php placement deliver-notifications', 'php placement certify-notifications', 'php placement optimize-slots', 'php placement assign-optimized-slots', 'php -l placement'] as $command) {
+    foreach (['php tests/run.php', 'php tests/alpha1_release_acceptance.php', 'php tests/backup_restore_contract.php', 'php tests/database_connection_cleanup_contract.php', 'php tests/incident_boundary_contract.php', 'php tests/legacy_backup_compatibility_contract.php', 'php tests/worker_delivery_contract.php', 'php tests/database_ownership_contract.php', 'php tests/migration_lock_contract.php', 'php tests/database_lock_release_contract.php', 'php tests/install_concurrency_contract.php', 'php tests/hosted_install_atomicity_contract.php', 'php tests/hosted_install_preflight_contract.php', 'php tests/setup_authorization_contract.php', 'php tests/hosted_install_contract.php', 'php tests/managed_hosting_contract.php', 'php placement publication-check', 'php placement package', 'php placement verify-package', 'php placement install', 'php placement upgrade', 'php placement setup --check', 'php placement serve --help', 'php placement install-demo', 'php placement seed-large-demo', 'php placement browser-qa-plan', 'php placement smoke-http', 'php placement readiness', 'php placement metrics', 'php placement placement-report', 'php placement privacy-report', 'php placement export', 'php placement rollback-import', 'php placement config-export', 'php placement config-validate', 'php placement config-import', 'php placement deliver-notifications', 'php placement certify-notifications', 'php placement optimize-slots', 'php placement assign-optimized-slots', 'php -l placement'] as $command) {
         assert_true(str_contains($ci, $command), "Missing CI command: {$command}");
     }
+    $releaseWorkflow = (string) file_get_contents($root . '/.github/workflows/release.yml');
+    foreach ([$ci, $releaseWorkflow] as $workflow) {
+        assert_true(
+            str_contains($workflow, 'git archive --format=tar v0.1.0-alpha.1')
+                && str_contains($workflow, 'CPE_ALPHA1_DATABASE_FIXTURE=')
+                && str_contains($workflow, 'CPE_ALPHA1_BACKUP_FIXTURE=')
+                && str_contains($workflow, 'php tests/alpha1_release_acceptance.php'),
+            'CI and release must construct and test exact public alpha.1 artifacts.',
+        );
+        assert_true(
+            str_contains($workflow, 'cpe_hosted_atomicity_contract')
+                && str_contains($workflow, 'php tests/hosted_install_atomicity_contract.php'),
+            'CI and release must run hosted install atomicity against a fresh dedicated PostgreSQL database.',
+        );
+        assert_true(
+            str_contains($workflow, 'cpe_database_lock_release_contract')
+                && str_contains($workflow, 'php tests/database_lock_release_contract.php'),
+            'CI and release must fault checked PostgreSQL lock release in a fresh dedicated database.',
+        );
+        assert_true(
+            str_contains($workflow, 'cpe_backup_restore_contract')
+                && str_contains($workflow, 'php tests/backup_restore_contract.php'),
+            'CI and release must run backup/restore identity validation against a fresh dedicated PostgreSQL database.',
+        );
+        assert_true(
+            str_contains($workflow, 'cpe_database_connection_cleanup_contract')
+                && str_contains($workflow, 'php tests/database_connection_cleanup_contract.php'),
+            'CI and release must run invalid-connection cleanup against a fresh dedicated PostgreSQL database.',
+        );
+    }
     $deployment = (string) file_get_contents($root . '/docs/deployment.md');
-    foreach (['examples/deployment/apache-vhost.conf', 'examples/deployment/nginx-server.conf', 'point the virtual host document root at `public/`', 'public/.htaccess'] as $snippet) {
+    foreach (['examples/deployment/apache-vhost.conf', 'examples/deployment/nginx-server.conf', 'point the virtual host document root at `public/`', 'public/.htaccess', 'CPE_SETUP_TOKEN', 'php placement setup', 'cpe_database_ownership', 'no force/rebind flag', 'cpe.engine-migrations', 'cpe.engine-installation'] as $snippet) {
         assert_true(str_contains($deployment, $snippet), "Missing deployment guidance: {$snippet}");
     }
+    $managedHosting = (string) file_get_contents($root . '/docs/managed-hosting-contract.md');
+    foreach (['DatabaseOwnership::claimOrVerify()', 'cpe.database-ownership', 'SqlMigrationRunner', 'cpe.engine-migrations', 'cpe.engine-installation', 'Contract version 2', '`installHosted()` is the only path', 'future pin update', 'CPE_DATABASE_OWNERSHIP_CONFLICT', 'CPE_DATABASE_OWNERSHIP_AMBIGUOUS', 'CPE_DATABASE_OWNERSHIP_CORRUPT', 'CPE_DATABASE_OWNERSHIP_VERSION_UNSUPPORTED'] as $snippet) {
+        assert_true(str_contains($managedHosting, $snippet), "Missing database ownership contract guidance: {$snippet}");
+    }
+    $disasterRecovery = (string) file_get_contents($root . '/docs/disaster-recovery.md');
+    foreach (['cpe_database_ownership', 'permanent recovery evidence', 'Never delete or rewrite the row', 'cpe.engine-migrations'] as $snippet) {
+        assert_true(str_contains($disasterRecovery, $snippet), "Missing ownership recovery guidance: {$snippet}");
+    }
     $environment = (string) file_get_contents($root . '/docs/environment.md');
-    foreach (['CPE_DB_PATH', 'CPE_ADMIN_PASSWORD', 'CPE_SESSION_SECURE', 'CPE_IMPORT_MAX_BYTES', 'CPE_NOTIFICATION_WEBHOOK_URL', 'examples/env/local.env.example'] as $snippet) {
+    foreach (['CPE_DB_PATH', 'CPE_ADMIN_PASSWORD', 'CPE_SETUP_TOKEN', 'CPE_SESSION_SECURE', 'CPE_IMPORT_MAX_BYTES', 'CPE_NOTIFICATION_WEBHOOK_URL', 'examples/env/local.env.example'] as $snippet) {
         assert_true(str_contains($environment, $snippet), "Missing environment guidance: {$snippet}");
     }
     $envExample = (string) file_get_contents($root . '/examples/env/local.env.example');
@@ -1355,11 +1488,11 @@ test_case('open-source release governance files and ignore protections exist', f
         assert_true(str_contains($nginx, $snippet), "Missing Nginx deployment safeguard: {$snippet}");
     }
     $gitignore = (string) file_get_contents($root . '/.gitignore');
-    foreach (['/.legacy-private/', '/http/', '/dist/', '/website/node_modules/', '/website/dist/', '/website/coverage/', '/website/playwright-report/', '/website/test-results/', '/.env', '/.env.*', '/config/local.php', '/data/*.sqlite', '/data/backups/', '/data/config/', '/data/imports/', '/data/privacy/', '*.zip', '*.7z', '*.rar', '*.xlsx', '*.docx', '*.sql', '!/database/migrations/*.sql', '!/database/migrations/pgsql/*.sql'] as $pattern) {
+    foreach (['/.legacy-private/', '/http/', '/dist/', '/website/node_modules/', '/website/dist/', '/website/coverage/', '/website/playwright-report/', '/website/test-results/', '/.env', '/.env.*', '/config/local.php', '/data/*.sqlite', '/data/backups/', '/data/config/', '/data/imports/', '/data/privacy/', '/data/restore-staging/', '/data/setup/', '*.zip', '*.7z', '*.rar', '*.xlsx', '*.docx', '*.sql', '!/database/migrations/*.sql', '!/database/migrations/pgsql/*.sql'] as $pattern) {
         assert_true(str_contains($gitignore, $pattern), "Missing .gitignore protection: {$pattern}");
     }
     $migrationGuide = (string) file_get_contents($root . '/docs/migration-from-legacy.md');
-    foreach (['legacy_wide.csv', 'stat1', 'gd_round', 'Preview CSV', '.legacy-private/', 'Do not publish, commit, or attach historical raw data'] as $snippet) {
+    foreach (['legacy_wide.csv', 'stat1', 'gd_round', 'Preview CSV', 'convert-legacy-backup', 'legacy_conversion_required', '.legacy-private/', 'Do not publish, commit, or attach historical raw data'] as $snippet) {
         assert_true(str_contains($migrationGuide, $snippet), "Missing migration-guide warning or mapping: {$snippet}");
     }
 });
@@ -1386,7 +1519,7 @@ test_case('slot CLI commands reject unknown company filters', function (): void 
         [$code, $stdout, $stderr] = run_cli([$command, 'NO_SUCH_COMPANY']);
         assert_same(1, $code, "{$command} should fail for unknown company code");
         assert_same('', $stdout, "{$command} should not emit a misleading empty queue");
-        assert_true(str_contains($stderr, 'Company code not found: NO_SUCH_COMPANY'), "{$command} should explain the unknown company code");
+        assert_true(str_contains($stderr, 'Company code not found.'), "{$command} should explain the unknown company code without reflecting it");
     }
 });
 
@@ -1395,7 +1528,12 @@ test_case('release package includes public source and excludes private runtime d
     $target = sys_get_temp_dir() . '/cpe-package-' . bin2hex(random_bytes(4));
     $extractDir = sys_get_temp_dir() . '/cpe-package-extract-' . bin2hex(random_bytes(4));
     $packageDb = sys_get_temp_dir() . '/cpe-package-db-' . bin2hex(random_bytes(4)) . '.sqlite';
+    $runtimeStaging = $root . '/data/restore-staging/package-contract-' . bin2hex(random_bytes(4));
     try {
+        if (!is_dir($runtimeStaging) && !mkdir($runtimeStaging, 0700, true)) {
+            throw new RuntimeException('Could not create package runtime-data fixture.');
+        }
+        file_put_contents($runtimeStaging . '/runtime-only.sqlite', 'runtime-only');
         [$code, $stdout, $stderr] = run_cli(['package', '--target=' . $target]);
         assert_same(0, $code, 'Package command should succeed: ' . $stderr);
         assert_true(str_contains($stdout, 'Release package written'), 'Package command should report archive path');
@@ -1430,7 +1568,40 @@ test_case('release package includes public source and excludes private runtime d
         assert_true(str_contains($joined, '/database/.htaccess'), 'Package should deny direct access to database sources');
         assert_true(str_contains($joined, '/tests/.htaccess'), 'Package should deny direct access to test sources');
         assert_true(str_contains($joined, '/public/index.php'), 'Package should include web entrypoint');
+        assert_true(str_contains($joined, '/app/Core/Persistence/DatabaseLock.php'), 'Package should include the database lock contract');
+        assert_true(str_contains($joined, '/app/Core/Persistence/DatabaseLockException.php'), 'Package should include typed database lock failures');
+        assert_true(str_contains($joined, '/app/Core/Persistence/DatabaseOwnership.php'), 'Package should include the database ownership contract');
+        assert_true(str_contains($joined, '/app/Core/Persistence/SqlMigrationRunner.php'), 'Package should include the SQL migration runner contract');
+        assert_true(str_contains($joined, '/app/Install/InstallationStepObserver.php'), 'Package should include the installation stage observer contract');
+        assert_true(str_contains($joined, '/app/Security/OperationalBearerAuthorization.php'), 'Package should include operational Bearer authorization');
+        assert_true(str_contains($joined, '/app/Security/SetupAuthorization.php'), 'Package should include the setup authorization core');
+        assert_true(str_contains($joined, '/app/Security/SetupHttp.php'), 'Package should include the setup HTTP boundary');
+        assert_true(str_contains($joined, '/app/Views/setup-unlock.php'), 'Package should include the setup unlock view');
+        assert_true(str_contains($joined, '/public/install.php'), 'Package should include the protected installer entrypoint');
+        assert_true(str_contains($joined, '/public/health.php'), 'Package should include the health probe entrypoint');
+        assert_true(str_contains($joined, '/public/metrics.php'), 'Package should include the metrics probe entrypoint');
+        assert_true(str_contains($joined, '/app/Core/Backup/BackupArtifact.php'), 'Package should include the internal backup artifact contract');
+        assert_true(str_contains($joined, '/app/Core/Backup/BackupMetadata.php'), 'Package should include checksum-bound backup metadata');
+        assert_true(str_contains($joined, '/app/Core/Backup/LegacySqliteBackupConverter.php'), 'Package should include explicit legacy SQLite conversion');
+        assert_true(str_contains($joined, '/app/Core/Persistence/DatabaseConnectionInvalidException.php'), 'Package should include typed invalid-connection cleanup failures');
+        assert_true(str_contains($joined, '/tests/alpha1_release_acceptance.php'), 'Package should include exact alpha.1 external acceptance');
+        assert_true(str_contains($joined, '/tests/backup_restore_contract.php'), 'Package should include the backup/restore identity contract');
+        assert_true(str_contains($joined, '/tests/database_connection_cleanup_contract.php'), 'Package should include the invalid-connection cleanup contract');
+        assert_true(str_contains($joined, '/tests/legacy_backup_compatibility_contract.php'), 'Package should include the legacy backup compatibility contract');
+        assert_true(str_contains($joined, '/tests/database_ownership_contract.php'), 'Package should include the database ownership regression contract');
+        assert_true(str_contains($joined, '/tests/database_ownership_worker.php'), 'Package should include the database ownership race worker');
+        assert_true(str_contains($joined, '/tests/migration_lock_contract.php'), 'Package should include the migration lock regression contract');
+        assert_true(str_contains($joined, '/tests/migration_lock_worker.php'), 'Package should include the migration lock worker');
+        assert_true(str_contains($joined, '/tests/database_lock_release_contract.php'), 'Package should include the checked lock-release contract');
+        assert_true(str_contains($joined, '/tests/install_concurrency_contract.php'), 'Package should include the installation concurrency regression contract');
+        assert_true(str_contains($joined, '/tests/install_concurrency_worker.php'), 'Package should include the installation concurrency worker');
+        assert_true(str_contains($joined, '/tests/hosted_install_atomicity_contract.php'), 'Package should include the hosted installation atomicity contract');
+        assert_true(str_contains($joined, '/tests/hosted_install_preflight_contract.php'), 'Package should include the hosted installation preflight contract');
+        assert_true(str_contains($joined, '/tests/setup_authorization_contract.php'), 'Package should include the setup authorization regression contract');
+        assert_true(str_contains($joined, '/tests/hosted_install_contract.php'), 'Package should include the hosted identity immutability contract');
+        assert_true(str_contains($joined, '/tests/managed_hosting_contract.php'), 'Package should include the managed-hosting probe contract');
         assert_true(str_contains($joined, '/docs/environment.md'), 'Package should include environment variable guide');
+        assert_true(str_contains($joined, '/docs/releases/v0.1.0-alpha.2.md'), 'Package should include current release notes');
         assert_true(str_contains($joined, '/examples/env/local.env.example'), 'Package should include synthetic env template');
         assert_true(str_contains($joined, '/examples/deployment/apache-vhost.conf'), 'Package should include Apache deployment example');
         assert_true(str_contains($joined, '/examples/deployment/nginx-server.conf'), 'Package should include Nginx deployment example');
@@ -1439,6 +1610,7 @@ test_case('release package includes public source and excludes private runtime d
         assert_true(str_contains($joined, '/data/.gitkeep'), 'Package should keep an empty data directory marker');
         assert_true(!str_contains($joined, '.legacy-private'), 'Package should exclude private archive material');
         assert_true(!str_contains($joined, 'data/app.sqlite'), 'Package should exclude runtime SQLite data');
+        assert_true(!str_contains($joined, 'data/restore-staging'), 'Package should exclude restore staging data');
         assert_true(!str_contains($joined, 'config/local.php'), 'Package should exclude local configuration');
         assert_true(!str_contains($joined, '.playwright-cli'), 'Package should exclude local browser QA scratch files');
         assert_true(!str_contains($joined, '/website/'), 'Self-hosted package should exclude the public website build project');
@@ -1495,6 +1667,7 @@ test_case('release package includes public source and excludes private runtime d
         if (is_file($packageDb)) {
             unlink($packageDb);
         }
+        remove_tree($runtimeStaging);
     }
 });
 
@@ -1592,6 +1765,7 @@ test_case('cli install creates a non-demo app from supplied setup options', func
 
 test_case('upgrade command backs up migrates and runs readiness', function (): void {
     $db = sys_get_temp_dir() . '/cpe-cli-upgrade-' . bin2hex(random_bytes(4)) . '.sqlite';
+    $backupDirectory = sys_get_temp_dir() . '/cpe-cli-upgrade-backups-' . bin2hex(random_bytes(4));
     $backup = null;
     try {
         [$installCode, $installOut, $installErr] = run_cli(['install-demo'], ['CPE_DB_PATH' => $db]);
@@ -1602,16 +1776,22 @@ test_case('upgrade command backs up migrates and runs readiness', function (): v
         assert_same(0, $helpCode, 'Upgrade help should exit cleanly: ' . $helpErr);
         assert_true(str_contains($helpOut, 'writes a timestamped database backup'), 'Upgrade help should describe backup-first behavior');
 
-        [$code, $stdout, $stderr] = run_cli(['upgrade'], ['CPE_DB_PATH' => $db]);
+        [$code, $stdout, $stderr] = run_cli(['upgrade'], [
+            'CPE_DB_PATH' => $db,
+            'CPE_BACKUP_DIR' => $backupDirectory,
+        ]);
         assert_same(0, $code, 'Upgrade should exit cleanly: ' . $stderr);
-        assert_true(str_contains($stdout, 'Upgrade backup written:'), 'Upgrade should write a backup before migrations');
+        assert_true(str_contains($stdout, 'Upgrade backup written.'), 'Upgrade should write a backup before migrations');
         assert_true(str_contains($stdout, 'Migrations applied.'), 'Upgrade should apply migrations');
         assert_true(str_contains($stdout, 'Workflow configuration'), 'Upgrade should print readiness checks');
         assert_true(str_contains($stdout, 'Upgrade complete.'), 'Upgrade should report completion');
-        assert_true((bool) preg_match('/Upgrade backup written: (.+\.sqlite)/', $stdout, $matches), 'Upgrade output should include backup path');
-        $backup = $matches[1];
+        assert_true(!str_contains($stdout, $backupDirectory), 'Upgrade output should not expose the recovery directory');
+        $backups = glob($backupDirectory . '/upgrade-*.sqlite') ?: [];
+        assert_same(1, count($backups), 'Upgrade should create exactly one safety backup');
+        $backup = $backups[0];
         assert_true(is_file($backup), 'Upgrade backup file should exist');
         assert_true(is_file($backup . '.sha256'), 'Upgrade backup checksum should exist');
+        assert_true(is_file($backup . '.metadata.json'), 'Upgrade backup metadata should exist');
         assert_true(str_contains((string) file_get_contents($backup . '.sha256'), hash_file('sha256', $backup)), 'Upgrade backup checksum should match backup file');
     } finally {
         if (is_file($db)) {
@@ -1620,27 +1800,40 @@ test_case('upgrade command backs up migrates and runs readiness', function (): v
         if (is_string($backup) && is_file($backup . '.sha256')) {
             unlink($backup . '.sha256');
         }
+        if (is_string($backup) && is_file($backup . '.metadata.json')) {
+            unlink($backup . '.metadata.json');
+        }
         if (is_string($backup) && is_file($backup)) {
             unlink($backup);
+        }
+        if (is_dir($backupDirectory)) {
+            rmdir($backupDirectory);
         }
     }
 });
 
 test_case('backup and restore verify checksum sidecars', function (): void {
     $db = sys_get_temp_dir() . '/cpe-cli-backup-' . bin2hex(random_bytes(4)) . '.sqlite';
+    $backupDirectory = sys_get_temp_dir() . '/cpe-cli-backup-files-' . bin2hex(random_bytes(4));
     $backup = null;
-    $safety = null;
     $unverified = null;
     try {
         [$installCode, $installOut, $installErr] = run_cli(['install-demo'], ['CPE_DB_PATH' => $db]);
         assert_same(0, $installCode, 'Demo install should prepare backup database: ' . $installErr);
 
-        [$backupCode, $backupOut, $backupErr] = run_cli(['backup'], ['CPE_DB_PATH' => $db]);
+        [$backupCode, $backupOut, $backupErr] = run_cli(['backup'], [
+            'CPE_DB_PATH' => $db,
+            'CPE_BACKUP_DIR' => $backupDirectory,
+        ]);
         assert_same(0, $backupCode, 'Backup command should exit cleanly: ' . $backupErr);
-        assert_true((bool) preg_match('/Backup written: (.+\.sqlite)/', $backupOut, $matches), 'Backup output should include backup path');
-        $backup = $matches[1];
+        assert_true((bool) preg_match('/Backup written: backup_[a-f0-9]{24}/', $backupOut), 'Backup output should include an opaque backup reference');
+        assert_true(!str_contains($backupOut, $backupDirectory), 'Backup output should not expose the recovery directory');
+        $backups = glob($backupDirectory . '/app-*.sqlite') ?: [];
+        assert_same(1, count($backups), 'Backup command should create one database backup');
+        $backup = $backups[0];
         assert_true(is_file($backup), 'Backup file should exist');
         assert_true(is_file($backup . '.sha256'), 'Backup checksum should exist');
+        assert_true(is_file($backup . '.metadata.json'), 'Backup identity metadata should exist');
         assert_true(str_contains((string) file_get_contents($backup . '.sha256'), hash_file('sha256', $backup)), 'Backup checksum should match backup file');
 
         $pdo = new PDO('sqlite:' . $db);
@@ -1650,38 +1843,46 @@ test_case('backup and restore verify checksum sidecars', function (): void {
         assert_true($afterDelete < $before, 'Test mutation should change database before restore');
         $pdo = null;
 
-        [$restoreCode, $restoreOut, $restoreErr] = run_cli(['restore', $backup], ['CPE_DB_PATH' => $db]);
+        [$restoreCode, $restoreOut, $restoreErr] = run_cli(['restore', $backup], [
+            'CPE_DB_PATH' => $db,
+            'CPE_BACKUP_DIR' => $backupDirectory,
+        ]);
         assert_same(0, $restoreCode, 'Restore command should exit cleanly with valid checksum: ' . $restoreErr);
         assert_true(str_contains($restoreOut, 'Restored database from'), 'Restore should report success');
-        if (preg_match('/Safety copy written: (.+\.sqlite)/', $restoreOut, $safetyMatches)) {
-            $safety = $safetyMatches[1];
-        }
+        assert_true(!str_contains($restoreOut, $backupDirectory), 'Restore output should not expose the recovery directory');
         $pdo = new PDO('sqlite:' . $db);
         assert_same($before, (int) $pdo->query('SELECT COUNT(*) FROM candidates')->fetchColumn(), 'Restore should restore database from backup');
         $pdo = null;
 
         $unverified = sys_get_temp_dir() . '/cpe-unverified-backup-' . bin2hex(random_bytes(4)) . '.sqlite';
         copy($backup, $unverified);
-        [$unverifiedCode, $unverifiedOut, $unverifiedErr] = run_cli(['restore', $unverified], ['CPE_DB_PATH' => $db]);
+        [$unverifiedCode, $unverifiedOut, $unverifiedErr] = run_cli(['restore', $unverified], [
+            'CPE_DB_PATH' => $db,
+            'CPE_BACKUP_DIR' => $backupDirectory,
+        ]);
         assert_same(1, $unverifiedCode, 'Restore should fail when the checksum sidecar is missing');
         assert_true(str_contains($unverifiedErr, 'checksum file is required'), 'Missing checksum failure should be explicit');
 
-        file_put_contents($backup . '.sha256', str_repeat('0', 64) . '  ' . basename($backup) . "\n");
-        [$badRestoreCode, $badRestoreOut, $badRestoreErr] = run_cli(['restore', $backup], ['CPE_DB_PATH' => $db]);
+        $badChecksumLines = file($backup . '.sha256', FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [];
+        $badChecksumLines[0] = str_repeat('0', 64) . '  ' . basename($backup);
+        file_put_contents($backup . '.sha256', implode("\n", $badChecksumLines) . "\n");
+        [$badRestoreCode, $badRestoreOut, $badRestoreErr] = run_cli(['restore', $backup], [
+            'CPE_DB_PATH' => $db,
+            'CPE_BACKUP_DIR' => $backupDirectory,
+        ]);
         assert_same(1, $badRestoreCode, 'Restore should fail when checksum does not match');
         assert_true(str_contains($badRestoreErr, 'checksum verification failed'), 'Restore failure should explain checksum mismatch');
     } finally {
         if (is_file($db)) {
             unlink($db);
         }
-        if (is_string($safety) && is_file($safety)) {
-            unlink($safety);
+        foreach (glob($backupDirectory . '/*') ?: [] as $backupFile) {
+            if (is_file($backupFile)) {
+                unlink($backupFile);
+            }
         }
-        if (is_string($backup) && is_file($backup . '.sha256')) {
-            unlink($backup . '.sha256');
-        }
-        if (is_string($backup) && is_file($backup)) {
-            unlink($backup);
+        if (is_dir($backupDirectory)) {
+            rmdir($backupDirectory);
         }
         if (is_string($unverified) && is_file($unverified)) {
             unlink($unverified);
@@ -1694,7 +1895,7 @@ test_case('doctor enforces local runtime requirements before install', function 
     try {
         [$code, $stdout, $stderr] = run_cli(['doctor'], ['CPE_DB_PATH' => $db]);
         assert_same(0, $code, 'Doctor should pass when PHP and SQLite requirements are met: ' . $stderr);
-        foreach (['OK PHP:', 'OK pdo_sqlite: yes', 'OK sqlite3: yes', 'OK data_writable: yes', 'OK database_directory_writable: yes', 'INFO installed: no'] as $expected) {
+        foreach (['OK PHP:', 'OK mbstring: yes', 'OK pdo_sqlite: yes', 'OK sqlite3: yes', 'OK data_writable: yes', 'OK database_directory_writable: yes', 'INFO installed: no'] as $expected) {
             assert_true(str_contains($stdout, $expected), 'Doctor output should include: ' . $expected);
         }
     } finally {
@@ -2274,7 +2475,7 @@ test_case('csv imports accept common college header aliases', function (): void 
         $importer->preview('candidates', "external_id,Student ID,name\nDUP001,DUP002,Duplicate Candidate\n");
         throw new RuntimeException('Expected duplicate normalized header failure.');
     } catch (RuntimeException $e) {
-        assert_true(str_contains($e->getMessage(), 'duplicate column after header normalization: external_id'), 'Duplicate alias header should fail clearly');
+        assert_true(str_contains($e->getMessage(), 'duplicate column after header normalization'), 'Duplicate alias header should fail clearly without reflecting input');
     }
 });
 
@@ -2411,7 +2612,7 @@ test_case('snapshot export writes portable csv files without password hashes', f
     $dir = sys_get_temp_dir() . '/cpe-export-' . bin2hex(random_bytes(4));
     try {
         $result = (new SnapshotExporter($pdo))->export($dir);
-        assert_same($dir, $result['dir'], 'Export directory should match target');
+        assert_true(preg_match('/^export_[a-f0-9]{24}$/', (string) $result['export_reference']) === 1, 'Export should return an opaque reference');
         assert_same('full', $result['profile'], 'Default export profile should be full');
         assert_true(is_file($dir . '/manifest.csv'), 'Manifest should be written');
         assert_true(is_file($dir . '/placement_totals.csv'), 'Full export should include summary totals');
@@ -2456,7 +2657,7 @@ test_case('snapshot export writes portable csv files without password hashes', f
         assert_true(!str_contains($users, 'password_hash'), 'User export should not include password hashes');
         assert_true(str_contains($boardPreferences, 'user_email,q,company,status,flag,actionable,compact,stale_minutes'), 'Board preference export should use readable keys');
         assert_true(str_contains($notifications, 'recipient_role,recipient_scope_type,recipient_scope_value,channel,template_key,subject'), 'Notification export should use readable keys');
-        assert_true(str_contains($notificationDeliveries, 'notification_id,channel,status,attempt_count,last_error,payload_json'), 'Notification delivery export should include payload status');
+        assert_true(str_contains($notificationDeliveries, 'notification_id,channel,status,attempt_count,last_error,delivered_to,payload_json'), 'Notification delivery export should include fixed destination and payload status');
         assert_true(!str_contains($notificationDeliveries, 'target'), 'Notification delivery export should not expose delivery targets');
         assert_true(str_contains($auditLogs, 'detail,ip_address,user_agent,created_at'), 'Audit export should include optional request metadata fields');
         assert_true(str_contains($boardPreferences, 'admin@test.local'), 'Board preference export should include user email');
@@ -2559,13 +2760,14 @@ test_case('import rollback snapshots restore the database to pre-import state', 
     $before = (int) $pdo->query("SELECT COUNT(*) FROM candidates WHERE external_id = 'RB001'")->fetchColumn();
     $report = $importer->preview('candidates', "external_id,name,program\nRB001,Rollback Candidate,MBA\n");
     $snapshot = $service->createSnapshot('candidates', 1, $report);
-    assert_true(is_file((string) $snapshot['backup_path']), 'Rollback snapshot database should be copied');
+    $rollbackDir = (string) getenv('CPE_IMPORT_ROLLBACK_DIR');
+    assert_true(is_file($rollbackDir . '/' . (string) $snapshot['backup_file']), 'Rollback snapshot database should be copied');
 
     $importer->candidates("external_id,name,program\nRB001,Rollback Candidate,MBA\n");
     assert_same($before + 1, (int) $pdo->query("SELECT COUNT(*) FROM candidates WHERE external_id = 'RB001'")->fetchColumn(), 'Candidate should import before rollback');
 
     $restored = $service->restore((string) $snapshot['id']);
-    assert_true(is_file((string) $restored['restore_safety_path']), 'Rollback should create a safety copy');
+    assert_true(preg_match('/^backup_[a-f0-9]{24}$/', (string) $restored['restore_safety_reference']) === 1, 'Rollback should return an opaque safety reference');
     $pdo = Database::connection();
     assert_same($before, (int) $pdo->query("SELECT COUNT(*) FROM candidates WHERE external_id = 'RB001'")->fetchColumn(), 'Rollback should restore pre-import candidate state');
 
@@ -2640,7 +2842,7 @@ test_case('configuration export imports portable settings without operational da
     $service = new ConfigurationSnapshotService($pdo);
     $target = sys_get_temp_dir() . '/cpe-config-' . bin2hex(random_bytes(4)) . '.json';
     $result = $service->export($target);
-    assert_same($target, $result['path'], 'Configuration export should use requested path');
+    assert_true(preg_match('/^config_[a-f0-9]{24}$/', (string) $result['file_reference']) === 1, 'Configuration export should return an opaque reference');
     assert_true(is_file($target), 'Configuration export should write JSON');
 
     $json = file_get_contents($target) ?: '';
@@ -2662,7 +2864,7 @@ test_case('configuration export imports portable settings without operational da
     }
 
     $validated = $service->validate($target);
-    assert_same($target, $validated['path'], 'Configuration validation should report target path');
+    assert_same($result['file_reference'], $validated['file_reference'], 'Configuration validation should report the same opaque reference');
     assert_same('default', $validated['workflow'], 'Configuration validation should report workflow key');
     assert_true($validated['settings'] >= 9, 'Configuration validation should count portable settings');
     assert_same(1, $validated['status_overrides'], 'Configuration validation should count status overrides');
@@ -2700,7 +2902,7 @@ test_case('configuration export imports portable settings without operational da
     assert_same(0, (int) $pdo->query('SELECT COUNT(*) FROM workflow_status_overrides')->fetchColumn(), 'Configuration validation should not mutate status overrides');
 
     $imported = $service->import($target);
-    assert_true(is_file($imported['safety_path']), 'Configuration import should create a safety copy');
+    assert_true(preg_match('/^backup_[a-f0-9]{24}$/', (string) $imported['safety_reference']) === 1, 'Configuration import should return an opaque safety reference');
     assert_same('Portable Config College', $pdo->query("SELECT value FROM settings WHERE key = 'college_name'")->fetchColumn(), 'Configuration import should restore college name');
     assert_same('Portable Placement Desk', $pdo->query("SELECT value FROM settings WHERE key = 'site_name'")->fetchColumn(), 'Configuration import should restore site name');
     assert_same('Portable live operations', $pdo->query("SELECT value FROM settings WHERE key = 'site_tagline'")->fetchColumn(), 'Configuration import should restore site tagline');
@@ -3013,7 +3215,7 @@ test_case('privacy anonymization redacts candidate identity while preserving his
 
     $before = $privacy->report();
     $result = $privacy->anonymizeCandidate('PRV001', 1);
-    assert_true(is_file($result['safety_path']), 'Anonymization should write a safety copy');
+    assert_true(preg_match('/^backup_[a-f0-9]{24}$/', (string) $result['safety_reference']) === 1, 'Anonymization should return an opaque safety reference');
     assert_same('ANON-' . $candidateId, $result['external_id'], 'Anonymization should return anonymous external id');
 
     $candidate = $pdo->query("SELECT external_id, name, program, tags, current_location, accommodation_notes, custom_fields_json, opted_out, anonymized_at FROM candidates WHERE id = {$candidateId}")->fetch();
@@ -4251,13 +4453,17 @@ test_case('tenant-configured notification files cannot escape the data directory
     $set->execute(['notification_file_outbox_path', sys_get_temp_dir() . '/outside-data.jsonl']);
     putenv('CPE_NOTIFICATION_FILE_OUTBOX_PATH');
     try {
-        $notificationId = (int) $pdo->query('SELECT id FROM notifications ORDER BY id LIMIT 1')->fetchColumn();
-        try {
-            (new NotificationDeliveryService($pdo))->queueForNotification($notificationId);
-            throw new RuntimeException('Expected notification outbox path rejection.');
-        } catch (RuntimeException $e) {
-            assert_true(str_contains($e->getMessage(), 'inside data'), 'Unsafe notification outbox paths should be rejected');
-        }
+        $notification = $pdo->prepare(
+            'INSERT INTO notifications
+             (recipient_role, channel, template_key, subject, body, status, source_type, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?)',
+        );
+        $notification->execute(['admin', 'in_app', 'path_contract', 'Path contract', 'Path contract', 'open', 'path_contract', cpe_now()]);
+        $notificationId = Database::lastInsertId($pdo);
+        (new NotificationDeliveryService($pdo))->queueForNotification($notificationId);
+        $result = (new NotificationDeliveryService($pdo))->deliverPending('file', 1, false);
+        assert_same(1, $result['failed'], 'Unsafe notification outbox paths should fail at the delivery boundary');
+        assert_same(1, $result['retrying'], 'Unsafe notification outbox path should retain bounded retry state');
     } finally {
         $set->execute(['notification_delivery_channels', '']);
         $set->execute(['notification_file_outbox_path', '']);
@@ -4281,7 +4487,7 @@ test_case('optional email notification delivery writes local mail outbox', funct
 
         $dryRun = (new NotificationDeliveryService($pdo))->deliverPending('email', 10, true);
         assert_same(3, $dryRun['checked'], 'Email dry run should find queued deliveries');
-        assert_true(str_contains($dryRun['rows'][0]['target'], 'placement-office@example.test'), 'Email dry run should expose the configured recipient');
+        assert_same('[config:notification_email]', $dryRun['rows'][0]['target'], 'Email dry run should expose only the fixed configuration reference');
 
         $result = (new NotificationDeliveryService($pdo))->deliverPending('email');
         assert_same(3, $result['delivered'], 'Email delivery should deliver queued rows to the local outbox');
@@ -4324,7 +4530,7 @@ test_case('optional sms and whatsapp notification gateways write local message o
 
         $dryRun = (new NotificationDeliveryService($pdo))->deliverPending('sms', 10, true);
         assert_same(3, $dryRun['checked'], 'SMS dry run should find queued deliveries');
-        assert_true(str_contains($dryRun['rows'][0]['target'], 'sms-control-room'), 'SMS dry run should expose the configured route');
+        assert_same('[config:notification_sms]', $dryRun['rows'][0]['target'], 'SMS dry run should expose only the fixed configuration reference');
 
         $smsResult = (new NotificationDeliveryService($pdo))->deliverPending('sms');
         $whatsAppResult = (new NotificationDeliveryService($pdo))->deliverPending('whatsapp');
@@ -4673,22 +4879,24 @@ test_case('audit request metadata retention is opt-in', function (): void {
         $_SERVER['HTTP_USER_AGENT'] = "Synthetic\nBrowser 1.0";
 
         $set->execute(['audit_request_metadata', 'none']);
-        Auth::audit(1, 'audit.default_privacy', 'system', null, 'Default metadata test');
-        $row = $pdo->query("SELECT ip_address, user_agent FROM audit_logs WHERE action = 'audit.default_privacy' ORDER BY id DESC LIMIT 1")->fetch();
+        Auth::audit(1, 'settings.update', 'system', null, 'Default metadata test');
+        $row = $pdo->query("SELECT detail, ip_address, user_agent FROM audit_logs WHERE action = 'settings.update' ORDER BY id DESC LIMIT 1")->fetch();
+        assert_same('Settings updated.', (string) $row['detail'], 'Audit detail should use reviewed fixed wording');
         assert_same('', (string) $row['ip_address'], 'Audit metadata should not retain IP by default');
         assert_same('', (string) $row['user_agent'], 'Audit metadata should not retain user agent by default');
 
         $set->execute(['audit_request_metadata', 'both']);
-        Auth::audit(1, 'audit.with_request_metadata', 'system', null, 'Opt-in metadata test');
-        $row = $pdo->query("SELECT ip_address, user_agent FROM audit_logs WHERE action = 'audit.with_request_metadata' ORDER BY id DESC LIMIT 1")->fetch();
-        assert_same('203.0.113.25', (string) $row['ip_address'], 'Audit metadata should retain request IP when enabled');
-        assert_same('Synthetic Browser 1.0', (string) $row['user_agent'], 'Audit metadata should retain normalized user agent when enabled');
+        Auth::audit(1, 'settings.update', 'system', null, 'Opt-in metadata test sentinel.admin@example.test');
+        $row = $pdo->query("SELECT detail, ip_address, user_agent FROM audit_logs WHERE action = 'settings.update' ORDER BY id DESC LIMIT 1")->fetch();
+        assert_same('203.0.113.0/24', (string) $row['ip_address'], 'Audit metadata should retain only a coarsened request network when enabled');
+        assert_same('client.other', (string) $row['user_agent'], 'Audit metadata should retain only a fixed user-agent family when enabled');
+        assert_true(!str_contains(json_encode($row) ?: '', 'sentinel.admin@example.test'), 'Audit persistence should not retain caller detail');
 
         $set->execute(['audit_request_metadata', 'user_agent']);
-        Auth::audit(1, 'audit.user_agent_only', 'system', null, 'User agent metadata test');
-        $row = $pdo->query("SELECT ip_address, user_agent FROM audit_logs WHERE action = 'audit.user_agent_only' ORDER BY id DESC LIMIT 1")->fetch();
+        Auth::audit(1, 'settings.update', 'system', null, 'User agent metadata test');
+        $row = $pdo->query("SELECT ip_address, user_agent FROM audit_logs WHERE action = 'settings.update' ORDER BY id DESC LIMIT 1")->fetch();
         assert_same('', (string) $row['ip_address'], 'Audit metadata should omit IP unless selected');
-        assert_same('Synthetic Browser 1.0', (string) $row['user_agent'], 'Audit metadata should retain user agent when selected');
+        assert_same('client.other', (string) $row['user_agent'], 'Audit metadata should retain only a fixed user-agent family when selected');
     } finally {
         $set->execute(['audit_request_metadata', 'none']);
         if ($originalRemote === null) {
@@ -4767,6 +4975,460 @@ test_case('readiness snapshot reports stale applications and open queues', funct
         }
     }
     assert_true(count($snapshot['checks']) >= 5, 'Readiness should include checks');
+});
+
+test_case('readiness uses configured backup storage without disclosing its path', function (): void {
+    $pdo = Database::connection();
+    $originalDirectory = getenv('CPE_BACKUP_DIR');
+    $directory = sys_get_temp_dir() . '/cpe-readiness-backup-private-sentinel-' . bin2hex(random_bytes(4));
+    $missingDirectory = $directory . '-missing';
+    $symlinkDirectory = $directory . '-link';
+    $outsideFile = $directory . '-outside.sqlite';
+    $caseDirectories = [];
+    try {
+        mkdir($directory, 0700, true);
+        putenv('CPE_BACKUP_DIR=' . $directory);
+        assert_same($directory, DatabaseBackupService::configuredDirectory(), 'Backup creation and readiness should share configured storage');
+
+        $snapshotFor = static function (string $path) use ($pdo): array {
+            putenv('CPE_BACKUP_DIR=' . $path);
+            return (new ReadinessService($pdo))->snapshot()['backup'];
+        };
+        $newCaseDirectory = static function (string $label) use ($directory, &$caseDirectories): string {
+            $path = $directory . '-' . $label;
+            mkdir($path, 0700, true);
+            $caseDirectories[] = $path;
+            return $path;
+        };
+        $assertRejected = static function (string $path, string $label) use ($snapshotFor, $directory): void {
+            $result = $snapshotFor($path);
+            assert_same(false, $result['present'], $label . ' must not count as a backup');
+            assert_same('warn', $result['status'], $label . ' should warn');
+            assert_true(
+                !str_contains(json_encode($result, JSON_THROW_ON_ERROR), $directory),
+                $label . ' disclosed configured backup storage',
+            );
+        };
+
+        $empty = $snapshotFor($directory);
+        assert_same(false, $empty['present'], 'Empty configured backup storage should report no backup');
+        assert_same('warn', $empty['status'], 'Empty configured backup storage should warn');
+        assert_true(str_contains($empty['message'], 'No backup found'), 'Empty configured backup storage should retain useful guidance');
+        assert_true(!str_contains(json_encode($empty, JSON_THROW_ON_ERROR), $directory), 'Empty backup readiness disclosed its configured path');
+
+        file_put_contents($outsideFile, 'not a database backup');
+        $archiveLinkDirectory = $newCaseDirectory('archive-link');
+        if (@symlink($outsideFile, $archiveLinkDirectory . '/linked.sqlite')) {
+            $assertRejected($archiveLinkDirectory, 'Symlink archive');
+        }
+
+        if (@symlink($directory, $symlinkDirectory)) {
+            putenv('CPE_BACKUP_DIR=' . $symlinkDirectory);
+            $before = scandir($directory);
+            try {
+                (new DatabaseBackupService($pdo))->create('unsafe');
+                throw new RuntimeException('Symlinked backup storage accepted a write.');
+            } catch (UserVisibleException $e) {
+                assert_same('DATABASE_BACKUP_STORAGE_UNAVAILABLE', $e->publicCode(), 'Symlink writer rejection used the wrong fixed code');
+                assert_true(!str_contains($e->publicMessage(), $symlinkDirectory), 'Symlink writer rejection disclosed configured storage');
+            }
+            assert_same($before, scandir($directory), 'Symlink writer rejection created an artifact before failing');
+
+            $unsafe = $snapshotFor($symlinkDirectory);
+            assert_same(false, $unsafe['present'], 'Symlinked configured backup storage should fail closed');
+            assert_same('warn', $unsafe['status'], 'Symlinked configured backup storage should warn safely');
+            assert_true(str_contains($unsafe['message'], 'could not be inspected'), 'Unsafe backup storage should use fixed access guidance');
+            assert_true(!str_contains(json_encode($unsafe, JSON_THROW_ON_ERROR), $symlinkDirectory), 'Unsafe backup readiness disclosed its configured path');
+        }
+
+        $zeroDirectory = $newCaseDirectory('zero');
+        file_put_contents($zeroDirectory . '/lookalike.sqlite', '');
+        $assertRejected($zeroDirectory, 'Zero-byte archive');
+
+        $missingSidecarsDirectory = $newCaseDirectory('missing-sidecars');
+        file_put_contents($missingSidecarsDirectory . '/lookalike.sqlite', 'not a complete backup');
+        $assertRejected($missingSidecarsDirectory, 'Archive without sidecars');
+
+        $orphanDirectory = $newCaseDirectory('orphan-sidecars');
+        file_put_contents($orphanDirectory . '/orphan.sqlite.sha256', str_repeat('0', 64));
+        file_put_contents($orphanDirectory . '/orphan.sqlite' . BackupMetadata::SUFFIX, '{}');
+        $assertRejected($orphanDirectory, 'Orphan sidecars');
+
+        $rewriteChecksum = static function (string $archive, string $checksum, string $metadata): void {
+            file_put_contents(
+                $checksum,
+                hash_file('sha256', $archive) . '  ' . basename($archive) . "\n"
+                    . hash_file('sha256', $metadata) . '  ' . basename($metadata) . "\n",
+            );
+        };
+        $rewriteCreatedAt = static function (
+            string $archive,
+            string $checksum,
+            string $metadataPath,
+            string $createdAt,
+        ) use ($rewriteChecksum): void {
+            $metadata = json_decode((string) file_get_contents($metadataPath), true, 16, JSON_THROW_ON_ERROR);
+            $metadata['created_at'] = $createdAt;
+            file_put_contents(
+                $metadataPath,
+                json_encode($metadata, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n",
+            );
+            $rewriteChecksum($archive, $checksum, $metadataPath);
+        };
+
+        putenv('CPE_BACKUP_DIR=' . $directory);
+        $artifact = (new DatabaseBackupService($pdo))->create('readiness');
+        touch($artifact->internalPath(), time() - (72 * 3600));
+        $fresh = (new ReadinessService($pdo))->snapshot()['backup'];
+        assert_same(true, $fresh['present'], 'Fresh backup in configured storage was not found');
+        assert_same('ok', $fresh['status'], 'Fresh configured backup should pass readiness');
+        assert_same(0, $fresh['ageHours'], 'Archive mtime must not age checksum-bound backup metadata');
+        assert_true(!str_contains(json_encode($fresh, JSON_THROW_ON_ERROR), $directory), 'Fresh backup readiness disclosed its configured path');
+
+        $copySet = static function (string $targetDirectory, ?string $basename = null) use ($artifact, $rewriteChecksum): array {
+            $archive = $targetDirectory . '/' . ($basename ?? basename($artifact->internalPath()));
+            $checksum = $archive . '.sha256';
+            $metadata = $archive . BackupMetadata::SUFFIX;
+            copy($artifact->internalPath(), $archive);
+            copy($artifact->internalMetadataPath(), $metadata);
+            $rewriteChecksum($archive, $checksum, $metadata);
+            return [$archive, $checksum, $metadata];
+        };
+
+        $missingChecksumDirectory = $newCaseDirectory('missing-checksum');
+        [$missingChecksumArchive, $missingChecksum, $missingChecksumMetadata] = $copySet($missingChecksumDirectory);
+        unlink($missingChecksum);
+        $assertRejected($missingChecksumDirectory, 'Backup with missing checksum');
+
+        $checksumLinkDirectory = $newCaseDirectory('checksum-link');
+        [$checksumLinkArchive, $checksumLink, $checksumLinkMetadata] = $copySet($checksumLinkDirectory);
+        unlink($checksumLink);
+        if (@symlink($artifact->internalChecksumPath(), $checksumLink)) {
+            $assertRejected($checksumLinkDirectory, 'Symlink checksum');
+        }
+
+        $metadataLinkDirectory = $newCaseDirectory('metadata-link');
+        [$metadataLinkArchive, $metadataLinkChecksum, $metadataLink] = $copySet($metadataLinkDirectory);
+        unlink($metadataLink);
+        if (@symlink($artifact->internalMetadataPath(), $metadataLink)) {
+            $assertRejected($metadataLinkDirectory, 'Symlink metadata');
+        }
+
+        $malformedChecksumDirectory = $newCaseDirectory('malformed-checksum');
+        [$malformedChecksumArchive, $malformedChecksum, $malformedChecksumMetadata] = $copySet($malformedChecksumDirectory);
+        file_put_contents($malformedChecksum, 'not a checksum');
+        $assertRejected($malformedChecksumDirectory, 'Malformed checksum');
+
+        $oversizedChecksumDirectory = $newCaseDirectory('oversized-checksum');
+        [$oversizedChecksumArchive, $oversizedChecksum, $oversizedChecksumMetadata] = $copySet($oversizedChecksumDirectory);
+        file_put_contents($oversizedChecksum, str_repeat('0', 4097));
+        $assertRejected($oversizedChecksumDirectory, 'Oversized checksum');
+
+        $unreadableChecksumDirectory = $newCaseDirectory('unreadable-checksum');
+        [$unreadableChecksumArchive, $unreadableChecksum, $unreadableChecksumMetadata] = $copySet($unreadableChecksumDirectory);
+        chmod($unreadableChecksum, 0000);
+        if (!is_readable($unreadableChecksum)) {
+            $assertRejected($unreadableChecksumDirectory, 'Unreadable checksum');
+        }
+        chmod($unreadableChecksum, 0600);
+
+        $malformedMetadataDirectory = $newCaseDirectory('malformed-metadata');
+        [$malformedMetadataArchive, $malformedMetadataChecksum, $malformedMetadata] = $copySet($malformedMetadataDirectory);
+        file_put_contents($malformedMetadata, '{"broken":');
+        $rewriteChecksum($malformedMetadataArchive, $malformedMetadataChecksum, $malformedMetadata);
+        $assertRejected($malformedMetadataDirectory, 'Malformed metadata');
+
+        $invalidDateDirectory = $newCaseDirectory('invalid-date');
+        [$invalidDateArchive, $invalidDateChecksum, $invalidDateMetadata] = $copySet($invalidDateDirectory);
+        $rewriteCreatedAt(
+            $invalidDateArchive,
+            $invalidDateChecksum,
+            $invalidDateMetadata,
+            '2026-02-30T12:00:00Z',
+        );
+        $assertRejected($invalidDateDirectory, 'Invalid calendar metadata timestamp');
+
+        $futureDateDirectory = $newCaseDirectory('future-date');
+        [$futureDateArchive, $futureDateChecksum, $futureDateMetadata] = $copySet($futureDateDirectory);
+        $rewriteCreatedAt(
+            $futureDateArchive,
+            $futureDateChecksum,
+            $futureDateMetadata,
+            gmdate('Y-m-d\TH:i:s\Z', time() + BackupMetadata::MAX_FUTURE_SKEW_SECONDS + 60),
+        );
+        $assertRejected($futureDateDirectory, 'Unreasonably future-dated metadata');
+
+        $oversizedMetadataDirectory = $newCaseDirectory('oversized-metadata');
+        [$oversizedMetadataArchive, $oversizedMetadataChecksum, $oversizedMetadata] = $copySet($oversizedMetadataDirectory);
+        file_put_contents($oversizedMetadata, str_repeat('x', BackupMetadata::MAX_BYTES + 1));
+        $rewriteChecksum($oversizedMetadataArchive, $oversizedMetadataChecksum, $oversizedMetadata);
+        $assertRejected($oversizedMetadataDirectory, 'Oversized metadata');
+
+        $tamperedArchiveDirectory = $newCaseDirectory('tampered-archive');
+        [$tamperedArchive, $tamperedArchiveChecksum, $tamperedArchiveMetadata] = $copySet($tamperedArchiveDirectory);
+        file_put_contents($tamperedArchive, 'tamper', FILE_APPEND);
+        $assertRejected($tamperedArchiveDirectory, 'Tampered archive');
+
+        $identityMismatchDirectory = $newCaseDirectory('identity-mismatch');
+        [$identityMismatchArchive, $identityMismatchChecksum, $identityMismatchMetadata] = $copySet($identityMismatchDirectory);
+        $metadata = json_decode((string) file_get_contents($identityMismatchMetadata), true, 16, JSON_THROW_ON_ERROR);
+        $metadata['institution_public_id'] = 'tenant_' . str_repeat('f', 32);
+        file_put_contents($identityMismatchMetadata, json_encode($metadata, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n");
+        $rewriteChecksum($identityMismatchArchive, $identityMismatchChecksum, $identityMismatchMetadata);
+        $assertRejected($identityMismatchDirectory, 'Identity-mismatched metadata');
+
+        $renamedFormatDirectory = $newCaseDirectory('renamed-format');
+        $copySet($renamedFormatDirectory, 'relabeled.pgdump');
+        $assertRejected($renamedFormatDirectory, 'SQLite archive renamed as PostgreSQL');
+
+        $liveIdentity = BackupMetadata::databaseIdentity($pdo, 'sqlite');
+        $grownBudgetDirectory = $newCaseDirectory('grown-budget');
+        [$grownBudgetArchive] = $copySet($grownBudgetDirectory);
+        $observedBytes = filesize($grownBudgetArchive);
+        assert_true(is_int($observedBytes) && $observedBytes > 0, 'Could not observe budget fixture size');
+        file_put_contents($grownBudgetArchive, 'growth-after-directory-scan', FILE_APPEND);
+        try {
+            (new DatabaseRestoreService(null, $observedBytes))->verifiedCandidate(
+                $grownBudgetArchive,
+                'sqlite',
+                $liveIdentity,
+            );
+            throw new RuntimeException('Archive growth beyond the fresh verification budget was accepted.');
+        } catch (UserVisibleException $e) {
+            assert_same('DATABASE_BACKUP_VERIFICATION_LIMIT', $e->publicCode(), 'Archive growth used the wrong fixed failure');
+        }
+
+        $firstBudgetDirectory = $newCaseDirectory('budget-first');
+        [$firstBudgetArchive] = $copySet($firstBudgetDirectory);
+        $secondBudgetDirectory = $newCaseDirectory('budget-second');
+        [$secondBudgetArchive] = $copySet($secondBudgetDirectory);
+        $singleArchiveBytes = filesize($firstBudgetArchive);
+        assert_true(is_int($singleArchiveBytes) && $singleArchiveBytes > 0, 'Could not inspect cumulative budget fixtures');
+        $budgetedVerifier = new DatabaseRestoreService(null, ($singleArchiveBytes * 2) - 1);
+        $budgetedVerifier->verifiedCandidate($firstBudgetArchive, 'sqlite', $liveIdentity);
+        try {
+            $budgetedVerifier->verifiedCandidate($secondBudgetArchive, 'sqlite', $liveIdentity);
+            throw new RuntimeException('Cumulative backup verification budget was reset between candidates.');
+        } catch (UserVisibleException $e) {
+            assert_same('DATABASE_BACKUP_VERIFICATION_LIMIT', $e->publicCode(), 'Cumulative budget used the wrong fixed failure');
+        }
+
+        $postgresStructureDirectory = $newCaseDirectory('postgres-structure');
+        $postgresArchive = $postgresStructureDirectory . '/structural.pgdump';
+        $postgresMetadata = $postgresArchive . BackupMetadata::SUFFIX;
+        $postgresChecksum = $postgresArchive . '.sha256';
+        file_put_contents($postgresArchive, 'synthetic-postgresql-custom-format-fixture');
+        $postgresMetadataValues = json_decode(
+            (string) file_get_contents($artifact->internalMetadataPath()),
+            true,
+            16,
+            JSON_THROW_ON_ERROR,
+        );
+        $postgresMetadataValues['driver'] = 'pgsql';
+        $postgresMetadataValues['archive_sha256'] = hash_file('sha256', $postgresArchive);
+        $postgresMetadataValues['created_at'] = gmdate('Y-m-d\TH:i:s\Z');
+        file_put_contents(
+            $postgresMetadata,
+            json_encode($postgresMetadataValues, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n",
+        );
+        $rewriteChecksum($postgresArchive, $postgresChecksum, $postgresMetadata);
+        $fakePgRestore = $postgresStructureDirectory . '/pg_restore';
+        file_put_contents(
+            $fakePgRestore,
+            "#!/bin/sh\n"
+                . "test \"\$1\" = \"--list\" || exit 9\n"
+                . "printf '%s\\n' cpe_database_ownership institutions settings\n",
+        );
+        chmod($fakePgRestore, 0700);
+        $originalPgRestore = getenv('CPE_PG_RESTORE_BINARY');
+        try {
+            putenv('CPE_PG_RESTORE_BINARY=' . $fakePgRestore);
+            (new DatabaseRestoreService())->verifiedCandidate($postgresArchive, 'pgsql', $liveIdentity);
+            file_put_contents($fakePgRestore, "#!/bin/sh\nexit 2\n");
+            chmod($fakePgRestore, 0700);
+            try {
+                (new DatabaseRestoreService())->verifiedCandidate($postgresArchive, 'pgsql', $liveIdentity);
+                throw new RuntimeException('Failed PostgreSQL structural inspection was accepted.');
+            } catch (UserVisibleException $e) {
+                assert_same('DATABASE_BACKUP_STRUCTURE_INVALID', $e->publicCode(), 'PostgreSQL structural failure used the wrong fixed code');
+            }
+        } finally {
+            if ($originalPgRestore === false) {
+                putenv('CPE_PG_RESTORE_BINARY');
+            } else {
+                putenv('CPE_PG_RESTORE_BINARY=' . $originalPgRestore);
+            }
+        }
+
+        [$code, $stdout, $stderr] = run_cli(['readiness'], ['CPE_BACKUP_DIR' => $directory]);
+        assert_same(0, $code, 'CLI readiness should inspect configured backup storage: ' . $stderr);
+        assert_true(str_contains($stdout, 'Latest verified backup is about'), 'CLI readiness did not report the configured backup age');
+        assert_true(!str_contains($stdout . $stderr, $directory), 'CLI readiness disclosed its configured backup path');
+
+        putenv('CPE_BACKUP_DIR=' . $directory);
+        $newerArtifact = (new DatabaseBackupService($pdo))->create('readiness-newer');
+        $rewriteCreatedAt(
+            $artifact->internalPath(),
+            $artifact->internalChecksumPath(),
+            $artifact->internalMetadataPath(),
+            gmdate('Y-m-d\TH:i:s\Z', time() - (8 * 3600)),
+        );
+        $rewriteCreatedAt(
+            $newerArtifact->internalPath(),
+            $newerArtifact->internalChecksumPath(),
+            $newerArtifact->internalMetadataPath(),
+            gmdate('Y-m-d\TH:i:s\Z', time() - (2 * 3600)),
+        );
+        touch($artifact->internalPath());
+        touch($newerArtifact->internalPath(), time() - (72 * 3600));
+        $newerInvalid = $directory . '/newest-lookalike.sqlite';
+        file_put_contents($newerInvalid, 'not a complete backup');
+        touch($newerInvalid);
+        $newestValid = (new ReadinessService($pdo))->snapshot()['backup'];
+        assert_same(true, $newestValid['present'], 'An invalid newest candidate hid an older valid backup');
+        assert_same('ok', $newestValid['status'], 'Newest valid backup should determine readiness');
+        assert_true($newestValid['ageHours'] >= 1 && $newestValid['ageHours'] <= 3, 'Readiness did not choose the newest checksum-bound metadata timestamp');
+
+        $rewriteCreatedAt(
+            $artifact->internalPath(),
+            $artifact->internalChecksumPath(),
+            $artifact->internalMetadataPath(),
+            gmdate('Y-m-d\TH:i:s\Z', time() - (72 * 3600)),
+        );
+        $rewriteCreatedAt(
+            $newerArtifact->internalPath(),
+            $newerArtifact->internalChecksumPath(),
+            $newerArtifact->internalMetadataPath(),
+            gmdate('Y-m-d\TH:i:s\Z', time() - (49 * 3600)),
+        );
+        touch($artifact->internalPath());
+        touch($newerArtifact->internalPath());
+        $stale = (new ReadinessService($pdo))->snapshot()['backup'];
+        assert_same(true, $stale['present'], 'Stale configured backup should remain present');
+        assert_same('warn', $stale['status'], 'Stale configured backup should warn');
+        assert_true($stale['ageHours'] >= 48, 'Stale configured backup age was not reported accurately');
+        assert_true(!str_contains(json_encode($stale, JSON_THROW_ON_ERROR), $directory), 'Stale backup readiness disclosed its configured path');
+
+        $copiedStaleDirectory = $newCaseDirectory('copied-stale');
+        $copySet($copiedStaleDirectory);
+        $copiedStale = $snapshotFor($copiedStaleDirectory);
+        assert_same(true, $copiedStale['present'], 'Copied old backup should remain a valid backup set');
+        assert_same('warn', $copiedStale['status'], 'Copying an old backup set must not freshen it');
+        assert_true($copiedStale['ageHours'] >= 71, 'Copied backup freshness did not use checksum-bound metadata time');
+
+        $retainedSetsDirectory = $newCaseDirectory('retained-sets');
+        for ($index = 1; $index <= 20; $index++) {
+            [$retainedArchive, $retainedChecksum, $retainedMetadata] = $copySet(
+                $retainedSetsDirectory,
+                sprintf('retained-%02d.sqlite', $index),
+            );
+            $rewriteCreatedAt(
+                $retainedArchive,
+                $retainedChecksum,
+                $retainedMetadata,
+                gmdate('Y-m-d\TH:i:s\Z', time() - ($index * 3600)),
+            );
+            touch($retainedArchive, time() - ((21 - $index) * 3600));
+        }
+        $retainedSets = $snapshotFor($retainedSetsDirectory);
+        assert_same(true, $retainedSets['present'], 'More than sixteen retained complete backup sets made readiness unavailable');
+        assert_same('ok', $retainedSets['status'], 'Retained backup readiness did not verify the bounded newest shortlist');
+        assert_true(
+            $retainedSets['ageHours'] >= 0 && $retainedSets['ageHours'] <= 2,
+            'Retained backup readiness did not prioritize checksum-bound metadata time over archive mtime',
+        );
+
+        $shortCircuitDirectory = $newCaseDirectory('verified-short-circuit');
+        [$newestSmallArchive, $newestSmallChecksum, $newestSmallMetadata] = $copySet(
+            $shortCircuitDirectory,
+            'newest-small.sqlite',
+        );
+        $rewriteCreatedAt(
+            $newestSmallArchive,
+            $newestSmallChecksum,
+            $newestSmallMetadata,
+            gmdate('Y-m-d\TH:i:s\Z', time() - 3600),
+        );
+
+        $olderSparseArchive = $shortCircuitDirectory . '/older-over-budget.sqlite';
+        $olderSparseHandle = fopen($olderSparseArchive, 'x+b');
+        assert_true(is_resource($olderSparseHandle), 'Could not create sparse over-budget readiness fixture');
+        $verificationLimit = (new ReflectionClass(ReadinessService::class))
+            ->getConstant('MAX_BACKUP_VERIFICATION_BYTES');
+        assert_true(is_int($verificationLimit) && $verificationLimit > 0, 'Readiness verification limit is unavailable');
+        assert_true(
+            ftruncate($olderSparseHandle, $verificationLimit + 1),
+            'Could not size sparse over-budget readiness fixture',
+        );
+        fclose($olderSparseHandle);
+        $olderSparseMetadata = $olderSparseArchive . BackupMetadata::SUFFIX;
+        $olderSparseMetadataValues = json_decode(
+            (string) file_get_contents($artifact->internalMetadataPath()),
+            true,
+            16,
+            JSON_THROW_ON_ERROR,
+        );
+        $olderSparseMetadataValues['archive_sha256'] = str_repeat('0', 64);
+        $olderSparseMetadataValues['created_at'] = gmdate('Y-m-d\TH:i:s\Z', time() - (48 * 3600));
+        file_put_contents(
+            $olderSparseMetadata,
+            json_encode($olderSparseMetadataValues, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n",
+        );
+        $olderSparseMetadataHash = hash_file('sha256', $olderSparseMetadata);
+        assert_true(is_string($olderSparseMetadataHash), 'Could not hash sparse fixture metadata');
+        file_put_contents(
+            $olderSparseArchive . '.sha256',
+            str_repeat('0', 64) . '  ' . basename($olderSparseArchive) . "\n"
+                . $olderSparseMetadataHash . '  ' . basename($olderSparseMetadata) . "\n",
+        );
+        touch($olderSparseArchive);
+
+        $shortCircuit = $snapshotFor($shortCircuitDirectory);
+        assert_same(true, $shortCircuit['present'], 'An older over-budget set discarded an already verified newer backup');
+        assert_same('ok', $shortCircuit['status'], 'The verified newest backup should determine readiness immediately');
+        assert_true(
+            $shortCircuit['ageHours'] >= 0 && $shortCircuit['ageHours'] <= 2,
+            'Readiness did not stop before full verification of the older sparse archive',
+        );
+
+        putenv('CPE_BACKUP_DIR=' . $missingDirectory);
+        $missing = (new ReadinessService($pdo))->snapshot()['backup'];
+        assert_same(false, $missing['present'], 'Missing configured backup storage should not report a backup');
+        assert_same('warn', $missing['status'], 'Missing configured backup storage should warn safely');
+        assert_true(!str_contains(json_encode($missing, JSON_THROW_ON_ERROR), $missingDirectory), 'Missing backup readiness disclosed its configured path');
+
+        $boundedDirectory = $newCaseDirectory('bounded-scan');
+        for ($i = 0; $i < 513; $i++) {
+            file_put_contents($boundedDirectory . '/entry-' . $i . '.txt', 'x');
+        }
+        $bounded = $snapshotFor($boundedDirectory);
+        assert_same(false, $bounded['present'], 'Oversized backup directory scan should fail closed');
+        assert_true(str_contains($bounded['message'], 'could not be inspected'), 'Bounded scan should use fixed access guidance');
+        assert_true(!str_contains(json_encode($bounded, JSON_THROW_ON_ERROR), $directory), 'Bounded scan disclosed configured storage');
+
+        putenv('CPE_BACKUP_DIR');
+        assert_same(cpe_data_path('backups'), DatabaseBackupService::configuredDirectory(), 'Default backup storage contract changed');
+    } finally {
+        if ($originalDirectory === false) {
+            putenv('CPE_BACKUP_DIR');
+        } else {
+            putenv('CPE_BACKUP_DIR=' . $originalDirectory);
+        }
+        if (is_link($symlinkDirectory)) {
+            unlink($symlinkDirectory);
+        }
+        if (is_file($outsideFile)) {
+            unlink($outsideFile);
+        }
+        foreach ($caseDirectories as $caseDirectory) {
+            if (is_dir($caseDirectory)) {
+                remove_tree($caseDirectory);
+            }
+        }
+        if (is_dir($directory)) {
+            remove_tree($directory);
+        }
+    }
 });
 
 test_case('readiness snapshot warns on configured non-operating calendar days', function (): void {

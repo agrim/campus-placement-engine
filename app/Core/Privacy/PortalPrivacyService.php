@@ -7,6 +7,7 @@ namespace App\Core\Privacy;
 use App\Core\Backup\DatabaseBackupService;
 use App\Core\Modules\Module;
 use App\Core\Modules\ProvidesPrivacy;
+use App\Core\Persistence\TransactionRollbackGuard;
 use App\Support\Auth;
 use App\Support\Database;
 use PDO;
@@ -87,17 +88,17 @@ final class PortalPrivacyService
                 $this->pdo->commit();
             }
         } catch (\Throwable $e) {
-            if ($ownsTransaction && $this->pdo->inTransaction()) {
-                $this->pdo->rollBack();
+            if ($ownsTransaction) {
+                TransactionRollbackGuard::rethrow($this->pdo, $e, 'privacy.erasure', true);
             }
-            throw new RuntimeException($e->getMessage() . ' Restore from safety backup: ' . $backup['path'], 0, $e);
+            throw $e;
         }
         return [
             'schema' => 'career_services.privacy_erasure.v1',
             'person_public_id' => $personPublicId,
             'anonymized_at' => $now,
             'reason' => $reason,
-            'backup_path' => $backup['path'],
+            'safety_reference' => $backup->reference(),
             'modules' => $moduleResults,
         ];
     }

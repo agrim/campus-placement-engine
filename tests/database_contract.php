@@ -35,6 +35,15 @@ function contract_assert(bool $condition, string $message): void
 try {
     contract_assert(!Database::isInstalled(), 'Database contract requires an empty target database.');
     (new SystemRequirements())->assertReady();
+    Database::migrate();
+    contract_assert(!Database::isInstalled(), 'A migration-only run must not mark the application installed.');
+    contract_assert(
+        str_starts_with(
+            (string) Database::connection()->query("SELECT public_id FROM institutions WHERE slug = 'default'")->fetchColumn(),
+            'unbound_',
+        ),
+        'A migration-only run must reserve an explicitly unbound institution identity.',
+    );
     (new Installer())->install([
         'college_name' => 'Database Contract College',
         'timezone' => 'UTC',
@@ -135,6 +144,97 @@ try {
     $lifecycle->disable('placement', 1);
     $lifecycle->enable('placement', 1);
     contract_assert((int) $pdo->query('SELECT COUNT(*) FROM applications')->fetchColumn() === $applicationCount, 'Module lifecycle deleted data.');
+
+    $legacyError = 'Legacy sentinel.admin@example.test postgresql://root:password@db/private/sentinel SQLSTATE[23505] DETAIL: person=Ada_Lovelace';
+    $notificationId = (int) $pdo->query('SELECT id FROM notifications ORDER BY id LIMIT 1')->fetchColumn();
+    contract_assert($notificationId > 0, 'Legacy error redaction test requires a notification.');
+    $insertDelivery = $pdo->prepare(
+        'INSERT INTO notification_deliveries
+         (notification_id, channel, target, status, attempt_count, last_error, payload_json, created_at, updated_at,
+          available_at, idempotency_key)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+    );
+    $deliveryCreatedAt = cpe_now();
+    $insertDelivery->execute([
+        $notificationId,
+        'file',
+        '[config:notification_file]',
+        'failed',
+        7,
+        $legacyError,
+        '{}',
+        $deliveryCreatedAt,
+        $deliveryCreatedAt,
+        $deliveryCreatedAt,
+        'ndk_' . bin2hex(random_bytes(16)),
+    ]);
+    $deliveryId = Database::lastInsertId($pdo);
+    $eventId = (int) $pdo->query('SELECT id FROM domain_event_outbox ORDER BY id LIMIT 1')->fetchColumn();
+    contract_assert($eventId > 0, 'Legacy error redaction test requires a domain event.');
+    $eventUpdate = $pdo->prepare(
+        'UPDATE domain_event_outbox SET attempts = ?, last_error = ?, failed_at = ? WHERE id = ?'
+    );
+    $eventUpdate->execute([8, $legacyError, cpe_now(), $eventId]);
+
+    $migrationName = Database::driver() === 'pgsql'
+        ? '007_error_detail_redaction.sql'
+        : '043_error_detail_redaction.sql';
+    $deleteMigration = $pdo->prepare('DELETE FROM migrations WHERE migration = ?');
+    $deleteMigration->execute([$migrationName]);
+    contract_assert($deleteMigration->rowCount() === 1, 'Legacy error redaction migration must already be registered.');
+    Database::migrate(false);
+
+    $delivery = $pdo->query(
+        'SELECT status, attempt_count, last_error FROM notification_deliveries WHERE id = ' . $deliveryId
+    )->fetch();
+    contract_assert((string) $delivery['status'] === 'failed', 'Legacy notification status changed during redaction.');
+    contract_assert((int) $delivery['attempt_count'] === 7, 'Legacy notification retry evidence changed during redaction.');
+    contract_assert(
+        (string) $delivery['last_error'] === 'CPE_LEGACY_ERROR_REDACTED Reference: inc_unavailable',
+        'Legacy notification error detail was not redacted.',
+    );
+    $event = $pdo->query(
+        'SELECT attempts, failed_at, last_error FROM domain_event_outbox WHERE id = ' . $eventId
+    )->fetch();
+    contract_assert((int) $event['attempts'] === 8, 'Legacy domain-event retry evidence changed during redaction.');
+    contract_assert((string) $event['failed_at'] !== '', 'Legacy domain-event dead-letter evidence changed during redaction.');
+    contract_assert(
+        (string) $event['last_error'] === 'CPE_LEGACY_ERROR_REDACTED Reference: inc_unavailable',
+        'Legacy domain-event error detail was not redacted.',
+    );
+
+    $auditCreatedAt = cpe_now();
+    $auditInsert = $pdo->prepare(
+        'INSERT INTO audit_logs (actor_user_id, action, subject_type, subject_id, detail, ip_address, user_agent, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+    );
+    $auditInsert->execute([
+        null,
+        'candidate.update',
+        'candidate',
+        8675309,
+        $legacyError,
+        '203.0.113.25',
+        'Sentinel Browser ' . $legacyError,
+        $auditCreatedAt,
+    ]);
+    $auditId = Database::lastInsertId($pdo);
+    $auditMigration = Database::driver() === 'pgsql'
+        ? '008_audit_detail_redaction.sql'
+        : '044_audit_detail_redaction.sql';
+    $deleteMigration->execute([$auditMigration]);
+    contract_assert($deleteMigration->rowCount() === 1, 'Audit redaction migration must already be registered.');
+    Database::migrate(false);
+    $audit = $pdo->query(
+        'SELECT action, subject_type, subject_id, detail, ip_address, user_agent, created_at FROM audit_logs WHERE id = ' . $auditId
+    )->fetch();
+    contract_assert((string) $audit['action'] === 'candidate.update', 'Audit action changed during redaction.');
+    contract_assert((string) $audit['subject_type'] === 'candidate', 'Audit subject type changed during redaction.');
+    contract_assert((int) $audit['subject_id'] === 8675309, 'Audit subject id changed during redaction.');
+    contract_assert((string) $audit['created_at'] === $auditCreatedAt, 'Audit timestamp changed during redaction.');
+    contract_assert((string) $audit['detail'] === 'Legacy audit detail redacted.', 'Legacy audit detail was not redacted.');
+    contract_assert((string) $audit['ip_address'] === '', 'Legacy audit IP was not redacted.');
+    contract_assert((string) $audit['user_agent'] === '', 'Legacy audit user agent was not redacted.');
 
     echo 'PASS database contract (' . Database::driver() . ' ' . Database::serverVersion() . ")\n";
 } finally {

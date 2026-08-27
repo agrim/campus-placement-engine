@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 namespace App\Modules\Placement\Workflow;
 
+use App\Core\Http\UserVisibleException;
 use PDO;
-use RuntimeException;
 
 final class WorkflowEngine
 {
@@ -54,7 +54,7 @@ final class WorkflowEngine
             $this->guards->assertAllowed($transition, $applicationId, $actorRole, $reason);
             return $transition;
         }
-        throw new RuntimeException("Role {$actorRole} cannot move {$fromState} to {$toState}.");
+        throw new UserVisibleException('WORKFLOW_TRANSITION_FORBIDDEN', 'Your role cannot move this application through that workflow transition.');
     }
 
     public function resolveKey(
@@ -74,7 +74,7 @@ final class WorkflowEngine
             $this->guards->assertAllowed($transition, $applicationId, $actorRole, $reason);
             return $transition;
         }
-        throw new RuntimeException('Workflow transition is unavailable: ' . $transitionKey);
+        throw new UserVisibleException('WORKFLOW_TRANSITION_UNAVAILABLE', 'Workflow transition is unavailable.');
     }
 
     public function transitionForEffect(int $applicationId, string $fromState, string $toState, bool $correction = false): array
@@ -84,7 +84,7 @@ final class WorkflowEngine
                 return $transition;
             }
         }
-        throw new RuntimeException("Pinned workflow has no {$fromState} to {$toState} transition.");
+        throw new UserVisibleException('WORKFLOW_TRANSITION_UNAVAILABLE', 'Workflow transition is unavailable.');
     }
 
     public function resolveCorrection(int $applicationId, string $actorRole, string $reason): array
@@ -100,7 +100,7 @@ final class WorkflowEngine
             $this->guards->assertAllowed($transition, $applicationId, $actorRole, $reason);
             return $transition;
         }
-        throw new RuntimeException("Role {$actorRole} cannot correct an application from {$from}.");
+        throw new UserVisibleException('WORKFLOW_CORRECTION_FORBIDDEN', 'Your role cannot correct this application from its current state.');
     }
 
     public function recordAppliedTransition(
@@ -134,7 +134,7 @@ final class WorkflowEngine
         $stmt->execute([$applicationId]);
         $state = $stmt->fetchColumn();
         if ($state === false) {
-            throw new RuntimeException('Application not found.');
+            throw new UserVisibleException('WORKFLOW_APPLICATION_NOT_FOUND', 'Application not found.');
         }
         return (string) $state;
     }

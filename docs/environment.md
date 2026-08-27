@@ -18,6 +18,15 @@ control-plane and infrastructure variables live outside this public repository.
 | `CPE_ADMIN_PASSWORD` | First CLI-installed administrator password. Prefer this over a command argument. |
 | `CPE_COLLEGE_NAME`, `CPE_ADMIN_NAME`, `CPE_ADMIN_EMAIL`, `CPE_TIMEZONE`, `CPE_WORKFLOW` | Optional CLI install defaults. |
 
+`php placement setup` is the local browser path. It accepts only
+`127.0.0.1:PORT` or `localhost:PORT`, prints a one-time code to the trusted local
+terminal, and passes the same capability only to its PHP child server. The code
+expires after 20 minutes and must be entered on the unlock-only page; loopback
+topology alone never authorizes the installer. `CPE_INTERNAL_SETUP_CAPABILITY`,
+`CPE_INTERNAL_SETUP_ADDRESS`, and `CPE_INTERNAL_SETUP_EXPIRES` are reserved
+implementation variables; never set or forward them in a service, shell
+profile, proxy, or container definition.
+
 ## Database And Recovery
 
 | Variable | Purpose |
@@ -31,14 +40,15 @@ control-plane and infrastructure variables live outside this public repository.
 | `CPE_CONFIG_SNAPSHOT_DIR` | Config import safety copies. |
 | `CPE_PRIVACY_SNAPSHOT_DIR` | Privacy erasure safety copies. |
 
-PostgreSQL requires `pdo_pgsql`; backup and restore additionally require
-`pg_dump` and `pg_restore`. SQLite requires `pdo_sqlite`, `sqlite3`, and writable
-data/database directories.
+All supported modes require `mbstring`. PostgreSQL requires `pdo_pgsql`; backup
+and restore additionally require `pg_dump` and `pg_restore`. SQLite requires
+`pdo_sqlite`, `sqlite3`, and writable data/database directories.
 
 ## Web Security And Sessions
 
 | Variable | Purpose |
 |---|---|
+| `CPE_SETUP_TOKEN` | Deployer-provisioned remote browser-setup token. It must be canonical unpadded base64url, 43-128 characters, decode to at least 32 bytes, and remain in the process environment or secret manager rather than a URL. |
 | `CPE_SESSION_SECURE` | `auto`, `force`, or `never`. Use `force` behind an always-TLS proxy; `never` is local HTTP only. |
 | `CPE_TRUST_PROXY_HEADERS` | Trust the first `X-Forwarded-Proto` value for HTTPS detection. Enable only behind a sanitizing trusted proxy. |
 | `CPE_SESSION_DRIVER` | `files` or `database`. Hosted mode defaults to `database`; self-hosting defaults to `files`. |
@@ -48,6 +58,16 @@ data/database directories.
 
 Cookies are HttpOnly, SameSite=Lax, and host-only. HSTS is sent only when HTTPS
 is detected. Forwarded protocol headers are ignored unless explicitly trusted.
+
+Before installation, `/install.php` uses a separate file-backed, host-only,
+HttpOnly, SameSite=Strict session and a 20-minute non-sliding authorization
+grant. Remote token unlock requires direct HTTPS, except that
+`CPE_SESSION_SECURE=force` is the explicit assertion for TLS termination.
+Loopback source addresses, forwarded headers, and proxy headers never grant
+environment-token transport authority. The separate `php placement setup`
+capability remains loopback-only and topology-bound. If
+`CPE_SESSION_DRIVER=database` is configured before the schema exists, browser
+setup refuses to proceed and directs the operator to `php placement install`.
 
 ## Institutional SSO
 
@@ -66,9 +86,14 @@ reviewed proxy and use `php placement sso-link` for explicit subject links.
 | Variable | Purpose |
 |---|---|
 | `CPE_LOG_PATH` | Optional JSONL structured log path. PHP error logging is the fallback. |
-| `CPE_METRICS_TOKEN` | Bearer token of at least 24 characters for `public/metrics.php`. |
+| `CPE_METRICS_TOKEN` | Bearer token of at least 24 characters for `public/metrics.php` and managed-hosting readiness. |
 
-`public/health.php` needs no token. Readiness is selected with `?ready=1`.
+`public/health.php` liveness needs no token and does not load a platform adapter,
+tenant, session, or database. Readiness is selected with `?ready=1`. It remains
+unauthenticated for ordinary self-hosting, but when `CPE_HOSTED_MODE` is enabled
+or `CPE_PLATFORM_BOOTSTRAP` is non-empty it requires the same exact
+`Authorization: Bearer ...` header as metrics. Query parameters, cookies,
+forwarded identity headers, and source addresses never supply this credential.
 
 ## Domain Event Outbox
 

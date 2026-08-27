@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace App\Modules\Placement\Workflow;
 
-use RuntimeException;
+use App\Core\Http\UserVisibleException;
 
 final class WorkflowDefinitionValidator
 {
@@ -147,7 +147,10 @@ final class WorkflowDefinitionValidator
     {
         $errors = $this->validate($definition);
         if ($errors !== []) {
-            throw new RuntimeException('Invalid workflow definition: ' . implode(' ', $errors));
+            throw new UserVisibleException(
+                'WORKFLOW_DEFINITION_INVALID',
+                'Workflow definition is invalid. Review its states, transitions, roles, guards, and effects.',
+            );
         }
     }
 

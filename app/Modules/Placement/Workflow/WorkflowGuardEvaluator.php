@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Modules\Placement\Workflow;
 
+use App\Core\Http\UserVisibleException;
 use PDO;
 use RuntimeException;
 
@@ -48,7 +49,7 @@ final class WorkflowGuardEvaluator
         $stmt->execute([$applicationId]);
         $row = $stmt->fetch();
         if (!$row) {
-            throw new RuntimeException('Application not found.');
+            throw new UserVisibleException('WORKFLOW_APPLICATION_NOT_FOUND', 'Application not found.');
         }
         return $row;
     }
@@ -56,14 +57,14 @@ final class WorkflowGuardEvaluator
     private function assertCandidateActive(array $application): void
     {
         if ((int) ($application['opted_out'] ?? 0) === 1) {
-            throw new RuntimeException('Candidate has opted out of placement movement.');
+            throw new UserVisibleException('WORKFLOW_CANDIDATE_OPTED_OUT', 'Candidate has opted out of placement movement.');
         }
     }
 
     private function assertPlacementMutable(string $actorRole): void
     {
         if ($this->setting('placement_freeze', '0') === '1' && $actorRole !== 'admin') {
-            throw new RuntimeException('Placement decisions are frozen. Admin override is required.');
+            throw new UserVisibleException('WORKFLOW_PLACEMENT_FROZEN', 'Placement decisions are frozen. Admin override is required.');
         }
     }
 
@@ -73,14 +74,14 @@ final class WorkflowGuardEvaluator
         if ($placedCompanyId > 0
             && $placedCompanyId !== (int) $application['company_id']
             && $this->setting('allow_offer_upgrade', '0') !== '1') {
-            throw new RuntimeException('Candidate already has a placement. Offer upgrades are disabled.');
+            throw new UserVisibleException('WORKFLOW_UPGRADE_DISABLED', 'Candidate already has a placement. Offer upgrades are disabled.');
         }
     }
 
     private function assertReason(string $reason): void
     {
         if (trim($reason) === '') {
-            throw new RuntimeException('A reason is required for workflow corrections.');
+            throw new UserVisibleException('WORKFLOW_CORRECTION_REASON_REQUIRED', 'A reason is required for workflow corrections.');
         }
     }
 

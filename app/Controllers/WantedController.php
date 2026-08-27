@@ -4,9 +4,11 @@ declare(strict_types=1);
 
 namespace App\Controllers;
 
+use App\Core\Http\UserVisibleException;
 use App\Modules\Placement\Application\PlacementService;
 use App\Security\Csrf;
 use App\Support\Auth;
+use App\Support\ControllerFailure;
 use App\Support\Flash;
 
 final class WantedController
@@ -24,12 +26,12 @@ final class WantedController
         try {
             Csrf::verify($_POST['_token'] ?? null);
             if (!Auth::hasCapability($user, 'placement.wanted.manage')) {
-                throw new \RuntimeException('Your role cannot create wanted alerts.');
+                throw new UserVisibleException('WANTED_CREATE_FORBIDDEN', 'Your role cannot create wanted alerts.');
             }
             (new PlacementService())->createWantedAlert((int) ($_POST['candidate_id'] ?? 0), (string) ($_POST['reason'] ?? ''), (int) $user['id']);
             Flash::add('success', 'Wanted alert created.');
         } catch (\Throwable $e) {
-            Flash::add('error', $e->getMessage());
+            ControllerFailure::flash($e, 'CPE_WANTED_CREATE_FAILURE', 'wanted.create');
         }
         redirect(url('wanted'));
     }
@@ -40,12 +42,12 @@ final class WantedController
         try {
             Csrf::verify($_POST['_token'] ?? null);
             if (!Auth::hasCapability($user, 'placement.wanted.manage')) {
-                throw new \RuntimeException('Your role cannot resolve wanted alerts.');
+                throw new UserVisibleException('WANTED_RESOLVE_FORBIDDEN', 'Your role cannot resolve wanted alerts.');
             }
             (new PlacementService())->resolveWantedAlert((int) ($_POST['alert_id'] ?? 0), (int) $user['id']);
             Flash::add('success', 'Wanted alert resolved.');
         } catch (\Throwable $e) {
-            Flash::add('error', $e->getMessage());
+            ControllerFailure::flash($e, 'CPE_WANTED_RESOLVE_FAILURE', 'wanted.resolve');
         }
         redirect(url('wanted'));
     }

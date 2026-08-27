@@ -114,14 +114,41 @@ Rollback restores the whole application database from the pre-import snapshot an
 writes a safety copy of the current database first. Use rollback immediately
 after a mistaken import; changes made after that import are also undone.
 
+Public alpha.1 import manifests stored absolute `backup_path` and
+`restore_safety_path` values. Current releases never trust or display those
+directories. They resolve only a strictly validated backup basename inside the
+configured import rollback directory and report `legacy_conversion_required`.
+Preserve the original archive and one-line checksum, then convert deliberately:
+
+```bash
+php placement rollback-import import-YYYYMMDD-HHMMSS-abcdef \
+  --convert-legacy --confirm=CONVERT
+```
+
+The conversion creates a new owned SQLite archive with current metadata and a
+two-entry checksum, then updates the manifest with safe references and an audit
+timestamp. It never overwrites the old archive. A standalone alpha.1 SQLite
+backup can be converted with `php placement convert-legacy-backup OLD.sqlite
+--confirm=CONVERT`; legacy PostgreSQL archives require isolated restore
+validation instead.
+
+For an alpha.1 PostgreSQL import snapshot, `rollback-import --list` reports
+`legacy_postgres_isolated_validation_required` when the strict `.pgdump`
+basename is present inside the configured import directory. The old manifest's
+absolute directory is ignored and never displayed. Neither direct rollback nor
+`--convert-legacy` accepts that metadata-free dump. Preserve the original dump
+and checksum, restore it into an isolated PostgreSQL database, validate schema,
+ownership, installed marker, and institution identity, and only then create a
+new current-format backup for reviewed recovery.
+
 Take full database backups at milestones:
 
 ```bash
 php placement backup
 ```
 
-Each new backup gets a `.sha256` sidecar. Keep the database and checksum
-together, keep them out of Git, and encrypt off-machine copies with
+Each new backup gets `.metadata.json` identity metadata and a `.sha256` sidecar
+that binds both files. Keep all three together, keep them out of Git, and encrypt off-machine copies with
 institution-approved tooling.
 
 ## Verification

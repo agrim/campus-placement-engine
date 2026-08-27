@@ -4,9 +4,11 @@ declare(strict_types=1);
 
 namespace App\Controllers;
 
+use App\Core\Http\UserVisibleException;
 use App\Core\Modules\ModuleLifecycleService;
 use App\Security\Csrf;
 use App\Support\Auth;
+use App\Support\ControllerFailure;
 use App\Support\Database;
 use App\Support\Flash;
 
@@ -34,11 +36,11 @@ final class ModuleController
             match ($action) {
                 'enable' => $service->enable($moduleKey, (int) $user['id']),
                 'disable' => $service->disable($moduleKey, (int) $user['id']),
-                default => throw new \RuntimeException('Unknown module action.'),
+                default => throw new UserVisibleException('MODULE_ACTION_INVALID', 'Unknown module action.'),
             };
             Flash::add('success', ucfirst($moduleKey) . ' module ' . $action . 'd.');
         } catch (\Throwable $e) {
-            Flash::add('error', $e->getMessage());
+            ControllerFailure::flash($e, 'CPE_MODULE_UPDATE_FAILURE', 'module.update');
         }
         redirect(url('modules'));
     }

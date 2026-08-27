@@ -11,6 +11,49 @@ Use this before a public alpha tag or downloadable archive.
 - Run `php placement setup --check` and confirm the one-command guided-install
   preflight exits without creating an installation or starting a server.
 - Run `php tests/run.php`.
+- Run `php tests/backup_restore_contract.php` and confirm checksum/metadata
+  tamper and wrong-identity inputs are rejected before safety backup or target
+  mutation, while a same-identity restore creates checksummed safety evidence.
+- Run `php tests/legacy_backup_compatibility_contract.php` and confirm legacy
+  upgrade ownership is claimed before backup, conversion exclusively creates a
+  new current-format archive, originals remain unchanged, legacy import
+  manifests require explicit conversion, and restore-staging cleanup failures
+  reach the protected incident record. Confirm alpha.1 PostgreSQL import
+  manifests expose only the fixed isolated-validation status and refuse direct
+  conversion/restore without modifying the original dump.
+- Run the mandatory external `php tests/alpha1_release_acceptance.php` gate with
+  `CPE_ALPHA1_DATABASE_FIXTURE` and `CPE_ALPHA1_BACKUP_FIXTURE` produced by an
+  unmodified public `v0.1.0-alpha.1` artifact. Confirm it passes rather than
+  skips, and record the private fixture provenance and hashes outside Git. CI
+  and release must also export that exact tag and generate/run the fixtures on
+  every workflow execution.
+- Run `php tests/setup_authorization_contract.php` and confirm the browser and
+  CLI setup authorization boundaries pass.
+- Run `php tests/install_concurrency_contract.php` and confirm SQLite produces
+  exactly one internally consistent hosted installation winner from two
+  distinct tenant identities and payloads. The PostgreSQL 17 release job must
+  run the same contract against its fresh dedicated database.
+- Run `php tests/hosted_install_atomicity_contract.php` and confirm every
+  reviewed durable stage rolls back to the exact unbound state, a clean retry
+  completes once, and check-plus-identity uncertain-success recovery is a
+  no-op. The PostgreSQL 17 release job must run the same contract against a
+  fresh dedicated database.
+- Run `php tests/hosted_install_preflight_contract.php` and confirm installed
+  pre-current schemas reject same-tenant and wrong-tenant direct retries without
+  changing schema, migration, ownership, identity, or product state.
+- Run `php tests/database_lock_release_contract.php` and confirm its local typed
+  failure companion passes. The PostgreSQL 17 release job must fault checked
+  unlock for ownership, migration, and installation locks and prove every next
+  cached connection uses a different backend session.
+- Run `php tests/database_connection_cleanup_contract.php` and confirm typed
+  ownership/migration cleanup failures retain both causes, discard the provider,
+  preserve rollback truth, and permit a fresh connection. The PostgreSQL 17
+  release job must run the same contract against a fresh dedicated database.
+- Run `php tests/hosted_install_contract.php` and confirm managed-hosting
+  contract version 2 exposes no post-install rebinding method and that exact
+  database snapshots remain unchanged when intended-tenant, wrong-tenant, and
+  malformed-identity attempts target an installed self-hosted database. The
+  PostgreSQL 17 release job must run it against a fresh dedicated database.
 - Run `php tests/database_contract.php` against SQLite and a fresh PostgreSQL 17
   database.
 - Run `php tests/managed_hosting_contract.php` and confirm the external resolver
@@ -27,8 +70,9 @@ Use this before a public alpha tag or downloadable archive.
   `CPE_ADMIN_PASSWORD=... php placement install ...`.
 - Run `php placement upgrade` against a throwaway installed database and confirm
   it writes an upgrade backup before migrations.
-- Open or render the browser installer against a throwaway `CPE_DB_PATH` and
-  confirm the system checks show `OK` before installation.
+- Start `php placement setup` against a throwaway `CPE_DB_PATH`, or exercise the
+  HTTPS `CPE_SETUP_TOKEN` unlock flow, and confirm installation fields and
+  system checks appear only after authorization.
 - Confirm a second installer run against the same database is refused and does
   not create another administrator or overwrite settings.
 - Run `php placement readiness` on a fresh synthetic demo install.
@@ -65,7 +109,11 @@ Use this before a public alpha tag or downloadable archive.
   staffed test installs, include `--restricted-email=atlas@example.test` or an
   equivalent non-admin account so sensitive-page redirects are covered over
   HTTP.
-- Check `/health.php`, `/health.php?ready=1`, and token-protected `/metrics.php`.
+- Check public `/health.php`, self-hosted `/health.php?ready=1`, and
+  token-protected `/metrics.php`. For managed hosting, check readiness again
+  through the real proxy with both the tenant `Host` and
+  `Authorization: Bearer <CPE_METRICS_TOKEN>`; confirm missing or invalid
+  credentials return the concealed 404 before the platform adapter loads.
 - Run `php placement load-smoke --base-url=http://localhost:8000` and record the
   release-candidate baseline rather than treating it as a production capacity
   guarantee.
@@ -73,9 +121,9 @@ Use this before a public alpha tag or downloadable archive.
   does not deliver acknowledged events again.
 - Follow `docs/browser-qa.md` for dense-board desktop and phone-width checks.
 - Confirm the GitHub Actions CI workflow is green.
-- For PostgreSQL, perform a backup, mutate a synthetic setting, restore the dump,
-  and verify the original value plus readiness. Confirm a restore-safety dump was
-  created first.
+- For PostgreSQL, run the fresh-database backup/restore contract, then separately
+  perform an isolated staging restore drill and verify readiness plus HTTP smoke.
+  `pg_restore --list` structural validation is not a substitute for that drill.
 
 ## Data Boundary
 
@@ -85,7 +133,9 @@ Use this before a public alpha tag or downloadable archive.
 - Confirm no API key, webhook token, authorization header, private key, or
   provider credential appears in public source, docs, examples, or tests.
 - Confirm `data/*.sqlite`, backups, config snapshots, exports, import rollback
-  snapshots, privacy safety copies, and restore-safety copies are not staged.
+  snapshots, privacy safety copies, restore staging, and restore-safety copies
+  are not staged. Only `data/.gitkeep` and `data/.htaccess` may be packaged or
+  tracked.
 - Confirm no real CSV, SQL, XLSX, DOCX, PDF, ZIP, RAR, 7z, screenshots, or
   historical archive files are staged.
 - Confirm demo data is synthetic.
@@ -136,9 +186,9 @@ Use this before a public alpha tag or downloadable archive.
 - Open Board, Records, Reports, Import, Notifications, Admin, System, Public,
   and Student pages.
 - Run `php placement backup`.
-- Confirm the backup has a matching `.sha256` sidecar and that `restore` rejects
-  both a missing sidecar and a deliberately corrupted checksum in a throwaway
-  database.
+- Confirm the backup archive has `.metadata.json` and `.sha256` sidecars and that
+  `restore` rejects missing/tampered metadata, corrupt checksums, wrong identity,
+  and a relabeled SQLite archive before target mutation.
 - Run `php placement privacy-report`.
 - Run `php placement privacy-person-report` for a synthetic person and exercise
   `privacy-person-erase` only on a throwaway database, confirming all installed

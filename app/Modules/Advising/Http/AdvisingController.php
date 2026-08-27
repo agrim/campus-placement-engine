@@ -4,9 +4,11 @@ declare(strict_types=1);
 
 namespace App\Modules\Advising\Http;
 
+use App\Core\Http\UserVisibleException;
 use App\Modules\Advising\Application\AdvisingService;
 use App\Security\Csrf;
 use App\Support\Auth;
+use App\Support\ControllerFailure;
 use App\Support\Flash;
 
 final class AdvisingController
@@ -32,12 +34,12 @@ final class AdvisingController
         try {
             Csrf::verify($_POST['_token'] ?? null);
             if (!Auth::hasCapability($user, 'advising.appointments.manage')) {
-                throw new \RuntimeException('Your role cannot create advising appointments.');
+                throw new UserVisibleException('ADVISING_CREATE_FORBIDDEN', 'Your role cannot create advising appointments.');
             }
             (new AdvisingService())->createAppointment($_POST, (int) $user['id']);
             Flash::add('success', 'Advising appointment created.');
         } catch (\Throwable $e) {
-            Flash::add('error', $e->getMessage());
+            ControllerFailure::flash($e, 'CPE_ADVISING_CREATE_FAILURE', 'advising.create');
         }
         redirect(url('advising'));
     }
@@ -48,7 +50,7 @@ final class AdvisingController
         try {
             Csrf::verify($_POST['_token'] ?? null);
             if (!Auth::hasCapability($user, 'advising.appointments.manage')) {
-                throw new \RuntimeException('Your role cannot update advising appointments.');
+                throw new UserVisibleException('ADVISING_UPDATE_FORBIDDEN', 'Your role cannot update advising appointments.');
             }
             (new AdvisingService())->updateAppointmentStatus(
                 (int) ($_POST['appointment_id'] ?? 0),
@@ -57,7 +59,7 @@ final class AdvisingController
             );
             Flash::add('success', 'Appointment status updated.');
         } catch (\Throwable $e) {
-            Flash::add('error', $e->getMessage());
+            ControllerFailure::flash($e, 'CPE_ADVISING_UPDATE_FAILURE', 'advising.update');
         }
         redirect(url('advising'));
     }
@@ -68,7 +70,7 @@ final class AdvisingController
         try {
             Csrf::verify($_POST['_token'] ?? null);
             if (!Auth::hasCapability($user, 'advising.notes.manage')) {
-                throw new \RuntimeException('Your role cannot add advising notes.');
+                throw new UserVisibleException('ADVISING_NOTE_FORBIDDEN', 'Your role cannot add advising notes.');
             }
             (new AdvisingService())->addNote(
                 (int) ($_POST['appointment_id'] ?? 0),
@@ -77,7 +79,7 @@ final class AdvisingController
             );
             Flash::add('success', 'Staff note added.');
         } catch (\Throwable $e) {
-            Flash::add('error', $e->getMessage());
+            ControllerFailure::flash($e, 'CPE_ADVISING_NOTE_FAILURE', 'advising.note');
         }
         redirect(url('advising'));
     }
@@ -88,12 +90,12 @@ final class AdvisingController
         try {
             Csrf::verify($_POST['_token'] ?? null);
             if (!Auth::hasCapability($user, 'advising.tasks.manage')) {
-                throw new \RuntimeException('Your role cannot complete advising tasks.');
+                throw new UserVisibleException('ADVISING_TASK_FORBIDDEN', 'Your role cannot complete advising tasks.');
             }
             (new AdvisingService())->completeTask((int) ($_POST['task_id'] ?? 0), (int) $user['id']);
             Flash::add('success', 'Advising task completed.');
         } catch (\Throwable $e) {
-            Flash::add('error', $e->getMessage());
+            ControllerFailure::flash($e, 'CPE_ADVISING_TASK_FAILURE', 'advising.task');
         }
         redirect(url('advising'));
     }

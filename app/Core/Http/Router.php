@@ -49,6 +49,12 @@ final class Router
         (new $controllerClass())->{$action}();
     }
 
+    public function canonicalName(string $name, string $method): string
+    {
+        $key = strtoupper($method) . ' ' . $name;
+        return isset($this->routes[$key]) ? (string) $this->routes[$key]['name'] : 'unknown';
+    }
+
     public function definitions(): array
     {
         return array_values($this->routes);

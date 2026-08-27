@@ -116,14 +116,14 @@ For small local deployments, the simplest safe cadence is:
 - Run it before bulk imports, restores, or workflow changes.
 - Preview every CSV import before committing it.
 - Copy the configured backup directory off the host machine after the placement
-  day closes. Keep each `.sqlite` or `.pgdump` backup with its `.sha256` sidecar.
+  day closes. Keep each archive with its `.metadata.json` and `.sha256` sidecars.
 - Encrypt off-machine backups using the institution's approved disk, archive,
   or backup tooling. The app deliberately does not ship a custom encryption
   format or secret-management layer for v1.
 
 Avoid restoring while operators are actively making changes. Restore creates a
-safety copy first and verifies a `.sha256` sidecar when one is present, but it
-still replaces the live database state.
+safety copy only after required checksum-bound identity metadata and archive
+structure validate, but it still replaces the live database state.
 
 ## If Something Looks Wrong
 

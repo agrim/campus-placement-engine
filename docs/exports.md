@@ -2,15 +2,15 @@
 
 Backups and exports serve different purposes.
 
-- `php placement backup` creates a driver-appropriate database backup and writes a
-  `.sha256` checksum sidecar.
+- `php placement backup` creates a driver-appropriate database backup with
+  `.metadata.json` identity metadata and a `.sha256` sidecar binding both files.
 - `php placement export` writes portable CSV snapshots for audit, reporting,
   upgrade checks, and handoff.
 
 Backups are complete local databases, not share-safe files. Encrypt them with
 the institution's approved storage/archive tooling before moving them off the
-operator machine, and keep each `.sqlite` or `.pgdump` file with its `.sha256`
-sidecar.
+operator machine, and keep each archive with its `.metadata.json` and `.sha256`
+sidecars.
 
 ## Command
 

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Domain;
 
+use App\Core\Http\UserVisibleException;
 use App\Support\Database;
 use App\Support\Csv;
 use PDO;
@@ -63,7 +64,7 @@ final class SnapshotExporter
                 continue;
             }
             if (!isset($known[$name])) {
-                throw new RuntimeException('Unknown export dataset: ' . $name);
+                throw new UserVisibleException('EXPORT_DATASET_UNKNOWN', 'Unknown export dataset. Choose a listed dataset.');
             }
             $normalized[$name] = true;
         }
@@ -80,11 +81,22 @@ final class SnapshotExporter
         $files = [];
         foreach ($this->datasetsForProfile($profile) as $name => $dataset) {
             $path = $dir . '/' . $name . '.csv';
-            $rowCount = $this->writeCsv($path, $dataset['headers'], $this->pdo->query($dataset['sql'])->fetchAll());
+            $rows = $this->pdo->query($dataset['sql'])->fetchAll();
+            if ($name === 'notification_deliveries') {
+                foreach ($rows as &$row) {
+                    $row['last_error'] = $this->safePersistedIncidentReference((string) ($row['last_error'] ?? ''));
+                }
+                unset($row);
+            }
+            $rowCount = $this->writeCsv($path, $dataset['headers'], $rows);
             $files[] = ['file' => basename($path), 'rows' => $rowCount];
         }
         $this->writeCsv($dir . '/manifest.csv', ['file', 'rows'], $files);
-        return ['dir' => $dir, 'files' => $files, 'profile' => $profile];
+        return [
+            'export_reference' => 'export_' . substr(hash('sha256', basename($dir) . "\0" . count($files)), 0, 24),
+            'files' => $files,
+            'profile' => $profile,
+        ];
     }
 
     private function prepareDirectory(?string $targetDir): string
@@ -121,6 +133,16 @@ final class SnapshotExporter
         }
         fclose($handle);
         return $count;
+    }
+
+    private function safePersistedIncidentReference(string $reference): string
+    {
+        if ($reference === '') {
+            return '';
+        }
+        return preg_match('/\ACPE_[A-Z0-9_]{3,59} Reference: inc_[a-f0-9]{32}\z/D', $reference) === 1
+            ? $reference
+            : 'CPE_PERSISTED_ERROR_REDACTED Reference: inc_unavailable';
     }
 
     private function normalizeProfile(string $profile): string
@@ -208,7 +230,19 @@ final class SnapshotExporter
             ],
             'settings' => [
                 'headers' => ['key', 'value'],
-                'sql' => 'SELECT key, value FROM settings ORDER BY key',
+                'sql' => "SELECT key,
+                                 CASE WHEN key IN (
+                                     'notification_file_outbox_path',
+                                     'notification_webhook_url',
+                                     'notification_email_to',
+                                     'notification_email_from',
+                                     'notification_sms_gateway_url',
+                                     'notification_sms_to',
+                                     'notification_whatsapp_gateway_url',
+                                     'notification_whatsapp_to'
+                                 ) AND value <> '' THEN '[protected configuration]'
+                                 ELSE value END AS value
+                          FROM settings ORDER BY key",
             ],
             'users' => [
                 'headers' => ['id', 'name', 'email', 'role', 'scope_type', 'scope_value', 'active', 'created_at'],
@@ -236,9 +270,9 @@ final class SnapshotExporter
                           ORDER BY n.id',
             ],
             'notification_deliveries' => [
-                'headers' => ['id', 'notification_id', 'channel', 'status', 'attempt_count', 'last_error', 'payload_json', 'created_at', 'updated_at', 'delivered_at'],
+                'headers' => ['id', 'notification_id', 'channel', 'status', 'attempt_count', 'last_error', 'delivered_to', 'payload_json', 'created_at', 'updated_at', 'delivered_at'],
                 'sql' => 'SELECT id, notification_id, channel, status, attempt_count, last_error,
-                                 payload_json, created_at, updated_at, COALESCE(delivered_at, \'\') AS delivered_at
+                                 delivered_to, payload_json, created_at, updated_at, COALESCE(delivered_at, \'\') AS delivered_at
                           FROM notification_deliveries
                           ORDER BY id',
             ],
@@ -363,8 +397,8 @@ final class SnapshotExporter
             'audit_logs' => [
                 'headers' => ['id', 'actor_email', 'action', 'subject_type', 'subject_id', 'detail', 'ip_address', 'user_agent', 'created_at'],
                 'sql' => 'SELECT a.id, COALESCE(u.email, \'\') AS actor_email, a.action, a.subject_type,
-                                 COALESCE(a.subject_id, \'\') AS subject_id, a.detail,
-                                 a.ip_address, a.user_agent, a.created_at
+                                 COALESCE(a.subject_id, \'\') AS subject_id, \'Audit event recorded.\' AS detail,
+                                 \'\' AS ip_address, \'\' AS user_agent, a.created_at
                           FROM audit_logs a
                           LEFT JOIN users u ON u.id = a.actor_user_id
                           ORDER BY a.id',

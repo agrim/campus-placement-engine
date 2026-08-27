@@ -4,9 +4,11 @@ declare(strict_types=1);
 
 namespace App\Controllers;
 
+use App\Core\Http\UserVisibleException;
 use App\Modules\Placement\Application\PlacementService;
 use App\Security\Csrf;
 use App\Support\Auth;
+use App\Support\ControllerFailure;
 use App\Support\Flash;
 
 final class NotificationController
@@ -28,12 +30,12 @@ final class NotificationController
         try {
             Csrf::verify($_POST['_token'] ?? null);
             if (!Auth::hasCapability($user, 'placement.notifications.manage')) {
-                throw new \RuntimeException('Auditors cannot acknowledge notifications.');
+                throw new UserVisibleException('NOTIFICATION_ACK_FORBIDDEN', 'Auditors cannot acknowledge notifications.');
             }
             (new PlacementService())->acknowledgeNotification((int) ($_POST['notification_id'] ?? 0), $user);
             Flash::add('success', 'Notification acknowledged.');
         } catch (\Throwable $e) {
-            Flash::add('error', $e->getMessage());
+            ControllerFailure::flash($e, 'CPE_NOTIFICATION_ACK_FAILURE', 'notification.acknowledge');
         }
         redirect(url('notifications'));
     }
