@@ -122,15 +122,24 @@ final class SetupAuthorization
             ? static function (): void {
                 // No setup authorization grant is assigned until rotation has
                 // completed, so the retained pre-rotation ID stays unauthorized.
-                if (session_status() !== PHP_SESSION_ACTIVE || headers_sent()) {
-                    throw new SetupAuthorizationDenied(SetupAuthorizationDenied::STATE_UNAVAILABLE);
+                if (session_status() !== PHP_SESSION_ACTIVE) {
+                    throw new SetupAuthorizationDenied(
+                        SetupAuthorizationDenied::STATE_UNAVAILABLE,
+                        SetupSessionRotationFailure::sessionNotActive(),
+                    );
+                }
+                if (headers_sent()) {
+                    throw new SetupAuthorizationDenied(
+                        SetupAuthorizationDenied::STATE_UNAVAILABLE,
+                        SetupSessionRotationFailure::responseStarted(),
+                    );
                 }
                 $warningFailure = null;
-                set_error_handler(static function (int $severity, string $message) use (&$warningFailure): bool {
-                    $candidate = SetupSessionRotationFailure::fromPhpDiagnostic($message);
+                set_error_handler(static function (int $_severity, string $message) use (&$warningFailure): bool {
+                    $candidate = SetupSessionRotationFailure::fromPhpWarning($message);
                     if ($warningFailure === null
-                        || ($warningFailure->phase() === SetupSessionRotationFailure::UNKNOWN
-                            && $candidate->phase() !== SetupSessionRotationFailure::UNKNOWN)) {
+                        || ($warningFailure->phase() === SetupSessionRotationFailure::WARNING_OTHER
+                            && $candidate->phase() !== SetupSessionRotationFailure::WARNING_OTHER)) {
                         $warningFailure = $candidate;
                     }
                     return true;
@@ -138,10 +147,10 @@ final class SetupAuthorization
                 try {
                     try {
                         $rotated = session_regenerate_id(false);
-                    } catch (Throwable $e) {
+                    } catch (Throwable) {
                         throw new SetupAuthorizationDenied(
                             SetupAuthorizationDenied::STATE_UNAVAILABLE,
-                            SetupSessionRotationFailure::fromPhpDiagnostic($e->getMessage()),
+                            SetupSessionRotationFailure::threw(),
                         );
                     }
                 } finally {
@@ -150,7 +159,7 @@ final class SetupAuthorization
                 if (!$rotated || $warningFailure instanceof SetupSessionRotationFailure) {
                     throw new SetupAuthorizationDenied(
                         SetupAuthorizationDenied::STATE_UNAVAILABLE,
-                        $warningFailure ?? SetupSessionRotationFailure::withoutPhpDiagnostic(),
+                        $warningFailure ?? SetupSessionRotationFailure::returnedFalse(),
                     );
                 }
             }

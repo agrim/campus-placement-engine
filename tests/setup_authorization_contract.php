@@ -40,9 +40,11 @@ foreach ([
     'Failed to create session ID by collision: files (path: ' . $rotationDiagnosticSentinel . ')' => SetupSessionRotationFailure::ID_CREATE,
     'Failed to create(read) session ID: files (path: ' . $rotationDiagnosticSentinel . ')' => SetupSessionRotationFailure::ID_READ,
     'Cannot set session ID - session ID is not initialized' => SetupSessionRotationFailure::COOKIE_RESET,
-    'unexpected rotation diagnostic ' . $rotationDiagnosticSentinel => SetupSessionRotationFailure::UNKNOWN,
+    'unrecognized lock failed diagnostic ' . $rotationDiagnosticSentinel => SetupSessionRotationFailure::WARNING_STORAGE,
+    'unrecognized headers already sent diagnostic ' . $rotationDiagnosticSentinel => SetupSessionRotationFailure::WARNING_RESPONSE,
+    'unexpected rotation diagnostic ' . $rotationDiagnosticSentinel => SetupSessionRotationFailure::WARNING_OTHER,
 ] as $diagnostic => $expectedPhase) {
-    $rotationFailure = SetupSessionRotationFailure::fromPhpDiagnostic($diagnostic);
+    $rotationFailure = SetupSessionRotationFailure::fromPhpWarning($diagnostic);
     setup_same($rotationFailure->phase(), $expectedPhase, 'Setup session rotation diagnostic classification changed');
     $denied = new SetupAuthorizationDenied(SetupAuthorizationDenied::STATE_UNAVAILABLE, $rotationFailure);
     $chain = $denied;
@@ -65,10 +67,21 @@ foreach ([
     setup_same($chainDepth, 2, 'Setup session rotation failure chain retained an unexpected cause');
 }
 setup_same(
-    SetupSessionRotationFailure::withoutPhpDiagnostic()->phase(),
-    SetupSessionRotationFailure::UNKNOWN,
-    'A warning-free PHP 8.2 rotation failure must remain unclassified',
+    SetupSessionRotationFailure::returnedFalse()->phase(),
+    SetupSessionRotationFailure::RETURNED_FALSE,
+    'A warning-free PHP 8.2 rotation failure must remain distinct',
 );
+$thrownFailure = SetupSessionRotationFailure::threw();
+setup_same($thrownFailure->phase(), SetupSessionRotationFailure::THREW, 'A thrown rotation failure must remain distinct');
+setup_true($thrownFailure->getPrevious() === null, 'A thrown rotation failure must not retain the raw throwable');
+foreach ([
+    [SetupSessionRotationFailure::sessionNotActive(), SetupSessionRotationFailure::SESSION_NOT_ACTIVE],
+    [SetupSessionRotationFailure::responseStarted(), SetupSessionRotationFailure::RESPONSE_STARTED],
+] as [$preconditionFailure, $expectedPhase]) {
+    setup_same($preconditionFailure->phase(), $expectedPhase, 'Setup session precondition phase changed');
+    setup_same($preconditionFailure->getMessage(), 'Setup session rotation failed.', 'Setup session precondition message changed');
+    setup_true($preconditionFailure->getPrevious() === null, 'Setup session precondition retained an unsafe cause');
+}
 
 /** @param callable(): mixed $callback */
 function setup_denied(callable $callback, string $reason, string $message): void

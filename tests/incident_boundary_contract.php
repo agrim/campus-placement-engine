@@ -956,12 +956,16 @@ try {
                 && ($record['context']['safe_context']['operation'] ?? null) === 'unlock',
         ));
         if (count($rotationIncidents) === 1) {
-            $rotationPhase = $rotationIncidents[0]['context']['safe_context']['phase'] ?? 'session_rotation_unknown';
-            if (!in_array($rotationPhase, [
+            $rotationPhase = $rotationIncidents[0]['context']['safe_context']['phase'] ?? null;
+            if (!is_string($rotationPhase) || !in_array($rotationPhase, [
+                'session_not_active', 'session_response_started',
                 'session_write', 'session_reopen', 'session_id_create', 'session_id_read',
-                'session_cookie_reset', 'session_rotation_unknown',
+                'session_cookie_reset', 'session_warning_storage', 'session_warning_response',
+                'session_warning_other', 'session_returned_false', 'session_threw',
             ], true)) {
-                $rotationPhase = 'session_rotation_unknown';
+                throw new RuntimeException(
+                    'Setup unlock state-unavailable incident omitted a recognized fixed session phase.',
+                );
             }
             throw new RuntimeException(
                 'Setup unlock session rotation failed during fixed phase: ' . $rotationPhase . '.',
