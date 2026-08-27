@@ -4,11 +4,20 @@ declare(strict_types=1);
 
 namespace App\Domain;
 
+use App\Core\Backup\DatabaseBackupService;
+use App\Core\Backup\BackupMetadata;
+use App\Core\Backup\DatabaseRestoreService;
+use App\Core\Http\UserVisibleException;
+use App\Install\SystemRequirements;
 use App\Support\Database;
 use PDO;
 
 final class ReadinessService
 {
+    private const MAX_BACKUP_DIRECTORY_ENTRIES = 512;
+    private const MAX_BACKUP_CANDIDATES = 16;
+    private const MAX_BACKUP_VERIFICATION_BYTES = 536870912;
+
     public function __construct(private ?PDO $pdo = null, private ?Workflow $workflow = null)
     {
         $this->pdo ??= Database::connection();
@@ -17,6 +26,13 @@ final class ReadinessService
 
     public function snapshot(): array
     {
+        $runtimeFailures = array_values(array_map(
+            static fn (array $check): string => (string) $check['key'],
+            array_filter(
+                (new SystemRequirements())->runtimeChecks(),
+                static fn (array $check): bool => !$check['ok'],
+            ),
+        ));
         $backup = $this->latestBackup();
         $openWanted = $this->count("SELECT COUNT(*) FROM wanted_alerts WHERE status = 'open'");
         $openPreferences = $this->count("SELECT COUNT(*) FROM preference_requests WHERE status = 'open'");
@@ -33,6 +49,13 @@ final class ReadinessService
 
         return [
             'checks' => [
+                $this->check(
+                    'Runtime requirements',
+                    $runtimeFailures === [] ? 'ok' : 'fail',
+                    $runtimeFailures === []
+                        ? 'Required PHP version and extensions are available.'
+                        : 'Missing or unsupported runtime requirements: ' . implode(', ', $runtimeFailures) . '.',
+                ),
                 $this->check(
                     'Workflow configuration',
                     $workflowErrors ? 'fail' : 'ok',
@@ -93,10 +116,10 @@ final class ReadinessService
                 ),
                 $this->check(
                     'External notification deliveries',
-                    ($deliveryStatus['queued'] + $deliveryStatus['failed']) > 0 ? 'warn' : 'ok',
-                    ($deliveryStatus['queued'] + $deliveryStatus['failed']) === 0
-                        ? 'No queued or failed external notification deliveries.'
-                        : "{$deliveryStatus['queued']} queued and {$deliveryStatus['failed']} failed external notification deliver" . (($deliveryStatus['queued'] + $deliveryStatus['failed']) === 1 ? 'y.' : 'ies.')
+                    ($deliveryStatus['queued'] + $deliveryStatus['failed'] + $deliveryStatus['dead-lettered']) > 0 ? 'warn' : 'ok',
+                    ($deliveryStatus['queued'] + $deliveryStatus['failed'] + $deliveryStatus['dead-lettered']) === 0
+                        ? 'No queued, retrying, or dead-lettered external notification deliveries.'
+                        : "{$deliveryStatus['queued']} queued, {$deliveryStatus['failed']} retrying, and {$deliveryStatus['dead-lettered']} dead-lettered external notification deliveries."
                 ),
                 $this->check(
                     'External notification gateway configuration',
@@ -191,32 +214,129 @@ final class ReadinessService
 
     private function latestBackup(): array
     {
-        $files = [
-            ...(glob(cpe_data_path('backups/*.sqlite')) ?: []),
-            ...(glob(cpe_data_path('backups/*.pgdump')) ?: []),
-        ];
-        if (!$files) {
+        $directory = DatabaseBackupService::configuredDirectory();
+        if (!file_exists($directory) && !is_link($directory)) {
+            return $this->missingBackup();
+        }
+
+        if (!DatabaseBackupService::directoryIsSafe($directory) || !is_readable($directory)) {
+            return $this->unavailableBackupStorage();
+        }
+
+        $handle = @opendir($directory);
+        if (!is_resource($handle)) {
+            return $this->unavailableBackupStorage();
+        }
+
+        $candidates = [];
+        $invalidSetSeen = false;
+        $entryCount = 0;
+        try {
+            while (($entry = readdir($handle)) !== false) {
+                if (++$entryCount > self::MAX_BACKUP_DIRECTORY_ENTRIES) {
+                    return $this->unavailableBackupStorage();
+                }
+                if (!str_ends_with($entry, '.sqlite') && !str_ends_with($entry, '.pgdump')) {
+                    continue;
+                }
+                $path = rtrim($directory, '/\\') . DIRECTORY_SEPARATOR . $entry;
+                $stat = @lstat($path);
+                if ($stat === false) {
+                    return $this->unavailableBackupStorage();
+                }
+                if ((($stat['mode'] ?? 0) & 0170000) !== 0100000
+                    || (int) ($stat['size'] ?? 0) <= 0) {
+                    $invalidSetSeen = true;
+                    continue;
+                }
+                $candidates[] = $path;
+            }
+        } finally {
+            closedir($handle);
+        }
+
+        if ($candidates === []) {
+            return $invalidSetSeen ? $this->invalidBackup() : $this->missingBackup();
+        }
+
+        $driver = strtolower((string) $this->pdo->getAttribute(PDO::ATTR_DRIVER_NAME));
+        try {
+            $liveIdentity = BackupMetadata::databaseIdentity($this->pdo, $driver);
+        } catch (\Throwable) {
+            return $this->unavailableBackupStorage();
+        }
+        $indexer = new DatabaseRestoreService();
+        $prioritizedCandidates = [];
+        foreach ($candidates as $candidate) {
+            $invalidSetSeen = true;
+            try {
+                $createdAt = $indexer->candidateCreatedAt($candidate, $driver, $liveIdentity);
+            } catch (\Throwable) {
+                continue;
+            }
+            $prioritizedCandidates[] = ['path' => $candidate, 'created_at' => $createdAt];
+        }
+        usort(
+            $prioritizedCandidates,
+            static fn (array $left, array $right): int => $right['created_at'] <=> $left['created_at'],
+        );
+
+        $verifier = new DatabaseRestoreService(null, self::MAX_BACKUP_VERIFICATION_BYTES);
+        foreach (array_slice($prioritizedCandidates, 0, self::MAX_BACKUP_CANDIDATES) as $candidate) {
+            try {
+                $verified = $verifier->verifiedCandidate($candidate['path'], $driver, $liveIdentity);
+                $createdAt = BackupMetadata::createdAtTimestamp($verified['metadata']);
+            } catch (UserVisibleException $e) {
+                if ($e->publicCode() === 'DATABASE_BACKUP_VERIFICATION_LIMIT') {
+                    return $this->unavailableBackupStorage();
+                }
+                continue;
+            } catch (\Throwable) {
+                continue;
+            }
+            $ageHours = max(0, (int) floor((time() - $createdAt) / 3600));
             return [
-                'path' => '',
-                'ageHours' => null,
-                'status' => 'warn',
-                'message' => 'No backup found. Run php placement backup before live operations.',
+                'present' => true,
+                'storage' => 'configured_backup_directory',
+                'ageHours' => $ageHours,
+                'status' => $ageHours <= 24 ? 'ok' : 'warn',
+                'message' => 'Latest verified backup is about ' . $ageHours . ' hour(s) old.',
             ];
         }
 
-        usort($files, fn (string $a, string $b): int => filemtime($b) <=> filemtime($a));
-        $path = $files[0];
-        $mtime = filemtime($path) ?: 0;
-        $ageHours = $mtime > 0 ? (int) floor((time() - $mtime) / 3600) : null;
-        $status = $ageHours !== null && $ageHours <= 24 ? 'ok' : 'warn';
+        return $invalidSetSeen ? $this->invalidBackup() : $this->missingBackup();
+    }
 
+    private function missingBackup(): array
+    {
         return [
-            'path' => $path,
-            'ageHours' => $ageHours,
-            'status' => $status,
-            'message' => $ageHours === null
-                ? 'Latest backup age could not be read.'
-                : 'Latest backup is about ' . $ageHours . ' hour(s) old.',
+            'present' => false,
+            'storage' => 'configured_backup_directory',
+            'ageHours' => null,
+            'status' => 'warn',
+            'message' => 'No backup found. Run php placement backup before live operations.',
+        ];
+    }
+
+    private function unavailableBackupStorage(): array
+    {
+        return [
+            'present' => false,
+            'storage' => 'configured_backup_directory',
+            'ageHours' => null,
+            'status' => 'warn',
+            'message' => 'Configured backup storage could not be inspected. Verify backup storage access.',
+        ];
+    }
+
+    private function invalidBackup(): array
+    {
+        return [
+            'present' => false,
+            'storage' => 'configured_backup_directory',
+            'ageHours' => null,
+            'status' => 'warn',
+            'message' => 'No complete verified backup found. Run php placement backup before live operations.',
         ];
     }
 

@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Security;
 
+use App\Core\Http\UserVisibleException;
+
 final class Csrf
 {
     public static function token(): string
@@ -22,7 +24,7 @@ final class Csrf
     public static function verify(?string $token): void
     {
         if (!$token || !hash_equals($_SESSION['csrf_token'] ?? '', $token)) {
-            throw new \RuntimeException('Security token mismatch. Please retry.');
+            throw new UserVisibleException('CSRF_MISMATCH', 'Security token mismatch. Please retry.');
         }
     }
 

@@ -20,8 +20,7 @@ ob_start();
   <h2>Runtime</h2>
   <table class="table">
     <tr><th>PHP</th><td><?= h($phpVersion) ?></td></tr>
-    <tr><th>Database</th><td><?= h(strtoupper($databaseDriver)) ?> <?= h($databaseVersion) ?></td></tr>
-    <tr><th>Database</th><td><?= h($dbPath) ?></td></tr>
+    <tr><th>Database</th><td><?= h($databaseDescription ?? 'Configured relational database') ?></td></tr>
     <tr><th>Writable data folder</th><td><?= is_writable(cpe_data_path()) ? 'Yes' : 'No' ?></td></tr>
   </table>
 </section>
@@ -85,8 +84,8 @@ ob_start();
     <?php endforeach; ?>
     </tbody>
   </table>
-  <?php if (!empty($readiness['backup']['path'])): ?>
-    <p class="muted">Latest backup: <?= h($readiness['backup']['path']) ?></p>
+  <?php if (!empty($readiness['backup']['present'])): ?>
+    <p class="muted">Latest backup is present in the configured backup directory.</p>
   <?php endif; ?>
   <?php if (!empty($readiness['staleApplications']['rows'])): ?>
     <h3>Stale active applications</h3>
@@ -156,13 +155,9 @@ ob_start();
 <section class="panel">
   <h2>Recent audit log</h2>
   <?php
-  $showRequestMetadata = count(array_filter(
-      $audit,
-      fn (array $row): bool => (($row['ip_address'] ?? '') !== '' || ($row['user_agent'] ?? '') !== '')
-  )) > 0;
   ?>
   <table class="table">
-    <thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Subject</th><th>Detail</th><?php if ($showRequestMetadata): ?><th>Request</th><?php endif; ?></tr></thead>
+    <thead><tr><th>Time</th><th>Actor</th><th>Action</th><th>Subject</th><th>Detail</th></tr></thead>
     <tbody>
     <?php foreach ($audit as $row): ?>
       <tr>
@@ -171,9 +166,6 @@ ob_start();
         <td><?= h($row['action']) ?></td>
         <td><?= h($row['subject_type']) ?> #<?= h($row['subject_id'] ?? '') ?></td>
         <td><?= h($row['detail']) ?></td>
-        <?php if ($showRequestMetadata): ?>
-          <td><?= h(trim(($row['ip_address'] ?? '') . ' ' . ($row['user_agent'] ?? ''))) ?></td>
-        <?php endif; ?>
       </tr>
     <?php endforeach; ?>
     </tbody>

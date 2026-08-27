@@ -4,8 +4,10 @@ declare(strict_types=1);
 
 namespace App\Domain;
 
+use App\Core\Http\UserVisibleException;
 use App\Security\OutboundHttpPolicy;
 use App\Support\Database;
+use App\Support\IncidentReporter;
 use PDO;
 use RuntimeException;
 
@@ -29,14 +31,25 @@ final class NotificationDeliveryService
         $payload = $this->payload($notification);
         $stmt = $this->pdo->prepare(
             'INSERT INTO notification_deliveries
-                (notification_id, channel, target, status, payload_json, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING'
+                (notification_id, channel, target, status, payload_json, created_at, updated_at,
+                 available_at, idempotency_key)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) ON CONFLICT DO NOTHING'
         );
         $now = cpe_now();
         $queued = 0;
         foreach ($channels as $channel) {
-            $target = $this->targetForChannel($channel, $notification);
-            $stmt->execute([$notificationId, $channel, $target, 'queued', $payload, $now, $now]);
+            $target = $this->targetReference($channel);
+            $stmt->execute([
+                $notificationId,
+                $channel,
+                $target,
+                'queued',
+                $payload,
+                $now,
+                $now,
+                $now,
+                'ndk_' . bin2hex(random_bytes(16)),
+            ]);
             $queued += $stmt->rowCount();
         }
         return $queued;
@@ -49,8 +62,10 @@ final class NotificationDeliveryService
         $sql = "SELECT nd.*, n.subject, n.body
                 FROM notification_deliveries nd
                 JOIN notifications n ON n.id = nd.notification_id
-                WHERE nd.status IN ('queued', 'failed')";
-        $params = [];
+                WHERE nd.status IN ('queued', 'failed')
+                  AND nd.delivered_at IS NULL AND nd.available_at <= ?
+                  AND (nd.locked_at IS NULL OR nd.locked_at < ?)";
+        $params = [cpe_now(), $this->staleBefore()];
         if ($channel !== '') {
             $sql .= ' AND nd.channel = ?';
             $params[] = $channel;
@@ -58,19 +73,41 @@ final class NotificationDeliveryService
         $sql .= ' ORDER BY nd.status = \'failed\', nd.id LIMIT ' . $limit;
         $stmt = $this->pdo->prepare($sql);
         $stmt->execute($params);
-        return $stmt->fetchAll();
+        $rows = $stmt->fetchAll();
+        foreach ($rows as &$row) {
+            $row['target'] = $this->targetReference((string) $row['channel']);
+            $row['delivered_to'] = (string) $row['delivered_to'] === ''
+                ? ''
+                : $this->destinationKind((string) $row['channel']);
+            unset($row['lock_token'], $row['locked_at']);
+        }
+        unset($row);
+        return $rows;
     }
 
     public function deliverPending(string $channel = '', int $limit = 100, bool $dryRun = false): array
     {
-        $rows = $this->pendingDeliveries($channel, $limit);
-        $result = ['checked' => count($rows), 'delivered' => 0, 'failed' => 0, 'dry_run' => $dryRun ? 1 : 0, 'rows' => []];
+        $rows = $dryRun
+            ? $this->pendingDeliveries($channel, $limit)
+            : $this->claimDeliveries($channel, $limit);
+        $result = [
+            'checked' => count($rows),
+            'claimed' => $dryRun ? 0 : count($rows),
+            'delivered' => 0,
+            'failed' => 0,
+            'retrying' => 0,
+            'dead_lettered' => 0,
+            'outcome_unknown' => 0,
+            'claim_lost' => 0,
+            'dry_run' => $dryRun ? 1 : 0,
+            'rows' => [],
+        ];
         foreach ($rows as $row) {
             $detail = [
                 'id' => (int) $row['id'],
                 'channel' => (string) $row['channel'],
                 'status' => 'dry_run',
-                'target' => $this->targetLabel((string) $row['channel'], (string) $row['target']),
+                'target' => $this->targetReference((string) $row['channel']),
                 'error' => '',
             ];
             if ($dryRun) {
@@ -79,15 +116,74 @@ final class NotificationDeliveryService
             }
             try {
                 $this->deliver($row);
-                $this->markDelivered((int) $row['id']);
-                $result['delivered']++;
-                $detail['status'] = 'delivered';
             } catch (\Throwable $e) {
-                $this->markFailed((int) $row['id'], $e->getMessage());
+                $incidentId = IncidentReporter::report(
+                    $e,
+                    'CPE_NOTIFICATION_DELIVERY_FAILED',
+                    'worker',
+                    ['operation' => 'notification.delivery', 'status' => 'failed'],
+                );
+                $failureReference = IncidentReporter::reference('CPE_NOTIFICATION_DELIVERY_FAILED', $incidentId);
+                try {
+                    $failureState = $this->markFailed($row, $failureReference);
+                } catch (\Throwable $stateFailure) {
+                    $detail['status'] = 'outcome-unknown';
+                    $detail['error'] = $this->reportStateFailure(
+                        $stateFailure,
+                        'CPE_NOTIFICATION_FAILURE_STATE_UNKNOWN',
+                        'failure_state',
+                    );
+                    $result['outcome_unknown']++;
+                    $result['rows'][] = $detail;
+                    continue;
+                }
+                if (!$failureState['updated']) {
+                    $detail['status'] = 'claim-lost';
+                    $detail['error'] = $this->reportStateFailure(
+                        new RuntimeException('Notification failure state claim was lost.'),
+                        'CPE_NOTIFICATION_FAILURE_CLAIM_LOST',
+                        'failure_state',
+                    );
+                    $result['outcome_unknown']++;
+                    $result['claim_lost']++;
+                    $result['rows'][] = $detail;
+                    continue;
+                }
                 $result['failed']++;
-                $detail['status'] = 'failed';
-                $detail['error'] = $e->getMessage();
+                $result[$failureState['dead_lettered'] ? 'dead_lettered' : 'retrying']++;
+                $detail['status'] = $failureState['dead_lettered'] ? 'dead-lettered' : 'retrying';
+                $detail['error'] = $failureReference;
+                $result['rows'][] = $detail;
+                continue;
             }
+
+            try {
+                $acknowledged = $this->markDelivered($row);
+            } catch (\Throwable $ackFailure) {
+                $detail['status'] = 'outcome-unknown';
+                $detail['error'] = $this->reportStateFailure(
+                    $ackFailure,
+                    'CPE_NOTIFICATION_ACK_STATE_UNKNOWN',
+                    'acknowledgment',
+                );
+                $result['outcome_unknown']++;
+                $result['rows'][] = $detail;
+                continue;
+            }
+            if (!$acknowledged) {
+                $detail['status'] = 'claim-lost';
+                $detail['error'] = $this->reportStateFailure(
+                    new RuntimeException('Notification acknowledgement claim was lost.'),
+                    'CPE_NOTIFICATION_ACK_CLAIM_LOST',
+                    'acknowledgment',
+                );
+                $result['outcome_unknown']++;
+                $result['claim_lost']++;
+                $result['rows'][] = $detail;
+                continue;
+            }
+            $result['delivered']++;
+            $detail['status'] = 'delivered';
             $result['rows'][] = $detail;
         }
         return $result;
@@ -100,11 +196,94 @@ final class NotificationDeliveryService
              FROM notification_deliveries
              GROUP BY status'
         )->fetchAll();
-        $status = ['queued' => 0, 'failed' => 0, 'delivered' => 0];
+        $status = ['queued' => 0, 'failed' => 0, 'dead-lettered' => 0, 'delivered' => 0];
         foreach ($rows as $row) {
             $status[(string) $row['status']] = (int) $row['count'];
         }
         return $status;
+    }
+
+    private function claimDeliveries(string $channel, int $limit): array
+    {
+        $limit = max(1, min(500, $limit));
+        $channel = strtolower(trim($channel));
+        $now = cpe_now();
+        $stale = $this->staleBefore();
+        $token = 'claim_' . bin2hex(random_bytes(16));
+        $driver = (string) $this->pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
+        $sqliteImmediate = $driver === 'sqlite';
+        $started = false;
+        try {
+            if ($sqliteImmediate) {
+                $this->pdo->exec('BEGIN IMMEDIATE');
+            } else {
+                $this->pdo->beginTransaction();
+            }
+            $started = true;
+            $sql = "SELECT id FROM notification_deliveries
+                    WHERE status IN ('queued', 'failed')
+                      AND delivered_at IS NULL AND available_at <= ?
+                      AND (locked_at IS NULL OR locked_at < ?)";
+            $params = [$now, $stale];
+            if ($channel !== '') {
+                $sql .= ' AND channel = ?';
+                $params[] = $channel;
+            }
+            $sql .= ' ORDER BY id LIMIT ' . $limit;
+            if ($driver === 'pgsql') {
+                $sql .= ' FOR UPDATE SKIP LOCKED';
+            }
+            $select = $this->pdo->prepare($sql);
+            $select->execute($params);
+            $ids = array_map('intval', $select->fetchAll(PDO::FETCH_COLUMN));
+            if ($ids !== []) {
+                $placeholders = implode(',', array_fill(0, count($ids), '?'));
+                $update = $this->pdo->prepare(
+                    "UPDATE notification_deliveries
+                     SET locked_at = ?, lock_token = ?, attempt_count = attempt_count + 1
+                     WHERE id IN ({$placeholders}) AND status IN ('queued', 'failed')
+                       AND delivered_at IS NULL AND available_at <= ?
+                       AND (locked_at IS NULL OR locked_at < ?)"
+                );
+                $update->execute([$now, $token, ...$ids, $now, $stale]);
+            }
+            if ($sqliteImmediate) {
+                $this->pdo->exec('COMMIT');
+            } else {
+                $this->pdo->commit();
+            }
+            $started = false;
+        } catch (\Throwable $failure) {
+            if ($started) {
+                try {
+                    if ($sqliteImmediate) {
+                        $this->pdo->exec('ROLLBACK');
+                    } elseif ($this->pdo->inTransaction()) {
+                        $this->pdo->rollBack();
+                    }
+                } catch (\Throwable) {
+                    Database::reset();
+                }
+            }
+            throw $failure;
+        }
+        if ($ids === []) {
+            return [];
+        }
+        $claimed = $this->pdo->prepare(
+            'SELECT nd.*, n.subject, n.body
+             FROM notification_deliveries nd
+             JOIN notifications n ON n.id = nd.notification_id
+             WHERE nd.lock_token = ? ORDER BY nd.id'
+        );
+        $claimed->execute([$token]);
+        return $claimed->fetchAll();
+    }
+
+    private function staleBefore(): string
+    {
+        $seconds = max(30, min(3600, (int) (getenv('CPE_NOTIFICATION_LOCK_SECONDS') ?: 300)));
+        return gmdate('Y-m-d H:i:s', time() - $seconds);
     }
 
     public function certificationReport(string $channel, bool $requireLiveGateway = false): array
@@ -129,8 +308,7 @@ final class NotificationDeliveryService
             $add('warn', 'channel_enabled', "{$channel} is not currently enabled; enable it before live operations.");
         }
 
-        $queuedTarget = $this->targetForChannel($channel);
-        $target = $this->messageGatewayRecipient($channel, $queuedTarget);
+        $target = $this->messageGatewayRecipient($channel);
         if ($target === '') {
             $add('error', 'recipient', strtoupper($channel) . ' recipient or gateway route is not configured.');
         } else {
@@ -167,8 +345,16 @@ final class NotificationDeliveryService
             try {
                 $this->safeHttpHeader((string) $authorization);
                 $add('ok', 'authorization_header', strtoupper($channel) . ' authorization header is syntactically safe.');
+            } catch (UserVisibleException $e) {
+                $add('error', 'authorization_header', $e->publicMessage());
             } catch (\Throwable $e) {
-                $add('error', 'authorization_header', $e->getMessage());
+                $incidentId = IncidentReporter::report(
+                    $e,
+                    'CPE_NOTIFICATION_CERTIFICATION_FAILED',
+                    'worker',
+                    ['operation' => 'notification.certification', 'phase' => 'authorization_header'],
+                );
+                $add('error', 'authorization_header', 'Certification check failed. ' . IncidentReporter::reference('CPE_NOTIFICATION_CERTIFICATION_FAILED', $incidentId));
             }
         } elseif ($requireLiveGateway) {
             $add('warn', 'authorization_header', strtoupper($channel) . ' authorization header is not set; confirm the gateway does not require one.');
@@ -198,8 +384,16 @@ final class NotificationDeliveryService
                 throw new RuntimeException('Could not encode rendered gateway payload.');
             }
             $add('ok', 'payload_json', strtoupper($channel) . ' gateway payload renders valid JSON (' . strlen($json) . ' bytes).');
+        } catch (UserVisibleException $e) {
+            $add('error', 'payload_json', $e->publicMessage());
         } catch (\Throwable $e) {
-            $add('error', 'payload_json', $e->getMessage());
+            $incidentId = IncidentReporter::report(
+                $e,
+                'CPE_NOTIFICATION_CERTIFICATION_FAILED',
+                'worker',
+                ['operation' => 'notification.certification', 'phase' => 'payload_json'],
+            );
+            $add('error', 'payload_json', 'Certification check failed. ' . IncidentReporter::reference('CPE_NOTIFICATION_CERTIFICATION_FAILED', $incidentId));
         }
 
         foreach ($this->manualCertificationChecks($channel) as $key => $message) {
@@ -313,7 +507,7 @@ final class NotificationDeliveryService
         $environmentTarget = trim((string) (getenv('CPE_NOTIFICATION_FILE_OUTBOX_PATH') ?: ''));
         $target = $environmentTarget !== ''
             ? $environmentTarget
-            : $this->safeDataOutboxPath((string) $row['target']);
+            : $this->safeDataOutboxPath($this->setting('notification_file_outbox_path', ''));
         $dir = dirname($target);
         if (!is_dir($dir) && !mkdir($dir, 0775, true)) {
             throw new RuntimeException('Could not create notification outbox directory.');
@@ -321,23 +515,29 @@ final class NotificationDeliveryService
         if (is_link($target)) {
             throw new RuntimeException('Notification outbox cannot be a symbolic link.');
         }
-        if (file_put_contents($target, (string) $row['payload_json'] . "\n", FILE_APPEND | LOCK_EX) === false) {
+        $json = json_encode($this->deliveryEnvelope($row), JSON_UNESCAPED_SLASHES);
+        if ($json === false || file_put_contents($target, $json . "\n", FILE_APPEND | LOCK_EX) === false) {
             throw new RuntimeException('Could not write notification outbox file.');
         }
     }
 
     private function deliverWebhook(array $row): void
     {
-        $target = getenv('CPE_NOTIFICATION_WEBHOOK_URL') ?: (string) $row['target'];
+        $target = $this->configuredTarget('CPE_NOTIFICATION_WEBHOOK_URL', 'notification_webhook_url');
         if ($target === '') {
             throw new RuntimeException('Webhook URL is not configured.');
         }
+        $body = json_encode($this->deliveryEnvelope($row), JSON_UNESCAPED_SLASHES);
+        if ($body === false) {
+            throw new RuntimeException('Could not encode notification webhook payload.');
+        }
         OutboundHttpPolicy::postJson(
             $target,
-            (string) $row['payload_json'],
+            $body,
             [
                 'Content-Type: application/json',
                 'User-Agent: CareerServicesPortal/' . (string) cpe_config('app.version', '0.0.0'),
+                'X-CPE-Idempotency-Key: ' . $this->idempotencyKey($row),
             ],
             5,
             'Notification webhook',
@@ -347,7 +547,7 @@ final class NotificationDeliveryService
 
     private function deliverEmail(array $row): void
     {
-        $target = $this->configuredTarget('CPE_NOTIFICATION_EMAIL_TO', (string) $row['target']);
+        $target = $this->configuredTarget('CPE_NOTIFICATION_EMAIL_TO', 'notification_email_to');
         if ($target === '') {
             throw new RuntimeException('Email recipient is not configured.');
         }
@@ -378,7 +578,10 @@ final class NotificationDeliveryService
             $body .= "\nCreated at: " . (string) ($payload['created_at'] ?? '');
         }
 
-        $headers = ['Content-Type: text/plain; charset=UTF-8'];
+        $headers = [
+            'Content-Type: text/plain; charset=UTF-8',
+            'X-CPE-Idempotency-Key: ' . $this->idempotencyKey($row),
+        ];
         $from = getenv('CPE_NOTIFICATION_EMAIL_FROM') ?: $this->setting('notification_email_from', '');
         if ($from !== '') {
             $headers[] = 'From: ' . $this->safeMailHeader($from);
@@ -387,6 +590,7 @@ final class NotificationDeliveryService
         $outbox = getenv('CPE_NOTIFICATION_EMAIL_OUTBOX_PATH') ?: '';
         if ($outbox !== '') {
             $this->writeEmailOutbox($outbox, [
+                'idempotency_key' => $this->idempotencyKey($row),
                 'to' => $target,
                 'subject' => $subject,
                 'body' => $body,
@@ -406,7 +610,7 @@ final class NotificationDeliveryService
     private function deliverMessageGateway(array $row, string $channel): void
     {
         $gatewayUrl = $this->messageGatewayUrl($channel);
-        $target = $this->messageGatewayRecipient($channel, (string) $row['target']);
+        $target = $this->messageGatewayRecipient($channel);
         if ($target === '') {
             throw new RuntimeException(strtoupper($channel) . ' recipient is not configured.');
         }
@@ -417,6 +621,7 @@ final class NotificationDeliveryService
         }
         $text = $this->notificationMessageText($payload, $channel, $target);
         $message = [
+            'idempotency_key' => $this->idempotencyKey($row),
             'channel' => $channel,
             'to' => $target,
             'text' => $text,
@@ -425,6 +630,7 @@ final class NotificationDeliveryService
         $payloadTemplate = $this->messagePayloadTemplate($channel);
         if ($payloadTemplate !== '') {
             $message = $this->renderJsonPayloadTemplate($payloadTemplate, $this->templateValues($payload, $channel, $target, $text), $channel);
+            $message['idempotency_key'] = $this->idempotencyKey($row);
         }
 
         $outbox = getenv('CPE_NOTIFICATION_' . strtoupper($channel) . '_OUTBOX_PATH') ?: getenv('CPE_NOTIFICATION_MESSAGE_OUTBOX_PATH') ?: '';
@@ -436,7 +642,10 @@ final class NotificationDeliveryService
         if ($gatewayUrl === '') {
             throw new RuntimeException(strtoupper($channel) . ' gateway URL is not configured.');
         }
-        $headers = ['Content-Type: application/json'];
+        $headers = [
+            'Content-Type: application/json',
+            'X-CPE-Idempotency-Key: ' . $this->idempotencyKey($row),
+        ];
         $authorization = getenv('CPE_NOTIFICATION_' . strtoupper($channel) . '_AUTHORIZATION') ?: '';
         if ($authorization !== '') {
             $headers[] = 'Authorization: ' . $this->safeHttpHeader($authorization);
@@ -456,65 +665,101 @@ final class NotificationDeliveryService
         );
     }
 
-    private function markDelivered(int $deliveryId): void
+    private function markDelivered(array $row): bool
     {
         $now = cpe_now();
+        $destination = $this->destinationKind((string) $row['channel']);
         $stmt = $this->pdo->prepare(
             'UPDATE notification_deliveries
-             SET status = ?, attempt_count = attempt_count + 1, last_error = ?, updated_at = ?, delivered_at = ?
-             WHERE id = ?'
+             SET status = ?, last_error = ?, updated_at = ?, delivered_at = ?, delivered_to = ?,
+                 locked_at = NULL, lock_token = NULL
+             WHERE id = ? AND lock_token = ? AND status IN (\'queued\', \'failed\') AND delivered_at IS NULL'
         );
-        $stmt->execute(['delivered', '', $now, $now, $deliveryId]);
+        $stmt->execute([
+            'delivered',
+            '',
+            $now,
+            $now,
+            $destination,
+            (int) $row['id'],
+            (string) $row['lock_token'],
+        ]);
+        return $stmt->rowCount() === 1;
     }
 
-    private function markFailed(int $deliveryId, string $error): void
+    /** @return array{updated: bool, dead_lettered: bool} */
+    private function markFailed(array $row, string $failureReference): array
     {
+        $attempts = (int) $row['attempt_count'];
+        $maxAttempts = max(1, min(100, (int) (getenv('CPE_NOTIFICATION_MAX_ATTEMPTS') ?: 5)));
+        $deadLettered = $attempts >= $maxAttempts;
+        $retryAt = gmdate('Y-m-d H:i:s', time() + min(3600, 30 * (2 ** min(7, max(0, $attempts - 1)))));
         $stmt = $this->pdo->prepare(
             'UPDATE notification_deliveries
-             SET status = ?, attempt_count = attempt_count + 1, last_error = ?, updated_at = ?
-             WHERE id = ?'
+             SET status = ?, last_error = ?, updated_at = ?, available_at = ?,
+                 locked_at = NULL, lock_token = NULL
+             WHERE id = ? AND lock_token = ? AND status IN (\'queued\', \'failed\') AND delivered_at IS NULL'
         );
-        $stmt->execute(['failed', substr($error, 0, 500), cpe_now(), $deliveryId]);
+        $incidentId = preg_match('/\b(inc_[a-f0-9]{32})\z/D', $failureReference, $match) === 1
+            ? $match[1]
+            : 'inc_unavailable';
+        $stmt->execute([
+            $deadLettered ? 'dead-lettered' : 'failed',
+            IncidentReporter::reference('CPE_NOTIFICATION_DELIVERY_FAILED', $incidentId),
+            cpe_now(),
+            $retryAt,
+            (int) $row['id'],
+            (string) $row['lock_token'],
+        ]);
+        return ['updated' => $stmt->rowCount() === 1, 'dead_lettered' => $deadLettered];
     }
 
-    private function targetForChannel(string $channel, array $notification = []): string
+    private function reportStateFailure(\Throwable $failure, string $code, string $phase): string
     {
-        if ($channel === 'file') {
-            if (getenv('CPE_NOTIFICATION_FILE_OUTBOX_PATH')) {
-                return '[env:CPE_NOTIFICATION_FILE_OUTBOX_PATH]';
-            }
-            return $this->safeDataOutboxPath($this->setting('notification_file_outbox_path', ''));
-        }
-        if ($channel === 'webhook') {
-            return getenv('CPE_NOTIFICATION_WEBHOOK_URL') ? '[env:CPE_NOTIFICATION_WEBHOOK_URL]' : $this->setting('notification_webhook_url', '');
-        }
-        if ($channel === 'email') {
-            return getenv('CPE_NOTIFICATION_EMAIL_TO') ? '[env:CPE_NOTIFICATION_EMAIL_TO]' : $this->setting('notification_email_to', '');
-        }
-        if ($channel === 'sms') {
-            return getenv('CPE_NOTIFICATION_SMS_TO') ? '[env:CPE_NOTIFICATION_SMS_TO]' : $this->setting('notification_sms_to', '');
-        }
-        if ($channel === 'whatsapp') {
-            return getenv('CPE_NOTIFICATION_WHATSAPP_TO') ? '[env:CPE_NOTIFICATION_WHATSAPP_TO]' : $this->setting('notification_whatsapp_to', '');
-        }
-        return '';
+        $incidentId = IncidentReporter::report(
+            $failure,
+            $code,
+            'worker',
+            ['operation' => 'notification.delivery', 'phase' => $phase],
+        );
+        return IncidentReporter::reference($code, $incidentId);
     }
 
-    private function targetLabel(string $channel, string $target): string
+    private function targetReference(string $channel): string
     {
-        if ($channel === 'webhook' && getenv('CPE_NOTIFICATION_WEBHOOK_URL')) {
-            return '[env:CPE_NOTIFICATION_WEBHOOK_URL]';
+        return in_array($channel, ['file', 'webhook', 'email', 'sms', 'whatsapp'], true)
+            ? '[config:notification_' . $channel . ']'
+            : '[config:notification_unknown]';
+    }
+
+    private function destinationKind(string $channel): string
+    {
+        return in_array($channel, ['file', 'webhook', 'email', 'sms', 'whatsapp'], true)
+            ? $channel
+            : 'unknown';
+    }
+
+    private function idempotencyKey(array $row): string
+    {
+        $key = (string) ($row['idempotency_key'] ?? '');
+        if (preg_match('/\Andk_[a-f0-9]{32}\z/D', $key) !== 1) {
+            throw new RuntimeException('Notification delivery idempotency key is invalid.');
         }
-        if ($channel === 'email' && getenv('CPE_NOTIFICATION_EMAIL_TO')) {
-            return '[env:CPE_NOTIFICATION_EMAIL_TO]';
+        return $key;
+    }
+
+    private function deliveryEnvelope(array $row): array
+    {
+        $payload = json_decode((string) $row['payload_json'], true);
+        if (!is_array($payload)) {
+            throw new RuntimeException('Notification delivery payload is not valid JSON.');
         }
-        if ($channel === 'sms' && getenv('CPE_NOTIFICATION_SMS_TO')) {
-            return '[env:CPE_NOTIFICATION_SMS_TO]';
-        }
-        if ($channel === 'whatsapp' && getenv('CPE_NOTIFICATION_WHATSAPP_TO')) {
-            return '[env:CPE_NOTIFICATION_WHATSAPP_TO]';
-        }
-        return $target;
+        return [
+            'schema' => 'career_services.notification_delivery.v1',
+            'idempotency_key' => $this->idempotencyKey($row),
+            'channel' => $this->destinationKind((string) $row['channel']),
+            'notification' => $payload,
+        ];
     }
 
     private function safeMailHeader(string $value): string
@@ -546,22 +791,19 @@ final class NotificationDeliveryService
         return $this->setting("notification_{$channel}_gateway_url", '');
     }
 
-    private function messageGatewayRecipient(string $channel, string $queuedTarget): string
+    private function messageGatewayRecipient(string $channel): string
     {
         $envKey = 'CPE_NOTIFICATION_' . strtoupper($channel) . '_TO';
-        return $this->configuredTarget($envKey, $queuedTarget);
+        return $this->configuredTarget($envKey, 'notification_' . $channel . '_to');
     }
 
-    private function configuredTarget(string $envKey, string $queuedTarget): string
+    private function configuredTarget(string $envKey, string $settingKey): string
     {
         $envValue = getenv($envKey);
         if ($envValue !== false && $envValue !== '') {
             return (string) $envValue;
         }
-        if (str_starts_with($queuedTarget, '[env:')) {
-            return '';
-        }
-        return $queuedTarget;
+        return $this->setting($settingKey, '');
     }
 
     private function safeDataOutboxPath(string $configured): string
@@ -695,11 +937,17 @@ final class NotificationDeliveryService
             $template
         );
         if ($rendered === null) {
-            throw new RuntimeException(strtoupper($channel) . ' payload template could not be rendered.');
+            throw new UserVisibleException(
+                'NOTIFICATION_PAYLOAD_TEMPLATE_INVALID',
+                'The notification payload template could not be rendered.',
+            );
         }
         $decoded = json_decode($rendered, true);
         if (!is_array($decoded)) {
-            throw new RuntimeException(strtoupper($channel) . ' payload template must render valid JSON.');
+            throw new UserVisibleException(
+                'NOTIFICATION_PAYLOAD_TEMPLATE_INVALID',
+                'The notification payload template must render valid JSON.',
+            );
         }
         return $decoded;
     }
@@ -719,7 +967,10 @@ final class NotificationDeliveryService
     private function safeHttpHeader(string $value): string
     {
         if (preg_match('/[\r\n]/', $value)) {
-            throw new RuntimeException('HTTP header values cannot contain line breaks.');
+            throw new UserVisibleException(
+                'NOTIFICATION_AUTHORIZATION_HEADER_INVALID',
+                'The notification authorization header cannot contain line breaks.',
+            );
         }
         return $value;
     }

@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Modules\Placement\Workflow;
 
+use App\Core\Http\UserVisibleException;
 use App\Support\Database;
 use PDO;
 use RuntimeException;
@@ -101,7 +102,7 @@ final class WorkflowPublisher
     {
         $workflow = $this->repository->workflowForCurrentCycle();
         if ($workflow === null) {
-            throw new RuntimeException('No active workflow is available to edit.');
+            throw new UserVisibleException('WORKFLOW_ACTIVE_VERSION_MISSING', 'No active workflow is available to edit.');
         }
         $definition = [
             'name' => $workflow['name'],
@@ -118,10 +119,10 @@ final class WorkflowPublisher
             $label = preg_replace('/\s+/', ' ', trim(strip_tags((string) ($row['label'] ?? '')))) ?? '';
             $color = trim((string) ($row['color'] ?? ''));
             if ($label === '' || mb_strlen($label) > 80) {
-                throw new RuntimeException('Workflow state labels must be between 1 and 80 characters.');
+                throw new UserVisibleException('WORKFLOW_LABEL_INVALID', 'Workflow state labels must be between 1 and 80 characters.');
             }
             if (!preg_match('/^#[0-9a-fA-F]{6}$/', $color)) {
-                throw new RuntimeException('Workflow state colors must use six-digit hex values.');
+                throw new UserVisibleException('WORKFLOW_COLOR_INVALID', 'Workflow state colors must use six-digit hex values.');
             }
             $definition['states'][$key]['label'] = $label;
             $definition['states'][$key]['color'] = strtolower($color);
@@ -140,11 +141,11 @@ final class WorkflowPublisher
                 explode(',', (string) $rolesCsv)
             ))));
             if ($roles === []) {
-                throw new RuntimeException('Every workflow transition requires at least one role.');
+                throw new UserVisibleException('WORKFLOW_ROLE_REQUIRED', 'Every workflow transition requires at least one role.');
             }
             foreach ($roles as $role) {
                 if (preg_match('/^[a-z][a-z0-9_]{0,63}$/', $role) !== 1) {
-                    throw new RuntimeException('Workflow transition contains an invalid role key: ' . $role);
+                    throw new UserVisibleException('WORKFLOW_ROLE_INVALID', 'Workflow transition contains an invalid role key.');
                 }
             }
             $transition['roles'] = $roles;
@@ -160,7 +161,7 @@ final class WorkflowPublisher
     {
         $workflow = $this->repository->workflowForCurrentCycle();
         if ($workflow === null) {
-            throw new RuntimeException('No active workflow is available to edit.');
+            throw new UserVisibleException('WORKFLOW_ACTIVE_VERSION_MISSING', 'No active workflow is available to edit.');
         }
         $states = [];
         foreach ((array) ($input['states'] ?? []) as $key => $row) {
@@ -173,7 +174,7 @@ final class WorkflowPublisher
         $newStateKey = strtolower(trim((string) ($newState['key'] ?? '')));
         if ($newStateKey !== '') {
             if (isset($states[$newStateKey])) {
-                throw new RuntimeException('Workflow state key already exists: ' . $newStateKey);
+                throw new UserVisibleException('WORKFLOW_STATE_DUPLICATE', 'Workflow state key already exists.');
             }
             $states[$newStateKey] = $this->stateFromInput($newStateKey, $newState);
         }
@@ -621,7 +622,7 @@ final class WorkflowPublisher
         $values = array_values(array_unique(array_map('strval', $selected)));
         foreach ($values as $value) {
             if (!in_array($value, $allowed, true)) {
-                throw new RuntimeException('Unknown workflow rule vocabulary item: ' . $value);
+                throw new UserVisibleException('WORKFLOW_RULE_INVALID', 'Unknown workflow rule vocabulary item.');
             }
         }
         return $values;
@@ -631,7 +632,7 @@ final class WorkflowPublisher
     {
         $value = preg_replace('/\s+/', ' ', trim(strip_tags($value))) ?? '';
         if ($value === '' || mb_strlen($value) > $maxLength) {
-            throw new RuntimeException($field . ' must be between 1 and ' . $maxLength . ' characters.');
+            throw new UserVisibleException('WORKFLOW_LABEL_INVALID', 'Workflow labels must be between 1 and 120 characters.');
         }
         return $value;
     }
@@ -640,7 +641,7 @@ final class WorkflowPublisher
     {
         $value = strtolower(trim($value));
         if (!preg_match('/^#[0-9a-f]{6}$/', $value)) {
-            throw new RuntimeException('Workflow state colors must use six-digit hex values.');
+            throw new UserVisibleException('WORKFLOW_COLOR_INVALID', 'Workflow state colors must use six-digit hex values.');
         }
         return $value;
     }

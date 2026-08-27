@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Modules\Advising\Application;
 
+use App\Core\Http\UserVisibleException;
 use App\Core\Events\DomainEvent;
 use App\Core\People\PersonReferenceRepository;
 use App\Support\Auth;
@@ -104,7 +105,7 @@ final class AdvisingService
         $status = strtolower(trim((string) ($input['appointment_status'] ?? 'requested')));
         $mode = strtolower(trim((string) ($input['appointment_mode'] ?? 'in_person')));
         if (!in_array($status, ['requested', 'scheduled'], true) || !in_array($mode, self::MODES, true)) {
-            throw new RuntimeException('Appointment status or mode is invalid.');
+            throw new UserVisibleException('ADVISING_APPOINTMENT_INVALID', 'Appointment status or mode is invalid.');
         }
         $this->requireStudent($studentId);
         if ($adviserId > 0) {
@@ -113,7 +114,7 @@ final class AdvisingService
         $startsAt = $this->utcTime((string) ($input['starts_at'] ?? ''), 'Start time');
         $endsAt = $this->utcTime((string) ($input['ends_at'] ?? ''), 'End time');
         if ($endsAt <= $startsAt) {
-            throw new RuntimeException('Appointment end time must be after its start time.');
+            throw new UserVisibleException('ADVISING_APPOINTMENT_TIME_INVALID', 'Appointment end time must be after its start time.');
         }
         $institutionId = $this->institutionId();
         $now = cpe_now();
@@ -148,13 +149,13 @@ final class AdvisingService
     {
         $status = strtolower(trim($status));
         if (!in_array($status, self::STATUSES, true)) {
-            throw new RuntimeException('Appointment status is invalid.');
+            throw new UserVisibleException('ADVISING_STATUS_INVALID', 'Appointment status is invalid.');
         }
         $stmt = $this->pdo->prepare('SELECT appointment_status FROM advising_appointments WHERE id = ?');
         $stmt->execute([$appointmentId]);
         $current = $stmt->fetchColumn();
         if ($current === false) {
-            throw new RuntimeException('Advising appointment was not found.');
+            throw new UserVisibleException('ADVISING_APPOINTMENT_NOT_FOUND', 'Advising appointment was not found.');
         }
         $allowed = [
             'requested' => ['scheduled', 'cancelled'],
@@ -164,7 +165,7 @@ final class AdvisingService
             'no_show' => ['scheduled'],
         ];
         if ($status !== $current && !in_array($status, $allowed[(string) $current] ?? [], true)) {
-            throw new RuntimeException('This appointment status transition is not allowed.');
+            throw new UserVisibleException('ADVISING_STATUS_TRANSITION_INVALID', 'This appointment status transition is not allowed.');
         }
         $stmt = $this->pdo->prepare('UPDATE advising_appointments SET appointment_status = ?, updated_at = ? WHERE id = ?');
         $stmt->execute([$status, cpe_now(), $appointmentId]);
@@ -177,7 +178,7 @@ final class AdvisingService
         $stmt->execute([$appointmentId]);
         $appointment = $stmt->fetch();
         if (!$appointment) {
-            throw new RuntimeException('Advising appointment was not found.');
+            throw new UserVisibleException('ADVISING_APPOINTMENT_NOT_FOUND', 'Advising appointment was not found.');
         }
         $body = $this->text($body, 4000, 'Advising note');
         $now = cpe_now();
@@ -211,7 +212,7 @@ final class AdvisingService
         $now = cpe_now();
         $stmt->execute([$actorId, $now, $now, $taskId]);
         if ($stmt->rowCount() !== 1) {
-            throw new RuntimeException('Open advising task was not found.');
+            throw new UserVisibleException('ADVISING_TASK_NOT_FOUND', 'Open advising task was not found.');
         }
         Auth::audit($actorId, 'advising.task_completed', 'advising_task', $taskId, 'Advising task completed');
     }
@@ -273,7 +274,7 @@ final class AdvisingService
         $stmt = $this->pdo->prepare('SELECT COUNT(*) FROM student_profiles WHERE id = ? AND institution_id = ?');
         $stmt->execute([$studentId, $this->institutionId()]);
         if ((int) $stmt->fetchColumn() !== 1) {
-            throw new RuntimeException('Student profile was not found.');
+            throw new UserVisibleException('ADVISING_STUDENT_NOT_FOUND', 'Student profile was not found.');
         }
     }
 
@@ -282,7 +283,7 @@ final class AdvisingService
         $stmt = $this->pdo->prepare('SELECT COUNT(*) FROM users WHERE id = ? AND active = 1');
         $stmt->execute([$userId]);
         if ((int) $stmt->fetchColumn() !== 1) {
-            throw new RuntimeException('Adviser user was not found or is inactive.');
+            throw new UserVisibleException('ADVISING_ADVISER_NOT_FOUND', 'Adviser user was not found or is inactive.');
         }
     }
 
@@ -296,7 +297,7 @@ final class AdvisingService
         }
         $time = DateTimeImmutable::createFromFormat('!Y-m-d\TH:i', trim($value), $timezone);
         if (!$time || $time->format('Y-m-d\TH:i') !== trim($value)) {
-            throw new RuntimeException($label . ' must be a valid local date and time.');
+            throw new UserVisibleException('ADVISING_DATE_TIME_INVALID', $label . ' must be a valid local date and time.');
         }
         return $time->setTimezone(new DateTimeZone('UTC'))->format('Y-m-d H:i:s');
     }
@@ -315,7 +316,10 @@ final class AdvisingService
     {
         $value = preg_replace('/\s+/', ' ', trim(strip_tags($value))) ?? '';
         if ((!$allowEmpty && $value === '') || mb_strlen($value) > $maxLength) {
-            throw new RuntimeException($label . ' must be ' . ($allowEmpty ? 'at most ' : 'between 1 and ') . $maxLength . ' characters.');
+            throw new UserVisibleException(
+                'ADVISING_TEXT_INVALID',
+                $label . ' must be ' . ($allowEmpty ? 'at most ' : 'between 1 and ') . $maxLength . ' characters.',
+            );
         }
         return $value;
     }

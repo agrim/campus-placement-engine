@@ -9,20 +9,24 @@ use App\Controllers\ModuleController;
 use App\Controllers\PortalController;
 use App\Core\Http\AuthorizationException;
 use App\Core\Http\Router;
+use App\Core\Http\UserVisibleException;
 use App\Operations\RequestTelemetry;
 use App\Support\Database;
 use App\Support\Flash;
 use App\Support\StructuredLogger;
 
-if (!Database::isInstalled()) {
-    redirect('/install.php');
-}
-
-$route = (string) ($_GET['r'] ?? 'portal');
-$method = $_SERVER['REQUEST_METHOD'] ?? 'GET';
-RequestTelemetry::start($route, $method);
-
+$route = 'bootstrap';
+$method = 'GET';
 try {
+    if (!Database::isInstalled()) {
+        redirect('/install.php');
+    }
+
+    $routeValue = $_GET['r'] ?? 'portal';
+    $requestedRoute = is_string($routeValue) ? $routeValue : '';
+    $methodValue = $_SERVER['REQUEST_METHOD'] ?? 'GET';
+    $method = is_string($methodValue) ? strtoupper($methodValue) : 'INVALID';
+
     $router = new Router();
     $router->register([
         ['name' => 'login', 'method' => 'GET', 'controller' => AuthController::class, 'action' => 'show'],
@@ -34,18 +38,23 @@ try {
         ['name' => 'modules', 'method' => 'POST', 'controller' => ModuleController::class, 'action' => 'update'],
     ]);
     $router->register(cpe_context()->moduleManager()->routes());
-    $router->dispatch($route, $method);
+    $route = $router->canonicalName($requestedRoute, $method);
+    RequestTelemetry::start($route, $method);
+    $router->dispatch($requestedRoute, $method);
 } catch (AuthorizationException) {
     StructuredLogger::log('info', 'http.access_denied', ['route' => $route]);
     Flash::add('error', 'Access denied.');
     redirect('/');
+} catch (UserVisibleException $e) {
+    Flash::add('error', $e->publicMessage());
+    redirect('/');
 } catch (Throwable $e) {
-    $reference = StructuredLogger::requestId();
-    StructuredLogger::log('error', 'http.exception', [
-        'route' => $route,
-        'exception' => get_class($e),
-        'message' => $e->getMessage(),
-    ]);
-    Flash::add('error', 'Request failed. Reference: ' . $reference);
+    $incidentId = cpe_report_incident(
+        $e,
+        'CPE_WEB_REQUEST_FAILED',
+        'web',
+        ['route' => $route, 'method' => $method, 'operation' => 'dispatch'],
+    );
+    Flash::add('error', 'Request failed. Reference: ' . $incidentId);
     redirect('/');
 }

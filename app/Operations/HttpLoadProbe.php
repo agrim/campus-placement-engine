@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace App\Operations;
 
-use RuntimeException;
+use App\Core\Http\UserVisibleException;
 
 final class HttpLoadProbe
 {
@@ -20,10 +20,13 @@ final class HttpLoadProbe
         if (!filter_var($baseUrl, FILTER_VALIDATE_URL)
             || !in_array(strtolower((string) ($parts['scheme'] ?? '')), ['http', 'https'], true)
             || isset($parts['user']) || isset($parts['pass'])) {
-            throw new RuntimeException('Load probe requires a valid http(s) base URL without embedded credentials.');
+            throw new UserVisibleException(
+                'CLI_LOAD_TARGET_INVALID',
+                'Load probe requires a valid http(s) base URL without embedded credentials.',
+            );
         }
         if (!str_starts_with($path, '/') || str_contains($path, "\r") || str_contains($path, "\n")) {
-            throw new RuntimeException('Load probe path must be an absolute HTTP path.');
+            throw new UserVisibleException('CLI_LOAD_PATH_INVALID', 'Load probe path must be an absolute HTTP path.');
         }
         $requests = max(1, min(5000, $requests));
         $concurrency = max(1, min(50, $concurrency, $requests));
@@ -49,7 +52,7 @@ final class HttpLoadProbe
         ksort($statusCounts, SORT_NATURAL);
         arsort($errors);
         return [
-            'url' => $url,
+            'url' => '[configured http target]',
             'transport' => function_exists('curl_multi_init') ? 'curl_multi' : 'streams',
             'requests' => count($samples),
             'concurrency' => function_exists('curl_multi_init') ? $concurrency : 1,
@@ -97,7 +100,7 @@ final class HttpLoadProbe
                 $samples[] = [
                     'status' => (int) curl_getinfo($handle, CURLINFO_RESPONSE_CODE),
                     'duration_ms' => (microtime(true) - $entry['started']) * 1000,
-                    'error' => (string) curl_error($handle),
+                    'error' => curl_error($handle) === '' ? '' : 'CPE_HTTP_LOAD_REQUEST_FAILED',
                 ];
                 curl_multi_remove_handle($multi, $handle);
             }

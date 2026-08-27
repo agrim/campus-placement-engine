@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Domain;
 
+use App\Core\Http\UserVisibleException;
 use App\Core\Events\DomainEvent;
 use App\Modules\Placement\Install\LegacyDomainSynchronizer;
 use App\Modules\Placement\Workflow\WorkflowEngine;
@@ -312,11 +313,11 @@ final class PlacementService
             return '{}';
         }
         if (strlen($value) > 5000) {
-            throw new RuntimeException($label . ' JSON must be 5000 bytes or fewer.');
+            throw new UserVisibleException('PLACEMENT_CUSTOM_FIELDS_INVALID', $label . ' JSON must be 5000 bytes or fewer.');
         }
         $payload = json_decode($value);
         if (!$payload instanceof \stdClass) {
-            throw new RuntimeException($label . ' must be a JSON object.');
+            throw new UserVisibleException('PLACEMENT_CUSTOM_FIELDS_INVALID', $label . ' must be a JSON object.');
         }
         $fields = get_object_vars($payload);
         ksort($fields);
@@ -324,10 +325,10 @@ final class PlacementService
         foreach ($fields as $key => $fieldValue) {
             $key = trim((string) $key);
             if ($key === '' || strlen($key) > 60) {
-                throw new RuntimeException($label . ' keys must be 1 to 60 characters.');
+                throw new UserVisibleException('PLACEMENT_CUSTOM_FIELDS_INVALID', $label . ' keys must be 1 to 60 characters.');
             }
             if (is_array($fieldValue) || is_object($fieldValue)) {
-                throw new RuntimeException($label . ' values must be strings, numbers, booleans, or null.');
+                throw new UserVisibleException('PLACEMENT_CUSTOM_FIELDS_INVALID', $label . ' values must be strings, numbers, booleans, or null.');
             }
             $normalized->{$key} = $fieldValue;
         }
@@ -359,7 +360,7 @@ final class PlacementService
             return true;
         }
         if (!preg_match('/^[A-Fa-f0-9]{32,64}$/', $key)) {
-            throw new RuntimeException('Invalid form submission key.');
+            throw new UserVisibleException('FORM_SUBMISSION_KEY_INVALID', 'Invalid form submission key.');
         }
         $cutoff = gmdate('Y-m-d H:i:s', time() - 172800);
         $cleanup = $this->pdo->prepare('DELETE FROM idempotency_keys WHERE created_at < ?');
@@ -415,7 +416,7 @@ final class PlacementService
     public function saveBoardPreference(int $userId, array $filters): void
     {
         if (!$this->recordExists('users', $userId)) {
-            throw new RuntimeException('User not found.');
+            throw new UserVisibleException('BOARD_USER_NOT_FOUND', 'User not found.');
         }
         $now = cpe_now();
         $staleMinutes = $this->normalizeStaleMinutes($filters['stale_minutes'] ?? null);
@@ -545,11 +546,11 @@ final class PlacementService
         $stmt->execute([$applicationId]);
         $companyCode = $stmt->fetchColumn();
         if (!$companyCode) {
-            throw new RuntimeException('Application not found.');
+            throw new UserVisibleException('PLACEMENT_APPLICATION_NOT_FOUND', 'Application not found.');
         }
         $scope = strtoupper(trim((string) ($user['scope_value'] ?? '')));
         if ($scope === '' || strtoupper((string) $companyCode) !== $scope) {
-            throw new RuntimeException('Company users cannot move applications outside their assigned company scope.');
+            throw new UserVisibleException('PLACEMENT_COMPANY_SCOPE_FORBIDDEN', 'Company users cannot move applications outside their assigned company scope.');
         }
     }
 
@@ -713,16 +714,12 @@ final class PlacementService
         $stmt->execute([$applicationId]);
         $app = $stmt->fetch();
         if (!$app) {
-            throw new RuntimeException('Application not found.');
+            throw new UserVisibleException('PLACEMENT_APPLICATION_NOT_FOUND', 'Application not found.');
         }
 
         $fromStatus = $app['current_status'];
         if ($expectedFromStatus !== '' && $expectedFromStatus !== $fromStatus) {
-            throw new RuntimeException(
-                'This board card is stale. It showed ' . $this->workflow->statusLabel($expectedFromStatus) .
-                ', but the application is now ' . $this->workflow->statusLabel((string) $fromStatus) .
-                '. Reload the board before moving it.'
-            );
+            throw new UserVisibleException('PLACEMENT_BOARD_STALE', 'This board card is stale. Reload the board before moving it.');
         }
         $versionedTransition = null;
         if ($this->workflowEngine !== null) {
@@ -732,23 +729,23 @@ final class PlacementService
             if ((string) $versionedTransition['from'] !== (string) $fromStatus
                 || (string) $versionedTransition['to'] !== $toStatus
                 || !empty($versionedTransition['is_correction'])) {
-                throw new RuntimeException('Named workflow transition does not match the submitted application state.');
+                throw new UserVisibleException('PLACEMENT_TRANSITION_INVALID', 'Named workflow transition does not match the submitted application state.');
             }
         } else {
             if ((int) ($app['opted_out'] ?? 0) === 1 && $toStatus !== 'idle') {
-                throw new RuntimeException('Candidate has opted out of placement movement.');
+                throw new UserVisibleException('PLACEMENT_CANDIDATE_OPTED_OUT', 'Candidate has opted out of placement movement.');
             }
             if ($toStatus === 'placed') {
                 if ($this->setting('placement_freeze', '0') === '1' && $actorRole !== 'admin') {
-                    throw new RuntimeException('Placement decisions are frozen. Admin override is required.');
+                    throw new UserVisibleException('PLACEMENT_FROZEN', 'Placement decisions are frozen. Admin override is required.');
                 }
                 $alreadyPlaced = (int) ($app['placed_company_id'] ?? 0);
                 if ($alreadyPlaced > 0 && $alreadyPlaced !== (int) $app['company_id'] && $this->setting('allow_offer_upgrade', '0') !== '1') {
-                    throw new RuntimeException('Candidate already has a placement. Offer upgrades are disabled.');
+                    throw new UserVisibleException('PLACEMENT_UPGRADE_DISABLED', 'Candidate already has a placement. Offer upgrades are disabled.');
                 }
             }
             if (!$this->workflow->canTransition($fromStatus, $toStatus, $actorRole)) {
-                throw new RuntimeException("Role {$actorRole} cannot move {$fromStatus} to {$toStatus}.");
+                throw new UserVisibleException('PLACEMENT_TRANSITION_FORBIDDEN', 'Your role cannot move this application through that workflow transition.');
             }
         }
 
@@ -847,14 +844,14 @@ final class PlacementService
         $stmt->execute([$applicationId]);
         $from = $stmt->fetchColumn();
         if (!$from) {
-            throw new RuntimeException('Application not found.');
+            throw new UserVisibleException('PLACEMENT_APPLICATION_NOT_FOUND', 'Application not found.');
         }
         $preferredTransition = $this->workflowEngine?->preferredTransition($applicationId);
         $next = $preferredTransition !== null
             ? (string) $preferredTransition['to']
             : $this->workflow->nextStatus((string) $from);
         if (!$next) {
-            throw new RuntimeException('This application is already at the final status.');
+            throw new UserVisibleException('PLACEMENT_APPLICATION_FINAL', 'This application is already at the final status.');
         }
         $this->transition($applicationId, $next, $actorId, $actorRole, $note, $expectedFromStatus);
         return $next;
@@ -870,7 +867,7 @@ final class PlacementService
         string $expectedFromStatus = ''
     ): string {
         if ($toStatus === '') {
-            throw new RuntimeException('Workflow transition target is required.');
+            throw new UserVisibleException('PLACEMENT_TRANSITION_REQUIRED', 'Workflow transition target is required.');
         }
         $this->transition($applicationId, $toStatus, $actorId, $actorRole, $note, $expectedFromStatus, $transitionKey);
         return $toStatus;
@@ -889,16 +886,12 @@ final class PlacementService
         $stmt->execute([$applicationId]);
         $app = $stmt->fetch();
         if (!$app) {
-            throw new RuntimeException('Application not found.');
+            throw new UserVisibleException('PLACEMENT_APPLICATION_NOT_FOUND', 'Application not found.');
         }
 
         $fromStatus = (string) $app['current_status'];
         if ($expectedFromStatus !== '' && $expectedFromStatus !== $fromStatus) {
-            throw new RuntimeException(
-                'This board card is stale. It showed ' . $this->workflow->statusLabel($expectedFromStatus) .
-                ', but the application is now ' . $this->workflow->statusLabel($fromStatus) .
-                '. Reload the board before moving it.'
-            );
+            throw new UserVisibleException('PLACEMENT_BOARD_STALE', 'This board card is stale. Reload the board before moving it.');
         }
         $correctionTransition = null;
         $returnState = $this->workflow->initialStateKey();
@@ -906,13 +899,13 @@ final class PlacementService
             $correctionTransition = $this->workflowEngine->resolveCorrection($applicationId, $actorRole, $reason);
             $returnState = (string) $correctionTransition['to'];
         } elseif (!in_array($actorRole, ['admin', 'control', 'placement', 'company'], true)) {
-            throw new RuntimeException("Role {$actorRole} cannot return applications to idle.");
+            throw new UserVisibleException('PLACEMENT_CORRECTION_FORBIDDEN', 'Your role cannot return applications to idle.');
         }
         if ($fromStatus === $returnState) {
-            throw new RuntimeException('Application is already at the initial workflow state.');
+            throw new UserVisibleException('PLACEMENT_ALREADY_INITIAL', 'Application is already at the initial workflow state.');
         }
         if ($correctionTransition === null && $this->workflow->isTerminal($fromStatus)) {
-            throw new RuntimeException('Completed applications cannot be returned from the board.');
+            throw new UserVisibleException('PLACEMENT_CORRECTION_INVALID', 'Completed applications cannot be returned from the board.');
         }
 
         $this->pdo->beginTransaction();
@@ -2742,7 +2735,7 @@ final class PlacementService
         $externalId = trim((string) ($input['external_id'] ?? ''));
         $name = trim((string) ($input['name'] ?? ''));
         if ($externalId === '' || $name === '') {
-            throw new RuntimeException('Candidate ID and name are required.');
+            throw new UserVisibleException('PLACEMENT_CANDIDATE_INVALID', 'Candidate ID and name are required.');
         }
         $now = cpe_now();
         $values = [
@@ -2777,7 +2770,7 @@ final class PlacementService
         $code = strtoupper(trim((string) ($input['code'] ?? '')));
         $name = trim((string) ($input['name'] ?? ''));
         if ($code === '' || $name === '') {
-            throw new RuntimeException('Company code and name are required.');
+            throw new UserVisibleException('PLACEMENT_COMPANY_INVALID', 'Company code and name are required.');
         }
         $now = cpe_now();
         $slot = trim((string) ($input['slot'] ?? ''));
@@ -2819,10 +2812,10 @@ final class PlacementService
         $companyId = (int) ($input['company_id'] ?? 0);
         $label = trim((string) ($input['label'] ?? ''));
         if ($companyId <= 0 || $label === '') {
-            throw new RuntimeException('Company and round label are required.');
+            throw new UserVisibleException('PLACEMENT_ROUND_INVALID', 'Company and round label are required.');
         }
         if (!$this->recordExists('companies', $companyId)) {
-            throw new RuntimeException('Company not found.');
+            throw new UserVisibleException('PLACEMENT_COMPANY_NOT_FOUND', 'Company not found.');
         }
 
         $sequence = max(1, (int) ($input['sequence'] ?? 1));
@@ -2859,10 +2852,10 @@ final class PlacementService
         $roundId = (int) ($input['round_id'] ?? 0);
         $name = trim((string) ($input['name'] ?? ''));
         if ($roundId <= 0 || $name === '') {
-            throw new RuntimeException('Round and panelist name are required.');
+            throw new UserVisibleException('PLACEMENT_PANELIST_INVALID', 'Round and panelist name are required.');
         }
         if (!$this->recordExists('company_rounds', $roundId)) {
-            throw new RuntimeException('Round not found.');
+            throw new UserVisibleException('PLACEMENT_ROUND_NOT_FOUND', 'Round not found.');
         }
         $sequence = max(1, (int) ($input['sequence'] ?? 1));
         $role = trim((string) ($input['role'] ?? ''));
@@ -2899,10 +2892,10 @@ final class PlacementService
         $roundId = (int) ($input['round_id'] ?? 0);
         $room = trim((string) ($input['room'] ?? ''));
         if ($roundId <= 0 || $room === '') {
-            throw new RuntimeException('Round and room are required.');
+            throw new UserVisibleException('PLACEMENT_SCHEDULE_INVALID', 'Round and room are required.');
         }
         if (!$this->recordExists('company_rounds', $roundId)) {
-            throw new RuntimeException('Round not found.');
+            throw new UserVisibleException('PLACEMENT_ROUND_NOT_FOUND', 'Round not found.');
         }
         $sequence = max(1, (int) ($input['sequence'] ?? 1));
         $scheduleDay = trim((string) ($input['schedule_day'] ?? ''));
@@ -2940,13 +2933,13 @@ final class PlacementService
         $applicationId = (int) ($input['application_id'] ?? 0);
         $roundScheduleId = (int) ($input['round_schedule_id'] ?? 0);
         if ($applicationId <= 0 || $roundScheduleId <= 0) {
-            throw new RuntimeException('Application and schedule are required.');
+            throw new UserVisibleException('PLACEMENT_ASSIGNMENT_INVALID', 'Application and schedule are required.');
         }
         if (!$this->recordExists('applications', $applicationId)) {
-            throw new RuntimeException('Application not found.');
+            throw new UserVisibleException('PLACEMENT_APPLICATION_NOT_FOUND', 'Application not found.');
         }
         if (!$this->recordExists('round_schedules', $roundScheduleId)) {
-            throw new RuntimeException('Round schedule not found.');
+            throw new UserVisibleException('PLACEMENT_SCHEDULE_NOT_FOUND', 'Round schedule not found.');
         }
         $this->assertScheduleBelongsToApplicationCompany($applicationId, $roundScheduleId);
         $sequence = max(1, (int) ($input['sequence'] ?? 1));
@@ -2985,10 +2978,10 @@ final class PlacementService
     public function saveApplication(int $candidateId, int $companyId, string $status, ?int $waitlistRank, ?int $actorId): void
     {
         if ($candidateId <= 0 || $companyId <= 0) {
-            throw new RuntimeException('Candidate and company are required.');
+            throw new UserVisibleException('PLACEMENT_APPLICATION_INVALID', 'Candidate and company are required.');
         }
         if (!isset($this->workflow->statuses()[$status])) {
-            throw new RuntimeException('Unknown workflow status.');
+            throw new UserVisibleException('PLACEMENT_STATUS_INVALID', 'Unknown workflow status.');
         }
         $now = cpe_now();
         $stmt = $this->pdo->prepare(
@@ -3161,16 +3154,16 @@ final class PlacementService
     public function acknowledgeNotification(int $notificationId, array $user): void
     {
         if ($notificationId <= 0) {
-            throw new RuntimeException('Notification not found.');
+            throw new UserVisibleException('PLACEMENT_NOTIFICATION_NOT_FOUND', 'Notification not found.');
         }
         if (!Auth::hasCapability($user, 'placement.notifications.manage')) {
-            throw new RuntimeException('This account cannot acknowledge notifications.');
+            throw new UserVisibleException('PLACEMENT_NOTIFICATION_FORBIDDEN', 'This account cannot acknowledge notifications.');
         }
         [$whereSql, $params] = $this->notificationVisibilityWhere($user);
         $stmt = $this->pdo->prepare("SELECT n.id FROM notifications n WHERE n.id = ? AND n.status = 'open' AND {$whereSql}");
         $stmt->execute([$notificationId, ...$params]);
         if (!$stmt->fetchColumn()) {
-            throw new RuntimeException('Notification not found or already acknowledged.');
+            throw new UserVisibleException('PLACEMENT_NOTIFICATION_UNAVAILABLE', 'Notification not found or already acknowledged.');
         }
         $now = cpe_now();
         $update = $this->pdo->prepare('UPDATE notifications SET status = ?, acknowledged_by = ?, acknowledged_at = ? WHERE id = ?');
@@ -3182,7 +3175,7 @@ final class PlacementService
     {
         $companyIds = array_values(array_unique(array_filter(array_map('intval', $companyIds))));
         if ($candidateId <= 0 || count($companyIds) < 2) {
-            throw new RuntimeException('Choose a candidate and at least two companies.');
+            throw new UserVisibleException('PLACEMENT_PREFERENCE_INVALID', 'Choose a candidate and at least two companies.');
         }
         $this->pdo->beginTransaction();
         try {
@@ -3224,7 +3217,7 @@ final class PlacementService
         $stmt->execute([$companyId, $requestId]);
         $request = $stmt->fetch();
         if (!$request) {
-            throw new RuntimeException('Preference request or selected company option not found.');
+            throw new UserVisibleException('PLACEMENT_PREFERENCE_NOT_FOUND', 'Preference request or selected company option not found.');
         }
 
         $this->pdo->beginTransaction();
@@ -3263,7 +3256,7 @@ final class PlacementService
     public function createWantedAlert(int $candidateId, string $reason, ?int $actorId): void
     {
         if ($candidateId <= 0 || trim($reason) === '') {
-            throw new RuntimeException('Candidate and reason are required.');
+            throw new UserVisibleException('PLACEMENT_WANTED_INVALID', 'Candidate and reason are required.');
         }
         $reason = trim($reason);
         $this->pdo->beginTransaction();
@@ -3291,14 +3284,14 @@ final class PlacementService
     public function resolveWantedAlert(int $alertId, ?int $actorId): void
     {
         if ($alertId <= 0) {
-            throw new RuntimeException('Wanted alert not found.');
+            throw new UserVisibleException('PLACEMENT_WANTED_NOT_FOUND', 'Wanted alert not found.');
         }
         $this->pdo->beginTransaction();
         try {
             $stmt = $this->pdo->prepare('UPDATE wanted_alerts SET status = ?, resolved_by = ?, resolved_at = ? WHERE id = ?');
             $stmt->execute(['resolved', $actorId, cpe_now(), $alertId]);
             if ($stmt->rowCount() === 0) {
-                throw new RuntimeException('Wanted alert not found.');
+                throw new UserVisibleException('PLACEMENT_WANTED_NOT_FOUND', 'Wanted alert not found.');
             }
             $this->closeNotificationsForSource('wanted_alert', $alertId, $actorId);
             Auth::audit($actorId, 'wanted.resolve', 'wanted_alert', $alertId, 'Resolved wanted alert');
@@ -3761,7 +3754,7 @@ final class PlacementService
         );
         $stmt->execute([$roundScheduleId, $applicationId]);
         if ((int) $stmt->fetchColumn() === 0) {
-            throw new RuntimeException('Schedule does not belong to the application company.');
+            throw new UserVisibleException('PLACEMENT_ASSIGNMENT_COMPANY_INVALID', 'Schedule does not belong to the application company.');
         }
     }
 
@@ -4011,7 +4004,7 @@ final class PlacementService
         $stmt->execute([$candidateId]);
         $candidate = $stmt->fetch();
         if (!$candidate) {
-            throw new RuntimeException('Candidate not found.');
+            throw new UserVisibleException('PLACEMENT_CANDIDATE_NOT_FOUND', 'Candidate not found.');
         }
         return (string) $candidate['external_id'] . ' - ' . (string) $candidate['name'];
     }
@@ -4026,7 +4019,7 @@ final class PlacementService
         $stmt->execute($companyIds);
         $rows = $stmt->fetchAll();
         if (count($rows) !== count($companyIds)) {
-            throw new RuntimeException('One or more company options were not found.');
+            throw new UserVisibleException('PLACEMENT_COMPANY_OPTIONS_INVALID', 'One or more company options were not found.');
         }
         return array_map(fn (array $row): string => (string) $row['code'], $rows);
     }

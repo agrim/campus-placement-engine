@@ -11,7 +11,7 @@ use RuntimeException;
 
 final class HostedBootstrap
 {
-    public const CONTRACT_VERSION = 1;
+    public const CONTRACT_VERSION = 2;
 
     private static ?TenantResolver $resolver = null;
 
@@ -76,6 +76,12 @@ final class HostedBootstrap
 
     public static function assertDataPlaneIdentity(string $tenantPublicId): void
     {
+        if (preg_match('/\Atenant_[a-f0-9]{32}\z/D', $tenantPublicId) !== 1) {
+            throw new HostedResolutionException(
+                'Tenant database identity does not match the requested domain.',
+                503,
+            );
+        }
         try {
             $row = Database::connection()->query("SELECT public_id FROM institutions WHERE slug = 'default' LIMIT 1")->fetchColumn();
         } catch (\Throwable $e) {
@@ -86,15 +92,4 @@ final class HostedBootstrap
         }
     }
 
-    public static function bindInstalledDataPlane(string $tenantPublicId): void
-    {
-        if (!Database::isInstalled()) {
-            throw new RuntimeException('Cannot bind an uninstalled tenant database.');
-        }
-        $stmt = Database::connection()->prepare("UPDATE institutions SET public_id = ?, updated_at = ? WHERE slug = 'default'");
-        $stmt->execute([$tenantPublicId, cpe_now()]);
-        if ($stmt->rowCount() !== 1) {
-            throw new RuntimeException('Tenant database has no default institution to bind.');
-        }
-    }
 }

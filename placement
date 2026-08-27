@@ -15,6 +15,9 @@ use App\Core\Portability\PortalPortabilityService;
 use App\Core\Privacy\PortalPrivacyService;
 use App\Core\Backup\DatabaseBackupService;
 use App\Core\Backup\DatabaseRestoreService;
+use App\Core\Backup\BackupArtifact;
+use App\Core\Backup\LegacySqliteBackupConverter;
+use App\Core\Http\UserVisibleException;
 use App\Core\Events\DomainEventOutboxWorker;
 use App\Domain\ConfigurationSnapshotService;
 use App\Domain\NotificationDeliveryService;
@@ -25,10 +28,13 @@ use App\Install\Installer;
 use App\Install\SystemRequirements;
 use App\Import\ImportRollbackService;
 use App\Security\ExternalIdentityService;
+use App\Security\SetupAuthorization;
+use App\Security\SetupHttp;
 use App\Operations\MetricsService;
 use App\Operations\HttpLoadProbe;
 use App\Support\Csv;
 use App\Support\Database;
+use App\Support\IncidentReporter;
 
 $command = $argv[1] ?? 'help';
 
@@ -51,8 +57,9 @@ try {
         'privacy-person-report' => privacy_person_report(array_slice($argv, 2)),
         'privacy-person-erase' => privacy_person_erase(array_slice($argv, 2)),
         'backup' => backup_database(),
+        'convert-legacy-backup' => convert_legacy_backup(array_slice($argv, 2)),
         'restore' => restore_database($argv[2] ?? ''),
-        'rollback-import' => rollback_import($argv[2] ?? ''),
+        'rollback-import' => rollback_import(array_slice($argv, 2)),
         'config-export' => config_export($argv[2] ?? null),
         'config-validate' => config_validate($argv[2] ?? ''),
         'config-import' => config_import($argv[2] ?? ''),
@@ -86,10 +93,22 @@ try {
         'assign-optimized-slots' => assign_optimized_slots($argv[2] ?? ''),
         'publication-check' => publication_check(),
         'help' => help(),
-        default => throw new RuntimeException('Unknown command: ' . $command),
+        default => throw new UserVisibleException(
+            'CLI_COMMAND_UNKNOWN',
+            'Unknown command. Run `php placement help` for available commands.',
+        ),
     };
+} catch (UserVisibleException $e) {
+    fwrite(STDERR, 'Error: ' . $e->publicMessage() . "\n");
+    exit(1);
 } catch (Throwable $e) {
-    fwrite(STDERR, "Error: {$e->getMessage()}\n");
+    $incidentId = IncidentReporter::report(
+        $e,
+        'CPE_CLI_COMMAND_FAILED',
+        'cli',
+        ['operation' => 'placement.command', 'status' => 'failed'],
+    );
+    fwrite(STDERR, 'Error: Command failed. ' . IncidentReporter::reference('CPE_CLI_COMMAND_FAILED', $incidentId) . "\n");
     exit(1);
 }
 
@@ -99,7 +118,6 @@ function doctor(): void
     foreach ($requirements->checks() as $check) {
         echo ($check['ok'] ? 'OK' : 'ERROR') . " {$check['label']}: {$check['value']}\n";
     }
-    echo "INFO database: " . Database::path() . "\n";
     echo "INFO installed: " . (Database::isInstalled() ? 'yes' : 'no') . "\n";
     $requirements->assertReady();
 }
@@ -117,15 +135,16 @@ function upgrade(array $args): void
         return;
     }
     if ($args !== []) {
-        throw new RuntimeException('Unexpected upgrade argument: ' . implode(' ', $args));
+        throw new UserVisibleException('CLI_UPGRADE_ARGUMENT_INVALID', 'Upgrade does not accept positional arguments.');
     }
-    if (!Database::isInstalled()) {
-        throw new RuntimeException('App is not installed.');
+    if (!Database::hasInstalledMarkerStrict()) {
+        throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
     }
 
     (new SystemRequirements())->assertReady();
+    Database::adoptInstalledEngineOwnershipForUpgrade();
     $backup = create_database_backup('upgrade');
-    echo "Upgrade backup written: {$backup}\n";
+    echo "Upgrade backup written. A recovery path is available only to the operator who configured backup storage.\n";
     Database::migrate();
     echo "Migrations applied.\n";
 
@@ -133,13 +152,27 @@ function upgrade(array $args): void
     print_readiness_snapshot($snapshot);
     $failures = array_values(array_filter($snapshot['checks'], fn (array $check): bool => $check['status'] === 'fail'));
     if ($failures !== []) {
-        throw new RuntimeException('Upgrade completed migrations, but readiness has failing checks.');
+        throw new UserVisibleException(
+            'CLI_UPGRADE_READINESS_FAILED',
+            'Upgrade completed migrations, but readiness has failing checks.',
+        );
     }
     echo "Upgrade complete.\n";
 }
 
-function serve(array $args): void
+function serve(
+    array $args,
+    ?string $internalCapability = null,
+    ?string $internalAddress = null,
+    ?int $internalExpiresAt = null,
+): void
 {
+    $internalSetup = $internalCapability !== null
+        && $internalAddress !== null
+        && $internalExpiresAt !== null;
+    if (!$internalSetup) {
+        SetupHttp::scrubInternalEnvironment();
+    }
     if (in_array('--help', $args, true) || in_array('-h', $args, true)) {
         serve_help();
         return;
@@ -147,17 +180,31 @@ function serve(array $args): void
     $address = (string) ($args[0] ?? getenv('CPE_SERVE_ADDRESS') ?: '127.0.0.1:8000');
     if (!preg_match('/^[A-Za-z0-9._-]+:[0-9]{2,5}$/', $address)) {
         serve_help();
-        throw new RuntimeException('Serve address must look like 127.0.0.1:8000 or localhost:8000.');
+        throw new UserVisibleException(
+            'CLI_SERVE_ADDRESS_INVALID',
+            'Serve address must look like 127.0.0.1:8000 or localhost:8000.',
+        );
     }
     [, $port] = explode(':', $address, 2);
     $portNumber = (int) $port;
     if ($portNumber < 1 || $portNumber > 65535) {
-        throw new RuntimeException('Serve port must be between 1 and 65535.');
+        throw new UserVisibleException('CLI_SERVE_PORT_INVALID', 'Serve port must be between 1 and 65535.');
+    }
+
+    if ($internalSetup) {
+        if (!hash_equals($address, $internalAddress)) {
+            throw new RuntimeException('Internal setup authority does not match the server bind.');
+        }
+        SetupHttp::setInternalEnvironment($internalCapability, $internalAddress, $internalExpiresAt);
     }
 
     echo "Starting Campus Placement Engine at http://{$address}/\n";
     echo "Press Ctrl+C to stop.\n";
-    passthru(escapeshellarg(PHP_BINARY) . ' -S ' . escapeshellarg($address) . ' -t ' . escapeshellarg(cpe_path('public')), $exitCode);
+    try {
+        passthru(escapeshellarg(PHP_BINARY) . ' -S ' . escapeshellarg($address) . ' -t ' . escapeshellarg(cpe_path('public')), $exitCode);
+    } finally {
+        SetupHttp::scrubInternalEnvironment();
+    }
     exit((int) $exitCode);
 }
 
@@ -177,6 +224,11 @@ function setup(array $args): void
         }
         $serveArgs[] = $arg;
     }
+    if (count($serveArgs) > 1) {
+        throw new UserVisibleException('CLI_SETUP_ARGUMENT_INVALID', 'Setup accepts one optional loopback address.');
+    }
+    $requestedAddress = (string) ($serveArgs[0] ?? getenv('CPE_SERVE_ADDRESS') ?: '127.0.0.1:8000');
+    $setupAddress = SetupHttp::normalizeSetupAddress($requestedAddress);
 
     echo "Checking this computer before setup...\n";
     doctor();
@@ -192,7 +244,15 @@ function setup(array $args): void
         echo "Setup check complete. Run `php placement setup` to start the site.\n";
         return;
     }
-    serve($serveArgs);
+    if (Database::isInstalled()) {
+        serve([$setupAddress]);
+    }
+
+    $capability = SetupHttp::generateInternalCapability();
+    $expiresAt = time() + SetupAuthorization::GRANT_TTL_SECONDS;
+    echo "One-time setup code (valid for 20 minutes): {$capability}\n";
+    echo "Enter this code in the browser setup page. It is trusted terminal output and is not placed in the URL.\n";
+    serve([$setupAddress], $capability, $setupAddress, $expiresAt);
 }
 
 function install_app(array $args): void
@@ -202,7 +262,10 @@ function install_app(array $args): void
         return;
     }
     if (Database::isInstalled()) {
-        throw new RuntimeException('App is already installed. Use upgrade, configuration import, or a different CPE_DB_PATH for a fresh setup.');
+        throw new UserVisibleException(
+            'CLI_APP_ALREADY_INSTALLED',
+            'App is already installed. Use upgrade or configuration import for an existing installation.',
+        );
     }
 
     $options = cli_options($args);
@@ -234,7 +297,10 @@ function install_app(array $args): void
 
     if ($input['college_name'] === '' || $input['admin_name'] === '' || $input['admin_email'] === '' || strlen($input['admin_password']) < 8) {
         install_help();
-        throw new RuntimeException('Missing required install options: college, admin-name, admin-email, and 8+ character admin password.');
+        throw new UserVisibleException(
+            'CLI_INSTALL_OPTIONS_REQUIRED',
+            'Missing required install options: college, admin-name, admin-email, and an 8+ character admin password.',
+        );
     }
 
     $adminId = (new Installer())->install($input);
@@ -263,7 +329,10 @@ function seed_large_demo(int $candidateCount, int $companyCount): void
 function install_demo(): void
 {
     if (Database::isInstalled()) {
-        throw new RuntimeException('App is already installed. Use upgrade or a different CPE_DB_PATH for a fresh demo setup.');
+        throw new UserVisibleException(
+            'CLI_APP_ALREADY_INSTALLED',
+            'App is already installed. Use upgrade for an existing installation.',
+        );
     }
     (new Installer())->install([
         'college_name' => 'Demo College',
@@ -280,7 +349,7 @@ function install_demo(): void
 function readiness(): void
 {
     if (!Database::isInstalled()) {
-        throw new RuntimeException('App is not installed.');
+        throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
     }
     print_readiness_snapshot((new ReadinessService())->snapshot());
 }
@@ -288,7 +357,7 @@ function readiness(): void
 function metrics_snapshot(): void
 {
     if (!Database::isInstalled()) {
-        throw new RuntimeException('App is not installed.');
+        throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
     }
     echo json_encode((new MetricsService())->snapshot(), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
 }
@@ -296,8 +365,48 @@ function metrics_snapshot(): void
 function backup_database(): void
 {
     $backup = create_database_backup('app');
-    echo "Backup written: {$backup}\n";
-    echo "Checksum written: " . backup_checksum_path($backup) . "\n";
+    echo "Backup written: {$backup->reference()}\n";
+    echo "Checksum-bound identity metadata written for the backup reference.\n";
+    echo "Find the archive and both sidecars in CPE_BACKUP_DIR or the configured backup directory.\n";
+}
+
+function convert_legacy_backup(array $args): void
+{
+    if ($args === [] || in_array('--help', $args, true) || in_array('-h', $args, true)) {
+        echo "Convert a public alpha.1 SQLite backup without modifying the original:\n";
+        echo "  php placement convert-legacy-backup /path/to/legacy.sqlite --confirm=CONVERT [--target-dir=/new/directory]\n";
+        echo "PostgreSQL legacy archives require an isolated restore validation instead.\n";
+        return;
+    }
+    $path = (string) array_shift($args);
+    if ($path === '' || str_starts_with($path, '--')) {
+        throw new UserVisibleException(
+            'CLI_LEGACY_BACKUP_PATH_REQUIRED',
+            'Provide the legacy SQLite backup path before conversion options.',
+        );
+    }
+    $options = cli_options($args);
+    foreach (array_keys($options) as $option) {
+        if (!in_array($option, ['confirm', 'target-dir'], true)) {
+            throw new UserVisibleException(
+                'CLI_LEGACY_BACKUP_OPTION_INVALID',
+                'Legacy backup conversion accepts only --confirm and --target-dir.',
+            );
+        }
+    }
+    if ((string) ($options['confirm'] ?? '') !== 'CONVERT') {
+        throw new UserVisibleException(
+            'CLI_LEGACY_BACKUP_CONFIRMATION_REQUIRED',
+            'Legacy backup conversion requires --confirm=CONVERT and always writes a new archive.',
+        );
+    }
+    $artifact = (new LegacySqliteBackupConverter())->convert(
+        $path,
+        isset($options['target-dir']) ? (string) $options['target-dir'] : null,
+    );
+    echo "Converted legacy SQLite backup: {$artifact->fileName()}\n";
+    echo "Backup reference: {$artifact->reference()}\n";
+    echo "The original archive and checksum were preserved. Keep the converted archive with both new sidecars.\n";
 }
 
 function privacy_person_report(array $args): void
@@ -306,7 +415,10 @@ function privacy_person_report(array $args): void
     $options = cli_options($args);
     $person = trim((string) ($options['person'] ?? ''));
     if ($person === '') {
-        throw new RuntimeException('Use privacy-person-report --person=PERSON_PUBLIC_ID.');
+        throw new UserVisibleException(
+            'CLI_PRIVACY_PERSON_REQUIRED',
+            'Use privacy-person-report --person=PERSON_PUBLIC_ID.',
+        );
     }
     echo json_encode((new PortalPrivacyService())->report($person), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
 }
@@ -318,21 +430,19 @@ function privacy_person_erase(array $args): void
     $person = trim((string) ($options['person'] ?? ''));
     $reason = trim((string) ($options['reason'] ?? ''));
     if ($person === '' || $reason === '' || (string) ($options['confirm'] ?? '') !== $person) {
-        throw new RuntimeException('Use privacy-person-erase --person=PUBLIC_ID --reason=... --confirm=PUBLIC_ID.');
+        throw new UserVisibleException(
+            'CLI_PRIVACY_ERASURE_CONFIRMATION_REQUIRED',
+            'Use privacy-person-erase --person=PUBLIC_ID --reason=... --confirm=PUBLIC_ID.',
+        );
     }
     $result = (new PortalPrivacyService())->erase($person, $reason);
     echo "Portal privacy erasure complete: {$result['person_public_id']}\n";
-    echo "Safety backup written: {$result['backup_path']}\n";
+    echo "Safety backup created.\n";
 }
 
-function create_database_backup(string $prefix): string
+function create_database_backup(string $prefix): BackupArtifact
 {
-    return (string) (new DatabaseBackupService())->create($prefix)['path'];
-}
-
-function backup_checksum_path(string $path): string
-{
-    return $path . '.sha256';
+    return (new DatabaseBackupService())->create($prefix);
 }
 
 function print_readiness_snapshot(array $snapshot): void
@@ -345,16 +455,16 @@ function print_readiness_snapshot(array $snapshot): void
 function restore_database(string $path): void
 {
     $result = (new DatabaseRestoreService())->restore($path);
-    echo "Safety copy written: {$result['safety_path']}\n";
-    echo "Restored database from: {$path}\n";
+    echo "Safety backup created.\n";
+    echo "Restored database from a checksummed, structurally validated, identity-matched backup.\n";
 }
 
-function rollback_import(string $id): void
+function rollback_import(array $args): void
 {
     if (!Database::isInstalled()) {
-        throw new RuntimeException('App is not installed.');
+        throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
     }
-    if ($id === '' || in_array($id, ['--list', 'list'], true)) {
+    if ($args === [] || in_array((string) ($args[0] ?? ''), ['--list', 'list'], true)) {
         $rows = (new ImportRollbackService())->recent(20);
         if ($rows === []) {
             echo "No import rollback snapshots found.\n";
@@ -363,24 +473,62 @@ function rollback_import(string $id): void
         echo "id,type,rows,created_at,status\n";
         $handle = fopen('php://output', 'w');
         foreach ($rows as $row) {
-            $status = !empty($row['restored_at']) ? 'restored' : (!empty($row['backup_exists']) ? 'ready' : 'missing');
+            $status = !empty($row['restored_at'])
+                ? 'restored'
+                : (!empty($row['backup_exists'])
+                    ? 'ready'
+                    : (!empty($row['legacy_conversion_required'])
+                        ? 'legacy_conversion_required'
+                        : (!empty($row['legacy_recovery_required'])
+                            ? 'legacy_postgres_isolated_validation_required'
+                            : 'missing')));
             Csv::writeRow($handle, [$row['id'], $row['type'], (int) $row['rows'], $row['created_at'], $status]);
         }
         fclose($handle);
         return;
     }
+    $id = (string) array_shift($args);
+    $options = cli_options($args);
+    foreach (array_keys($options) as $option) {
+        if (!in_array($option, ['convert-legacy', 'confirm'], true)) {
+            throw new UserVisibleException(
+                'CLI_IMPORT_ROLLBACK_OPTION_INVALID',
+                'Import rollback accepts only --convert-legacy and --confirm for legacy conversion.',
+            );
+        }
+    }
+    if (cli_truthy($options['convert-legacy'] ?? '')) {
+        if ((string) ($options['confirm'] ?? '') !== 'CONVERT') {
+            throw new UserVisibleException(
+                'CLI_IMPORT_ROLLBACK_CONVERSION_CONFIRMATION_REQUIRED',
+                'Legacy import rollback conversion requires --convert-legacy --confirm=CONVERT.',
+            );
+        }
+        $manifest = (new ImportRollbackService())->convertLegacy($id);
+        echo "Converted legacy import rollback snapshot: {$manifest['id']}\n";
+        echo "Converted backup: {$manifest['backup_file']}\n";
+        echo "The original legacy backup and checksum were preserved.\n";
+        return;
+    }
+    if ($options !== []) {
+        throw new UserVisibleException(
+            'CLI_IMPORT_ROLLBACK_OPTION_INVALID',
+            'Use --convert-legacy --confirm=CONVERT together for legacy conversion.',
+        );
+    }
     $manifest = (new ImportRollbackService())->restore($id);
     echo "Restored import rollback snapshot: {$manifest['id']}\n";
-    echo "Safety copy written: {$manifest['restore_safety_path']}\n";
+    echo "Safety backup created.\n";
 }
 
 function config_export(?string $targetPath): void
 {
     if (!Database::isInstalled()) {
-        throw new RuntimeException('App is not installed.');
+        throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
     }
     $result = (new ConfigurationSnapshotService())->export($targetPath);
-    echo "Configuration export written: {$result['path']}\n";
+    echo "Configuration export written: {$result['file_reference']}\n";
+    echo "Find it in the requested target or configured configuration directory.\n";
     echo "Settings: {$result['settings']}\n";
     echo "Status overrides: {$result['status_overrides']}\n";
     echo "Transition overrides: {$result['transition_overrides']}\n";
@@ -393,10 +541,10 @@ function config_validate(string $path): void
         return;
     }
     if (!Database::isInstalled()) {
-        throw new RuntimeException('App is not installed.');
+        throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
     }
     $result = (new ConfigurationSnapshotService())->validate($path);
-    echo "Configuration valid: {$result['path']}\n";
+    echo "Configuration valid: {$result['file_reference']}\n";
     echo "Workflow: {$result['workflow']}\n";
     echo "Settings: {$result['settings']}\n";
     echo "Status overrides: {$result['status_overrides']}\n";
@@ -406,11 +554,11 @@ function config_validate(string $path): void
 function config_import(string $path): void
 {
     if (!Database::isInstalled()) {
-        throw new RuntimeException('App is not installed.');
+        throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
     }
     $result = (new ConfigurationSnapshotService())->import($path);
-    echo "Configuration imported from: {$path}\n";
-    echo "Safety copy written: {$result['safety_path']}\n";
+    echo "Configuration imported from verified snapshot.\n";
+    echo "Safety backup created.\n";
     echo "Settings: {$result['settings']}\n";
     echo "Status overrides: {$result['status_overrides']}\n";
     echo "Transition overrides: {$result['transition_overrides']}\n";
@@ -424,7 +572,8 @@ function bundle_export(?string $targetDirectory): void
         $targetDirectory = cpe_data_path('exports/portable-' . gmdate('Ymd-His'));
     }
     $result = (new PortalPortabilityService())->export($targetDirectory);
-    echo "Portability bundle written: {$result['path']}\n";
+    echo "Portability bundle written: {$result['bundle_reference']}\n";
+    echo "Find it in the requested target or configured export directory.\n";
     echo "Bundle id: {$result['bundle_id']}\n";
     echo "Modules: {$result['modules']}\n";
     echo "Files: {$result['files']}\n";
@@ -433,11 +582,14 @@ function bundle_export(?string $targetDirectory): void
 function bundle_validate(string $directory): void
 {
     if ($directory === '' || in_array($directory, ['--help', '-h'], true)) {
-        throw new RuntimeException('Usage: php placement bundle-validate /path/to/bundle');
+        throw new UserVisibleException(
+            'CLI_BUNDLE_PATH_REQUIRED',
+            'Usage: php placement bundle-validate /path/to/bundle',
+        );
     }
     require_installed_app();
     $result = (new PortalPortabilityService())->validate($directory);
-    echo "Portability bundle valid: {$result['path']}\n";
+    echo "Portability bundle valid: {$result['bundle_reference']}\n";
     echo "Bundle id: {$result['bundle_id']}\n";
     echo "Institution: {$result['institution_public_id']}\n";
     echo "Modules: " . implode(', ', array_keys($result['modules'])) . "\n";
@@ -453,14 +605,20 @@ function bundle_import(array $args): void
     $options = cli_options($args);
     $directory = (string) ($options['path'] ?? $directory);
     if ($directory === '' || in_array('--help', $args, true) || in_array('-h', $args, true)) {
-        throw new RuntimeException('Usage: php placement bundle-import /path/to/bundle --confirm=IMPORT');
+        throw new UserVisibleException(
+            'CLI_BUNDLE_IMPORT_ARGUMENTS_REQUIRED',
+            'Usage: php placement bundle-import /path/to/bundle --confirm=IMPORT',
+        );
     }
     if (strtoupper((string) ($options['confirm'] ?? '')) !== 'IMPORT') {
-        throw new RuntimeException('Portability import requires --confirm=IMPORT. It only accepts an empty operational database and writes a backup first.');
+        throw new UserVisibleException(
+            'CLI_BUNDLE_IMPORT_CONFIRMATION_REQUIRED',
+            'Portability import requires --confirm=IMPORT and creates a safety backup first.',
+        );
     }
     $result = (new PortalPortabilityService())->import($directory);
     echo "Portability bundle imported: {$result['bundle_id']}\n";
-    echo "Pre-import backup: {$result['backup_path']}\n";
+    echo "Pre-import safety backup created.\n";
     foreach ($result['modules'] as $key => $counts) {
         echo "Module {$key}: " . json_encode($counts, JSON_UNESCAPED_SLASHES) . "\n";
     }
@@ -493,15 +651,16 @@ function workflow_export(array $args): void
     $repository = new WorkflowRepository(Database::connection());
     $versionId = (int) ($options['version'] ?? $repository->activeVersionId() ?? 0);
     if ($versionId <= 0) {
-        throw new RuntimeException('Workflow export requires --version=ID or an active version.');
+        throw new UserVisibleException('CLI_WORKFLOW_VERSION_REQUIRED', 'Workflow export requires --version=ID or an active version.');
     }
     $workflow = $repository->workflowForVersion($versionId);
     if ($workflow === null) {
-        throw new RuntimeException('Workflow version not found.');
+        throw new UserVisibleException('CLI_WORKFLOW_VERSION_NOT_FOUND', 'Workflow version not found.');
     }
     $target = (string) ($options['target'] ?? cpe_data_path('config/workflow-' . $workflow['key'] . '-v' . $workflow['version_number'] . '.json'));
     $result = (new WorkflowDefinitionFileService(Database::connection()))->export($versionId, $target);
-    echo "Workflow definition written: {$result['path']}\n";
+    echo "Workflow definition written: {$result['file_reference']}\n";
+    echo "Find it in the requested target or configured configuration directory.\n";
     echo "Workflow: {$result['workflow_key']} version {$result['version']}\n";
 }
 
@@ -509,7 +668,7 @@ function workflow_validate(string $path): void
 {
     require_installed_app();
     $result = (new WorkflowDefinitionFileService(Database::connection()))->validate($path);
-    echo "Workflow definition valid: {$result['path']}\n";
+    echo "Workflow definition valid: {$result['file_reference']}\n";
     echo "Workflow: {$result['workflow_key']}\n";
     echo "States: {$result['states']}\n";
     echo "Transitions: {$result['transitions']}\n";
@@ -533,7 +692,10 @@ function workflow_simulate(array $args): void
     $versionId = (int) ($options['version'] ?? $repository->activeVersionId() ?? 0);
     $transitionKeys = array_values(array_filter(array_map('trim', explode(',', (string) ($options['transitions'] ?? '')))));
     if ($versionId <= 0 || $transitionKeys === []) {
-        throw new RuntimeException('Use workflow-simulate --version=ID --transitions=key_one,key_two [--roles=role_one,role_two].');
+        throw new UserVisibleException(
+            'CLI_WORKFLOW_SIMULATION_ARGUMENTS_REQUIRED',
+            'Use workflow-simulate --version=ID --transitions=key_one,key_two [--roles=role_one,role_two].',
+        );
     }
     $roles = array_values(array_filter(array_map('trim', explode(',', (string) ($options['roles'] ?? 'admin')))));
     $steps = [];
@@ -568,7 +730,7 @@ function workflow_migration_preview(array $args): void
     $options = cli_options($args);
     $versionId = (int) ($options['to-version'] ?? 0);
     if ($versionId <= 0) {
-        throw new RuntimeException('Workflow migration preview requires --to-version=ID.');
+        throw new UserVisibleException('CLI_WORKFLOW_VERSION_REQUIRED', 'Workflow migration preview requires --to-version=ID.');
     }
     $result = (new WorkflowMigrationService(Database::connection()))->preview($versionId, workflow_state_map((string) ($options['map'] ?? '')));
     print_workflow_migration_preview($result);
@@ -581,17 +743,21 @@ function workflow_migrate(array $args): void
     $versionId = (int) ($options['to-version'] ?? 0);
     $reason = trim((string) ($options['reason'] ?? ''));
     if ($versionId <= 0 || $reason === '' || (string) ($options['confirm'] ?? '') !== (string) $versionId) {
-        throw new RuntimeException('Use workflow-migrate --to-version=ID --reason="..." --confirm=ID [--map=old:new,...].');
+        throw new UserVisibleException(
+            'CLI_WORKFLOW_MIGRATION_ARGUMENTS_REQUIRED',
+            'Use workflow-migrate --to-version=ID --reason="..." --confirm=ID [--map=old:new,...].',
+        );
     }
     $service = new WorkflowMigrationService(Database::connection());
     $map = workflow_state_map((string) ($options['map'] ?? ''));
     $preview = $service->preview($versionId, $map);
     if ($preview['unmapped_states'] !== []) {
         print_workflow_migration_preview($preview);
-        throw new RuntimeException('Supply mappings for every unmapped state before migration.');
+        throw new UserVisibleException('CLI_WORKFLOW_MAPPING_REQUIRED', 'Supply mappings for every unmapped state before migration.');
     }
     $backup = create_database_backup('workflow-migration');
-    echo "Workflow migration backup written: {$backup}\n";
+    echo "Workflow migration backup written: {$backup->reference()}\n";
+    echo "Find it in CPE_BACKUP_DIR or the application's configured backup directory.\n";
     $result = $service->migrate($versionId, $map, null, 'admin', $reason);
     echo "Applications migrated: {$result['migrated']}\n";
 }
@@ -601,11 +767,11 @@ function workflow_state_map(string $value): array
     $map = [];
     foreach (array_filter(array_map('trim', explode(',', $value))) as $pair) {
         if (!str_contains($pair, ':')) {
-            throw new RuntimeException('Workflow state mappings use old:new pairs.');
+            throw new UserVisibleException('CLI_WORKFLOW_MAPPING_INVALID', 'Workflow state mappings use old:new pairs.');
         }
         [$from, $to] = array_map('trim', explode(':', $pair, 2));
         if ($from === '' || $to === '') {
-            throw new RuntimeException('Workflow state mappings cannot be empty.');
+            throw new UserVisibleException('CLI_WORKFLOW_MAPPING_INVALID', 'Workflow state mappings cannot be empty.');
         }
         $map[$from] = $to;
     }
@@ -627,7 +793,7 @@ function print_workflow_migration_preview(array $result): void
 function require_installed_app(): void
 {
     if (!Database::isInstalled()) {
-        throw new RuntimeException('App is not installed.');
+        throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
     }
 }
 
@@ -655,7 +821,7 @@ function module_enable(array $args): void
     $options = cli_options($args);
     $moduleKey = strtolower(trim((string) ($options['module'] ?? '')));
     if ($moduleKey === '') {
-        throw new RuntimeException('Use module-enable --module=MODULE_KEY.');
+        throw new UserVisibleException('CLI_MODULE_REQUIRED', 'Use module-enable --module=MODULE_KEY.');
     }
     (new ModuleLifecycleService(Database::connection()))->enable($moduleKey);
     echo "Module enabled: {$moduleKey}\n";
@@ -667,7 +833,7 @@ function module_disable(array $args): void
     $options = cli_options($args);
     $moduleKey = strtolower(trim((string) ($options['module'] ?? '')));
     if ($moduleKey === '' || (string) ($options['confirm'] ?? '') !== $moduleKey) {
-        throw new RuntimeException('Use module-disable --module=MODULE_KEY --confirm=MODULE_KEY.');
+        throw new UserVisibleException('CLI_MODULE_CONFIRMATION_REQUIRED', 'Use module-disable --module=MODULE_KEY --confirm=MODULE_KEY.');
     }
     (new ModuleLifecycleService(Database::connection()))->disable($moduleKey);
     echo "Module disabled; data retained: {$moduleKey}\n";
@@ -688,7 +854,7 @@ function sso_link(array $args): void
 function export_snapshot(array $args): void
 {
     if (!Database::isInstalled()) {
-        throw new RuntimeException('App is not installed.');
+        throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
     }
     if (in_array('--help', $args, true) || in_array('-h', $args, true)) {
         export_snapshot_help();
@@ -696,7 +862,8 @@ function export_snapshot(array $args): void
     }
     [$targetDir, $profile] = export_snapshot_args($args);
     $result = (new SnapshotExporter())->export($targetDir, $profile);
-    echo "Export written: {$result['dir']}\n";
+    echo "Export written: {$result['export_reference']}\n";
+    echo "Find it in the requested target or configured export directory.\n";
     echo "Profile: {$result['profile']}\n";
     foreach ($result['files'] as $file) {
         echo "  {$file['file']}: {$file['rows']} rows\n";
@@ -711,7 +878,7 @@ function export_snapshot_args(array $args): array
         $arg = (string) $args[$i];
         if ($arg === '--profile') {
             if (!isset($args[$i + 1])) {
-                throw new RuntimeException('Missing value for --profile.');
+                throw new UserVisibleException('CLI_EXPORT_PROFILE_REQUIRED', 'Missing value for --profile.');
             }
             $profile = (string) $args[++$i];
             continue;
@@ -721,10 +888,10 @@ function export_snapshot_args(array $args): array
             continue;
         }
         if (str_starts_with($arg, '--')) {
-            throw new RuntimeException('Unknown export option: ' . $arg);
+            throw new UserVisibleException('CLI_EXPORT_OPTION_INVALID', 'Unknown export option. Run `php placement export --help`.');
         }
         if ($targetDir !== null) {
-            throw new RuntimeException('Only one export target directory can be supplied.');
+            throw new UserVisibleException('CLI_EXPORT_TARGET_INVALID', 'Only one export target directory can be supplied.');
         }
         $targetDir = $arg;
     }
@@ -734,7 +901,7 @@ function export_snapshot_args(array $args): array
 function placement_report(): void
 {
     if (!Database::isInstalled()) {
-        throw new RuntimeException('App is not installed.');
+        throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
     }
     $summary = (new PlacementService())->placementSummary();
     $handle = fopen('php://output', 'w');
@@ -767,7 +934,7 @@ function placement_report(): void
 function privacy_report(): void
 {
     if (!Database::isInstalled()) {
-        throw new RuntimeException('App is not installed.');
+        throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
     }
     $handle = fopen('php://output', 'w');
     Csv::writeRow($handle, ['key', 'count']);
@@ -780,7 +947,7 @@ function privacy_report(): void
 function anonymize_candidate(array $args): void
 {
     if (!Database::isInstalled()) {
-        throw new RuntimeException('App is not installed.');
+        throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
     }
     if ($args === [] || in_array('--help', $args, true) || in_array('-h', $args, true)) {
         anonymize_candidate_help();
@@ -788,16 +955,19 @@ function anonymize_candidate(array $args): void
     }
     $externalId = (string) array_shift($args);
     if (str_starts_with($externalId, '--')) {
-        throw new RuntimeException('Provide the candidate external ID before options.');
+        throw new UserVisibleException('CLI_CANDIDATE_REQUIRED', 'Provide the candidate external ID before options.');
     }
     $options = cli_options($args);
     $confirm = (string) ($options['confirm'] ?? '');
     if ($confirm !== $externalId) {
-        throw new RuntimeException('Refusing to anonymize without --confirm=' . $externalId);
+        throw new UserVisibleException(
+            'CLI_ANONYMIZE_CONFIRMATION_REQUIRED',
+            'Refusing to anonymize without a matching --confirm value.',
+        );
     }
     $result = (new PrivacyService())->anonymizeCandidate($externalId, null);
     echo "Candidate anonymized: {$result['external_id']}\n";
-    echo "Safety copy written: {$result['safety_path']}\n";
+    echo "Safety backup created.\n";
     echo "Applications retained: {$result['applications']}\n";
     echo "Preference requests closed: {$result['preference_requests']}\n";
     echo "Wanted alerts closed: {$result['wanted_alerts']}\n";
@@ -918,20 +1088,23 @@ function write_release_checksum_manifest(array $paths, string $target): void
 function verify_release_package(string $path): void
 {
     if ($path === '' || !is_file($path)) {
-        throw new RuntimeException('Provide a readable release package path.');
+        throw new UserVisibleException('CLI_RELEASE_PACKAGE_REQUIRED', 'Provide a readable release package path.');
     }
     $checksumPath = release_package_checksum_path($path);
     if (!is_file($checksumPath)) {
-        throw new RuntimeException('Release package checksum not found: ' . $checksumPath);
+        throw new UserVisibleException('CLI_RELEASE_CHECKSUM_REQUIRED', 'Release package checksum not found.');
     }
     $contents = trim((string) file_get_contents($checksumPath));
     $expected = strtolower(strtok($contents, " \t"));
     if (!preg_match('/^[a-f0-9]{64}$/', $expected)) {
-        throw new RuntimeException('Release package checksum file is invalid: ' . $checksumPath);
+        throw new UserVisibleException('CLI_RELEASE_CHECKSUM_INVALID', 'Release package checksum file is invalid.');
     }
     $actual = hash_file('sha256', $path);
     if ($actual === false || !hash_equals($expected, strtolower($actual))) {
-        throw new RuntimeException('Release package checksum verification failed for: ' . $path);
+        throw new UserVisibleException(
+            'CLI_RELEASE_CHECKSUM_MISMATCH',
+            'Release package checksum verification failed.',
+        );
     }
     if (!class_exists(PharData::class)) {
         throw new RuntimeException('PharData is required to inspect a release package.');
@@ -980,7 +1153,7 @@ function verify_release_package(string $path): void
         }
         $entries[$relative] = true;
     }
-    foreach (['.htaccess', 'README.md', 'INSTALL.md', 'placement', 'public/.htaccess', 'public/index.php', 'database/.htaccess', 'database/migrations/001_initial.sql', 'database/migrations/pgsql/001_portal_baseline.sql', 'docs/environment.md', 'examples/env/local.env.example', 'examples/deployment/apache-vhost.conf', 'examples/deployment/nginx-server.conf', 'tests/.htaccess', 'data/.gitkeep', 'data/.htaccess'] as $required) {
+    foreach (['.htaccess', 'README.md', 'INSTALL.md', 'placement', 'app/Core/Backup/BackupArtifact.php', 'app/Core/Backup/BackupMetadata.php', 'app/Core/Backup/LegacySqliteBackupConverter.php', 'app/Core/Persistence/DatabaseConnectionInvalidException.php', 'app/Core/Persistence/DatabaseLock.php', 'app/Core/Persistence/DatabaseOwnership.php', 'app/Core/Persistence/SqlMigrationRunner.php', 'app/Security/OperationalBearerAuthorization.php', 'app/Security/SetupAuthorization.php', 'app/Security/SetupAuthorizationDenied.php', 'app/Security/SetupAuthorizationStageFailure.php', 'app/Security/SetupHttp.php', 'app/Views/setup-unlock.php', 'public/.htaccess', 'public/health.php', 'public/index.php', 'public/install.php', 'public/metrics.php', 'database/.htaccess', 'database/migrations/001_initial.sql', 'database/migrations/pgsql/001_portal_baseline.sql', 'docs/environment.md', 'docs/managed-hosting-contract.md', 'docs/disaster-recovery.md', 'docs/releases/v0.1.0-alpha.2.md', 'examples/env/local.env.example', 'examples/deployment/apache-vhost.conf', 'examples/deployment/nginx-server.conf', 'tests/.htaccess', 'tests/alpha1_release_acceptance.php', 'tests/backup_restore_contract.php', 'tests/database_connection_cleanup_contract.php', 'tests/database_ownership_contract.php', 'tests/database_ownership_worker.php', 'tests/legacy_backup_compatibility_contract.php', 'tests/migration_lock_contract.php', 'tests/migration_lock_worker.php', 'tests/install_concurrency_contract.php', 'tests/install_concurrency_worker.php', 'tests/setup_authorization_contract.php', 'tests/hosted_install_contract.php', 'tests/managed_hosting_contract.php', 'data/.gitkeep', 'data/.htaccess'] as $required) {
         if (!isset($entries[$required])) {
             throw new RuntimeException('Release package is missing required file: ' . $required);
         }
@@ -990,6 +1163,12 @@ function verify_release_package(string $path): void
             if ($entry === $forbidden || str_starts_with($entry, $forbidden . '/')) {
                 throw new RuntimeException('Release package contains forbidden path: ' . $forbidden);
             }
+        }
+    }
+    foreach (array_keys($entries) as $entry) {
+        if (str_starts_with($entry, 'data/')
+            && !in_array($entry, ['data/.gitkeep', 'data/.htaccess'], true)) {
+            throw new RuntimeException('Release package contains forbidden runtime data.');
         }
     }
     echo "Package checksum verified: {$path}\n";
@@ -1059,7 +1238,7 @@ function release_package_files(): array
 function deliver_notifications(array $args): void
 {
     if (!Database::isInstalled()) {
-        throw new RuntimeException('App is not installed.');
+        throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
     }
     Database::migrate();
     $options = cli_options($args);
@@ -1068,13 +1247,18 @@ function deliver_notifications(array $args): void
     $dryRun = cli_truthy($options['dry-run'] ?? '');
     $result = (new NotificationDeliveryService())->deliverPending($channel, $limit, $dryRun);
     echo "Notification deliveries checked: {$result['checked']}\n";
+    echo "Claimed: {$result['claimed']}\n";
     echo "Delivered: {$result['delivered']}\n";
     echo "Failed: {$result['failed']}\n";
+    echo "Retrying: {$result['retrying']}\n";
+    echo "Dead-lettered: {$result['dead_lettered']}\n";
+    echo "Outcome unknown: {$result['outcome_unknown']}\n";
+    echo "Claim lost: {$result['claim_lost']}\n";
     if ($dryRun) {
         echo "Dry run: yes\n";
     }
     foreach ($result['rows'] as $row) {
-        echo "{$row['id']},{$row['channel']},{$row['status']},{$row['target']}";
+        echo "{$row['id']},{$row['channel']},{$row['status']}";
         if ($row['error'] !== '') {
             echo ',' . $row['error'];
         }
@@ -1085,7 +1269,7 @@ function deliver_notifications(array $args): void
 function work_outbox(array $args): void
 {
     if (!Database::isInstalled()) {
-        throw new RuntimeException('App is not installed.');
+        throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
     }
     Database::migrate();
     $options = cli_options($args);
@@ -1094,7 +1278,10 @@ function work_outbox(array $args): void
     echo "Domain events claimed: {$result['claimed']}\n";
     echo "Delivered: {$result['delivered']}\n";
     echo "Failed: {$result['failed']}\n";
+    echo "Retrying: {$result['retrying']}\n";
     echo "Dead-lettered: {$result['dead_lettered']}\n";
+    echo "Outcome unknown: {$result['outcome_unknown']}\n";
+    echo "Claim lost: {$result['claim_lost']}\n";
     foreach ($result['rows'] as $row) {
         echo "{$row['public_id']},{$row['status']}";
         if ($row['destination'] !== '') {
@@ -1105,8 +1292,11 @@ function work_outbox(array $args): void
         }
         echo "\n";
     }
-    if ($result['failed'] > 0) {
-        throw new RuntimeException('One or more domain events could not be delivered.');
+    if ($result['failed'] > 0 || $result['outcome_unknown'] > 0) {
+        throw new UserVisibleException(
+            'CLI_DOMAIN_EVENT_DELIVERY_FAILED',
+            'One or more domain events could not be delivered. Review the incident references above.',
+        );
     }
 }
 
@@ -1117,12 +1307,15 @@ function certify_notifications(array $args): void
         return;
     }
     if (!Database::isInstalled()) {
-        throw new RuntimeException('App is not installed.');
+        throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
     }
     $options = cli_options($args);
     $channel = strtolower(trim((string) ($options['channel'] ?? '')));
     if ($channel === '') {
-        throw new RuntimeException('Provide --channel=sms or --channel=whatsapp.');
+        throw new UserVisibleException(
+            'CLI_NOTIFICATION_CHANNEL_REQUIRED',
+            'Provide --channel=sms or --channel=whatsapp.',
+        );
     }
     $requireLiveGateway = cli_truthy($options['require-live'] ?? '');
 
@@ -1131,7 +1324,10 @@ function certify_notifications(array $args): void
         echo strtoupper((string) $check['status']) . ' ' . $check['key'] . ' - ' . $check['message'] . "\n";
     }
     if (!$report['ok']) {
-        throw new RuntimeException(strtoupper($channel) . ' notification certification preflight failed.');
+        throw new UserVisibleException(
+            'CLI_NOTIFICATION_CERTIFICATION_FAILED',
+            'The notification certification preflight failed. Review the checks above.',
+        );
     }
     echo "Notification certification preflight passed for {$channel}.\n";
 }
@@ -1145,7 +1341,7 @@ function smoke_http(array $args): void
     $options = cli_options($args);
     $baseUrl = rtrim((string) ($options['base-url'] ?? getenv('CPE_SMOKE_BASE_URL') ?: 'http://127.0.0.1:8000'), '/');
     if (!filter_var($baseUrl, FILTER_VALIDATE_URL) || !preg_match('/^https?:\/\//', $baseUrl)) {
-        throw new RuntimeException('Provide a valid http(s) --base-url.');
+        throw new UserVisibleException('CLI_SMOKE_TARGET_INVALID', 'Provide a valid http(s) --base-url.');
     }
     $email = (string) ($options['email'] ?? getenv('CPE_SMOKE_EMAIL') ?: 'admin@example.test');
     $password = (string) ($options['password'] ?? getenv('CPE_SMOKE_PASSWORD') ?: getenv('CPE_ADMIN_PASSWORD') ?: 'password123');
@@ -1153,10 +1349,13 @@ function smoke_http(array $args): void
     $restrictedPassword = (string) ($options['restricted-password'] ?? getenv('CPE_SMOKE_RESTRICTED_PASSWORD') ?: $password);
     $timeout = max(1, min(30, (int) ($options['timeout'] ?? 5)));
     if (!filter_var($email, FILTER_VALIDATE_EMAIL) || $password === '') {
-        throw new RuntimeException('Provide a valid --email and non-empty --password.');
+        throw new UserVisibleException('CLI_SMOKE_CREDENTIALS_INVALID', 'Provide a valid --email and non-empty --password.');
     }
     if ($restrictedEmail !== '' && (!filter_var($restrictedEmail, FILTER_VALIDATE_EMAIL) || $restrictedPassword === '')) {
-        throw new RuntimeException('Provide a valid --restricted-email and non-empty --restricted-password.');
+        throw new UserVisibleException(
+            'CLI_SMOKE_CREDENTIALS_INVALID',
+            'Provide a valid --restricted-email and non-empty --restricted-password.',
+        );
     }
 
     $cookies = [];
@@ -1327,10 +1526,13 @@ function load_smoke(array $args): void
     $minimumSuccessRate = (float) ($options['min-success-rate'] ?? 1.0);
     $maximumP95 = (float) ($options['max-p95-ms'] ?? 2000);
     if ($minimumSuccessRate < 0 || $minimumSuccessRate > 1 || $maximumP95 <= 0) {
-        throw new RuntimeException('Load thresholds require --min-success-rate between 0 and 1 and positive --max-p95-ms.');
+        throw new UserVisibleException(
+            'CLI_LOAD_THRESHOLD_INVALID',
+            'Load thresholds require --min-success-rate between 0 and 1 and positive --max-p95-ms.',
+        );
     }
     $report = (new HttpLoadProbe())->run($baseUrl, $path, $requests, $concurrency, $timeout);
-    echo "URL: {$report['url']}\n";
+    echo "Target: {$report['url']}\n";
     echo "Transport: {$report['transport']}\n";
     echo "Requests: {$report['requests']} ({$report['successful']} successful, {$report['failed']} failed)\n";
     echo 'Success rate: ' . number_format($report['success_rate'] * 100, 2) . "%\n";
@@ -1355,11 +1557,21 @@ function browser_qa_plan(array $args): void
     $options = cli_options($args);
     $format = strtolower(trim((string) ($options['format'] ?? 'text')));
     if (!in_array($format, ['text', 'markdown'], true)) {
-        throw new RuntimeException('Browser QA plan format must be text or markdown.');
+        throw new UserVisibleException('CLI_BROWSER_QA_FORMAT_INVALID', 'Browser QA plan format must be text or markdown.');
     }
     $baseUrl = rtrim((string) ($options['base-url'] ?? getenv('CPE_QA_BASE_URL') ?: 'http://127.0.0.1:8000'), '/');
-    if (!filter_var($baseUrl, FILTER_VALIDATE_URL) || !preg_match('/^https?:\/\//', $baseUrl)) {
-        throw new RuntimeException('Provide a valid http(s) --base-url.');
+    $baseUrlParts = parse_url($baseUrl);
+    if (!filter_var($baseUrl, FILTER_VALIDATE_URL)
+        || !preg_match('/^https?:\/\//', $baseUrl)
+        || !is_array($baseUrlParts)
+        || isset($baseUrlParts['user'])
+        || isset($baseUrlParts['pass'])
+        || isset($baseUrlParts['query'])
+        || isset($baseUrlParts['fragment'])) {
+        throw new UserVisibleException(
+            'CLI_BROWSER_QA_TARGET_INVALID',
+            'Provide a plain http(s) --base-url without credentials, query parameters, or fragments.',
+        );
     }
     $candidateTarget = max(1, min(5000, (int) ($options['candidate-target'] ?? 80)));
     $companyTarget = max(1, min(500, (int) ($options['company-target'] ?? 10)));
@@ -1674,7 +1886,7 @@ function require_existing_company_code(PlacementService $service, string $compan
 {
     $companyCode = strtoupper(trim($companyCode));
     if ($companyCode !== '' && !$service->companyExists($companyCode)) {
-        throw new RuntimeException("Company code not found: {$companyCode}");
+        throw new UserVisibleException('CLI_COMPANY_NOT_FOUND', 'Company code not found.');
     }
     return $companyCode;
 }
@@ -1774,6 +1986,29 @@ function publication_check(): void
         'docs/environment.md',
         'docs/release-checklist.md',
         'docs/migration-from-legacy.md',
+        'docs/releases/v0.1.0-alpha.2.md',
+        'app/Core/Backup/BackupArtifact.php',
+        'app/Core/Backup/BackupMetadata.php',
+        'app/Core/Backup/LegacySqliteBackupConverter.php',
+        'app/Core/Persistence/DatabaseConnectionInvalidException.php',
+        'app/Security/OperationalBearerAuthorization.php',
+        'app/Security/SetupAuthorization.php',
+        'app/Security/SetupAuthorizationDenied.php',
+        'app/Security/SetupAuthorizationStageFailure.php',
+        'app/Security/SetupHttp.php',
+        'app/Views/setup-unlock.php',
+        'public/install.php',
+        'public/health.php',
+        'public/metrics.php',
+        'tests/install_concurrency_contract.php',
+        'tests/install_concurrency_worker.php',
+        'tests/alpha1_release_acceptance.php',
+        'tests/backup_restore_contract.php',
+        'tests/database_connection_cleanup_contract.php',
+        'tests/legacy_backup_compatibility_contract.php',
+        'tests/setup_authorization_contract.php',
+        'tests/hosted_install_contract.php',
+        'tests/managed_hosting_contract.php',
         'examples/env/local.env.example',
         'examples/deployment/apache-vhost.conf',
         'examples/deployment/nginx-server.conf',
@@ -1787,7 +2022,7 @@ function publication_check(): void
     }
 
     $gitignore = is_file(__DIR__ . '/.gitignore') ? (string) file_get_contents(__DIR__ . '/.gitignore') : '';
-    foreach (['/.legacy-private/', '/http/', '/dist/', '/.env', '/.env.*', '/config/local.php', '/data/*.sqlite', '/data/backups/', '/data/config/', '/data/imports/', '*.zip', '*.7z', '*.rar', '*.xlsx', '*.docx', '*.sql', '!/database/migrations/*.sql', '!/database/migrations/pgsql/*.sql'] as $pattern) {
+    foreach (['/.legacy-private/', '/http/', '/dist/', '/.env', '/.env.*', '/config/local.php', '/data/*.sqlite', '/data/backups/', '/data/config/', '/data/imports/', '/data/setup/', '/data/restore-staging/', '*.zip', '*.7z', '*.rar', '*.xlsx', '*.docx', '*.sql', '!/database/migrations/*.sql', '!/database/migrations/pgsql/*.sql'] as $pattern) {
         if (!str_contains($gitignore, $pattern)) {
             $failures[] = "Missing .gitignore protection: {$pattern}";
         }
@@ -1795,6 +2030,10 @@ function publication_check(): void
 
     foreach (publication_forbidden_files(__DIR__) as $path) {
         $failures[] = "Forbidden publish-risk file outside private/runtime paths: {$path}";
+    }
+
+    foreach (publication_tracked_data_files(__DIR__) as $path) {
+        $failures[] = "Forbidden tracked runtime data file: {$path}";
     }
 
     foreach (publication_secret_findings(__DIR__) as $finding) {
@@ -1837,6 +2076,8 @@ function publication_forbidden_files(string $root): array
                     'data/exports',
                     'data/imports',
                     'data/privacy',
+                    'data/restore-staging',
+                    'data/setup',
                     'dist',
                     'http',
                     'website/.playwright-cli',
@@ -1877,6 +2118,37 @@ function publication_forbidden_files(string $root): array
     }
     sort($failures);
     return $failures;
+}
+
+/** @return array<int, string> */
+function publication_tracked_data_files(string $root): array
+{
+    if (!file_exists($root . '/.git')) {
+        return [];
+    }
+    $process = proc_open(
+        ['git', '-C', $root, 'ls-files', '-z', '--', 'data'],
+        [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+        $pipes,
+    );
+    if (!is_resource($process)) {
+        return ['data/[tracking-inspection-failed]'];
+    }
+    $stdout = stream_get_contents($pipes[1]);
+    stream_get_contents($pipes[2]);
+    fclose($pipes[1]);
+    fclose($pipes[2]);
+    if (proc_close($process) !== 0 || !is_string($stdout)) {
+        return ['data/[tracking-inspection-failed]'];
+    }
+    $forbidden = [];
+    foreach (array_filter(explode("\0", $stdout), 'strlen') as $path) {
+        if (!in_array($path, ['data/.gitkeep', 'data/.htaccess'], true)) {
+            $forbidden[] = $path;
+        }
+    }
+    sort($forbidden);
+    return $forbidden;
 }
 
 /**
@@ -2028,8 +2300,9 @@ function help(): void
     echo "  php placement privacy-person-report --person=PERSON_PUBLIC_ID\n";
     echo "  php placement privacy-person-erase --person=PERSON_PUBLIC_ID --reason=... --confirm=PERSON_PUBLIC_ID\n";
     echo "  php placement backup\n";
+    echo "  php placement convert-legacy-backup /path/to/legacy.sqlite --confirm=CONVERT\n";
     echo "  php placement restore /path/to/app.sqlite\n";
-    echo "  php placement rollback-import [--list|ROLLBACK_ID]\n";
+    echo "  php placement rollback-import [--list|ROLLBACK_ID [--convert-legacy --confirm=CONVERT]]\n";
     echo "  php placement config-export [target-json]\n";
     echo "  php placement config-validate /path/to/config.json\n";
     echo "  php placement config-import /path/to/config.json\n";
@@ -2071,7 +2344,8 @@ function setup_help(): void
     echo "  php placement setup --check\n";
     echo "\n";
     echo "Setup does not install silently. It runs the system preflight, then starts\n";
-    echo "the local site so you can review and submit the guided setup form.\n";
+    echo "the local site and prints a one-time 20-minute code for the browser unlock\n";
+    echo "page. Setup accepts only loopback binds and is unsupported behind a proxy.\n";
 }
 
 function upgrade_help(): void
@@ -2214,11 +2488,14 @@ function cli_options(array $args): array
     for ($i = 0; $i < count($args); $i++) {
         $arg = (string) $args[$i];
         if (!str_starts_with($arg, '--')) {
-            throw new RuntimeException('Unexpected argument: ' . $arg);
+            throw new UserVisibleException(
+                'CLI_ARGUMENT_INVALID',
+                'Unexpected positional argument. Run the command with --help for accepted options.',
+            );
         }
         $pair = substr($arg, 2);
         if ($pair === '') {
-            throw new RuntimeException('Empty option is not valid.');
+            throw new UserVisibleException('CLI_OPTION_INVALID', 'An empty option is not valid.');
         }
         if (str_contains($pair, '=')) {
             [$key, $value] = explode('=', $pair, 2);

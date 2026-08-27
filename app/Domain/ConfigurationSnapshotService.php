@@ -4,9 +4,11 @@ declare(strict_types=1);
 
 namespace App\Domain;
 
+use App\Core\Http\UserVisibleException;
 use App\Core\Install\PortalKernelSynchronizer;
 use App\Core\Backup\DatabaseBackupService;
 use App\Core\Portal;
+use App\Core\Persistence\TransactionRollbackGuard;
 use App\Modules\Placement\Workflow\WorkflowPublisher;
 use App\Modules\Placement\Workflow\WorkflowRepository;
 use App\Support\Database;
@@ -84,7 +86,7 @@ final class ConfigurationSnapshotService
             throw new RuntimeException('Could not write configuration export: ' . $path);
         }
         return [
-            'path' => $path,
+            'file_reference' => $this->fileReference($path),
             'settings' => count($payload['settings']),
             'status_overrides' => count($payload['workflow_status_overrides']),
             'transition_overrides' => count($payload['workflow_transition_overrides']),
@@ -101,7 +103,7 @@ final class ConfigurationSnapshotService
         $payload = $this->readPayload($path);
         $normalized = $this->normalizePayload($payload);
         return [
-            'path' => $path,
+            'file_reference' => $this->fileReference($path),
             'workflow' => (string) ($normalized['settings']['workflow'] ?? $this->currentWorkflowKey()),
             'settings' => count($normalized['settings']),
             'status_overrides' => count($normalized['workflow_status_overrides']),
@@ -138,7 +140,7 @@ final class ConfigurationSnapshotService
     private function importNormalized(array $normalized, bool $createSafetyCopy = true): array
     {
         $this->assertConfigurationMutable();
-        $safetyPath = $createSafetyCopy ? $this->safetyCopy() : '';
+        $safety = $createSafetyCopy ? $this->safetyCopy() : null;
 
         $ownsTransaction = !$this->pdo->inTransaction();
         if ($ownsTransaction) {
@@ -166,8 +168,8 @@ final class ConfigurationSnapshotService
                 $this->pdo->commit();
             }
         } catch (\Throwable $e) {
-            if ($ownsTransaction && $this->pdo->inTransaction()) {
-                $this->pdo->rollBack();
+            if ($ownsTransaction) {
+                TransactionRollbackGuard::rethrow($this->pdo, $e, 'configuration.import', $safety !== null);
             }
             throw $e;
         }
@@ -181,7 +183,7 @@ final class ConfigurationSnapshotService
         Portal::reset();
 
         return [
-            'safety_path' => $safetyPath,
+            'safety_reference' => $safety?->reference() ?? '',
             'settings' => count($normalized['settings']),
             'status_overrides' => count($normalized['workflow_status_overrides']),
             'transition_overrides' => count($normalized['workflow_transition_overrides']),
@@ -191,7 +193,7 @@ final class ConfigurationSnapshotService
     public function assertConfigurationMutable(): void
     {
         if ($this->isConfigurationFrozen()) {
-            throw new RuntimeException('Configuration changes are frozen. Unfreeze configuration before changing settings, workflow, or importing configuration.');
+            throw new UserVisibleException('CONFIGURATION_FROZEN', 'Configuration changes are frozen. Unfreeze configuration before changing settings, workflow, or importing configuration.');
         }
     }
 
@@ -560,9 +562,15 @@ final class ConfigurationSnapshotService
         }
     }
 
-    private function safetyCopy(): string
+    private function safetyCopy(): \App\Core\Backup\BackupArtifact
     {
-        return (string) (new DatabaseBackupService($this->pdo))->create('config-import-safety', $this->configDir())['path'];
+        return (new DatabaseBackupService($this->pdo))->create('config-import-safety', $this->configDir());
+    }
+
+    private function fileReference(string $path): string
+    {
+        $hash = is_file($path) ? hash_file('sha256', $path) : false;
+        return 'config_' . substr(is_string($hash) ? $hash : hash('sha256', basename($path)), 0, 24);
     }
 
     private function configDir(): string

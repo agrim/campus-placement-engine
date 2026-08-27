@@ -38,6 +38,8 @@
 /data/exports/
 /data/imports/
 /data/privacy/
+/data/setup/
+/data/restore-staging/
 /data/restore-safety-*.sqlite
 
 # Local browser QA scratch artifacts.

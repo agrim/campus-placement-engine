@@ -13,8 +13,8 @@ extract it, and run:
 php placement setup
 ```
 
-Open the address printed in the terminal. The guided setup checks the system,
-then helps you configure your institution, placement cycle, workflow,
+Open the address printed in the terminal and enter the one-time setup code shown
+there. The guided setup checks the system, then helps you configure your institution, placement cycle, workflow,
 terminology, first administrator, and optional synthetic sample data. See
 [INSTALL.md](INSTALL.md) for local and university-hosting instructions.
 
@@ -38,7 +38,7 @@ This modernization is intentionally dependency-light:
 Requirements:
 
 - PHP 8.2 or newer.
-- `pdo_sqlite` and `sqlite3` PHP extensions.
+- `mbstring`, `pdo_sqlite`, and `sqlite3` PHP extensions.
 - A writable `data/` directory.
 
 On macOS, if PHP is missing or too old, the maintainable local install path is:
@@ -47,10 +47,8 @@ On macOS, if PHP is missing or too old, the maintainable local install path is:
 brew install php
 ```
 
-Repository contributors can start the same local server directly with
-`php placement serve`.
-
-Open `http://localhost:8000/` and complete the installer.
+For an uninstalled checkout, start the authorized local setup server with
+`php placement setup`, then open `http://localhost:8000/install.php`.
 The browser installer shows the same PHP, SQLite, and writable-directory
 preflight as `php placement doctor`, guides college identity, cycle, workflow,
 terminology, admin, and dummy-data choices, and will not install until required
@@ -58,9 +56,14 @@ checks are passing. The default browser setup can start with a fully live
 synthetic placement drive. Use it to learn the board, then clear dummy data from
 System before importing actual data. After the database has an `installed_at`
 marker, the installer is locked; use a different `CPE_DB_PATH` for a fresh setup
-instead of rerunning it over live data. `php placement serve` is just a small
-wrapper around `php -S 127.0.0.1:8000 -t public`; no extra server dependency is
-introduced.
+instead of rerunning it over live data. `php placement setup` accepts only a
+loopback address and prints a strong one-time setup code to the trusted local
+terminal. Enter that code on the unlock-only browser page within 20 minutes.
+The code is passed to the child server only through its environment and is never
+placed in a command argument, URL, redirect, form default, session, or database.
+Local terminal access is therefore part of this setup trust boundary.
+`php placement serve` is the ordinary post-install development server and does
+not grant browser setup authority.
 
 For a technical first-run setup from CLI:
 
@@ -112,6 +115,8 @@ testing.
 php placement setup --check
 php placement doctor
 php tests/run.php
+php tests/install_concurrency_contract.php
+php tests/setup_authorization_contract.php
 ```
 
 `doctor` is the local preflight gate. It prints `OK` or `ERROR` for PHP,
@@ -138,6 +143,7 @@ php placement anonymize-candidate C001 --confirm=C001
 php placement privacy-person-report --person=PERSON_PUBLIC_ID
 php placement privacy-person-erase --person=PERSON_PUBLIC_ID --reason='Retention period ended' --confirm=PERSON_PUBLIC_ID
 php placement backup
+php placement convert-legacy-backup /path/to/alpha1-backup.sqlite --confirm=CONVERT
 php placement restore /path/to/app.sqlite
 php placement rollback-import --list
 php placement config-export [target-json]
@@ -162,10 +168,19 @@ php placement assign-optimized-slots [COMPANY]
 php placement publication-check
 ```
 
-Backups are complete SQLite copies or PostgreSQL custom-format dumps and get a
-matching `.sha256` checksum sidecar. Restore requires that sidecar, verifies it,
-and creates a safety backup first. Keep both files out of Git and encrypt
-off-machine copies with institution-approved storage or archive tooling.
+Backups are complete SQLite copies or PostgreSQL custom-format dumps. Each has
+a versioned `.metadata.json` identity sidecar, and its `.sha256` file binds both
+the archive and metadata. Restore checks driver, ownership contract, and exact
+installed institution identity before creating a safety backup or changing the
+target. Keep all three files out of Git and encrypt off-machine copies with
+institution-approved storage or archive tooling.
+
+For PostgreSQL, the pre-restore check is structural only: `pg_restore --list`
+does not prove the archive's institution rows. Exact archive identity is
+confirmed after the direct restore unless an operator first performs a full
+restore into an isolated staging database. Use the isolated drill for release
+and disaster-recovery evidence; do not describe the structural preflight as a
+restore drill.
 
 The anonymous public results page exposes aggregate placement counts only. It
 does not publish candidate names or IDs. Candidate-specific status and trace

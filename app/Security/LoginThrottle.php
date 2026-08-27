@@ -4,9 +4,9 @@ declare(strict_types=1);
 
 namespace App\Security;
 
+use App\Core\Http\UserVisibleException;
 use App\Support\Database;
 use PDO;
-use RuntimeException;
 
 final class LoginThrottle
 {
@@ -34,7 +34,7 @@ final class LoginThrottle
             $networkFailures = (int) $stmt->fetchColumn();
         }
         if ($identityFailures >= self::IDENTITY_LIMIT || $networkFailures >= self::NETWORK_LIMIT) {
-            throw new RuntimeException('Too many sign-in attempts. Try again in a few minutes.');
+            throw new UserVisibleException('LOGIN_THROTTLED', 'Too many sign-in attempts. Try again in a few minutes.');
         }
     }
 

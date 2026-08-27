@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Core\Backup;
 
+use App\Core\Http\UserVisibleException;
 use App\Support\Database;
 use PDO;
 use RuntimeException;
@@ -18,15 +19,13 @@ final class DatabaseBackupService
         $this->pdo ??= Database::connection();
     }
 
-    public function create(string $prefix, ?string $directory = null): array
+    public function create(string $prefix, ?string $directory = null): BackupArtifact
     {
         if (preg_match('/^[a-z0-9_-]+$/', $prefix) !== 1) {
             throw new RuntimeException('Backup prefix must use lowercase letters, numbers, hyphens, or underscores.');
         }
-        $directory ??= (string) (getenv('CPE_BACKUP_DIR') ?: cpe_data_path('backups'));
-        if (!is_dir($directory) && !mkdir($directory, 0775, true)) {
-            throw new RuntimeException('Could not create backup directory: ' . $directory);
-        }
+        $directory ??= self::configuredDirectory();
+        self::prepareDirectory($directory);
 
         $driver = Database::driver();
         if ($driver === 'pgsql') {
@@ -51,19 +50,77 @@ final class DatabaseBackupService
         if ($checksum === false) {
             throw new RuntimeException('Could not checksum database backup.');
         }
-        $checksumPath = $target . '.sha256';
-        if (file_put_contents($checksumPath, $checksum . '  ' . basename($target) . "\n") === false) {
-            throw new RuntimeException('Could not write database backup checksum.');
+        $snapshot = new PDO('sqlite:' . $target, null, null, [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION]);
+        try {
+            return $this->writeArtifactSidecars($target, $checksum, $driver, $snapshot, true);
+        } finally {
+            $snapshot = null;
         }
-        return [
-            'path' => $target,
-            'checksum_path' => $checksumPath,
-            'sha256' => $checksum,
-            'driver' => $driver,
-        ];
     }
 
-    private function createPostgresBackup(string $prefix, string $directory): array
+    public static function configuredDirectory(): string
+    {
+        return (string) (getenv('CPE_BACKUP_DIR') ?: cpe_data_path('backups'));
+    }
+
+    public static function directoryIsSafe(string $directory): bool
+    {
+        $stat = @lstat($directory);
+        return $stat !== false
+            && (($stat['mode'] ?? 0) & 0170000) === 0040000
+            && !is_link($directory);
+    }
+
+    private static function prepareDirectory(string $directory): void
+    {
+        if (!file_exists($directory) && !is_link($directory) && !@mkdir($directory, 0775, true)) {
+            throw new UserVisibleException(
+                'DATABASE_BACKUP_STORAGE_UNAVAILABLE',
+                'Configured backup storage is unavailable or unsafe.',
+            );
+        }
+        if (!self::directoryIsSafe($directory) || !is_readable($directory) || !is_writable($directory)) {
+            throw new UserVisibleException(
+                'DATABASE_BACKUP_STORAGE_UNAVAILABLE',
+                'Configured backup storage is unavailable or unsafe.',
+            );
+        }
+    }
+
+    public function sealExistingSqliteArchive(string $path): BackupArtifact
+    {
+        if (is_link($path)
+            || !is_file($path)
+            || strtolower(pathinfo($path, PATHINFO_EXTENSION)) !== 'sqlite'
+            || file_exists($path . '.sha256')
+            || file_exists($path . BackupMetadata::SUFFIX)) {
+            throw new RuntimeException('SQLite backup sealing requires a new unsealed archive.');
+        }
+        $driver = strtolower((string) $this->pdo->getAttribute(PDO::ATTR_DRIVER_NAME));
+        if ($driver !== 'sqlite') {
+            throw new RuntimeException('SQLite backup sealing requires a SQLite connection.');
+        }
+        $mainPaths = [];
+        foreach ($this->pdo->query('PRAGMA database_list')->fetchAll(PDO::FETCH_ASSOC) as $database) {
+            if (($database['name'] ?? null) === 'main') {
+                $mainPaths[] = (string) ($database['file'] ?? '');
+            }
+        }
+        $archiveRealPath = realpath($path);
+        $connectionRealPath = count($mainPaths) === 1 ? realpath($mainPaths[0]) : false;
+        if ($archiveRealPath === false
+            || $connectionRealPath === false
+            || !hash_equals($archiveRealPath, $connectionRealPath)) {
+            throw new RuntimeException('SQLite backup sealing connection does not match the archive.');
+        }
+        $checksum = hash_file('sha256', $path);
+        if ($checksum === false) {
+            throw new RuntimeException('Could not checksum SQLite backup archive.');
+        }
+        return $this->writeArtifactSidecars($path, $checksum, 'sqlite', $this->pdo, false);
+    }
+
+    private function createPostgresBackup(string $prefix, string $directory): BackupArtifact
     {
         $url = trim((string) ($this->postgresUrl ?? getenv('CPE_DATABASE_URL') ?: ''));
         if ($url === '') {
@@ -103,16 +160,81 @@ final class DatabaseBackupService
         if ($checksum === false) {
             throw new RuntimeException('Could not checksum PostgreSQL backup.');
         }
+        return $this->writeArtifactSidecars($target, $checksum, 'pgsql', $this->pdo, true);
+    }
+
+    private function writeArtifactSidecars(
+        string $target,
+        string $archiveSha256,
+        string $driver,
+        PDO $identityDatabase,
+        bool $removeArchiveOnFailure,
+    ): BackupArtifact {
+        $metadataPath = $target . BackupMetadata::SUFFIX;
         $checksumPath = $target . '.sha256';
-        if (file_put_contents($checksumPath, $checksum . '  ' . basename($target) . "\n") === false) {
-            throw new RuntimeException('Could not write PostgreSQL backup checksum.');
+        $createdSidecars = [];
+        try {
+            $metadata = BackupMetadata::create($identityDatabase, $driver, $archiveSha256);
+            $json = json_encode(
+                $metadata,
+                JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR,
+            ) . "\n";
+            $this->writeExclusiveSidecar($metadataPath, $json, 'metadata');
+            $createdSidecars[] = $metadataPath;
+            $metadataSha256 = hash_file('sha256', $metadataPath);
+            if ($metadataSha256 === false) {
+                throw new RuntimeException('Could not checksum database backup metadata.');
+            }
+            $checksumContents = $archiveSha256 . '  ' . basename($target) . "\n"
+                . $metadataSha256 . '  ' . basename($metadataPath) . "\n";
+            $this->writeExclusiveSidecar($checksumPath, $checksumContents, 'checksum');
+            $createdSidecars[] = $checksumPath;
+            return new BackupArtifact(
+                $target,
+                $checksumPath,
+                $metadataPath,
+                $archiveSha256,
+                $driver,
+            );
+        } catch (\Throwable $e) {
+            $cleanupPaths = $createdSidecars;
+            if ($removeArchiveOnFailure) {
+                $cleanupPaths[] = $target;
+            }
+            foreach ($cleanupPaths as $path) {
+                if (is_file($path)) {
+                    unlink($path);
+                }
+            }
+            throw $e;
         }
-        return [
-            'path' => $target,
-            'checksum_path' => $checksumPath,
-            'sha256' => $checksum,
-            'driver' => 'pgsql',
-        ];
+    }
+
+    private function writeExclusiveSidecar(string $path, string $contents, string $label): void
+    {
+        $handle = @fopen($path, 'x+b');
+        if (!is_resource($handle)) {
+            throw new RuntimeException('Could not create database backup ' . $label . '.');
+        }
+        $written = 0;
+        $length = strlen($contents);
+        try {
+            while ($written < $length) {
+                $chunk = fwrite($handle, substr($contents, $written));
+                if ($chunk === false || $chunk === 0) {
+                    throw new RuntimeException('Could not write database backup ' . $label . '.');
+                }
+                $written += $chunk;
+            }
+            if (!fflush($handle) || !@chmod($path, 0600)) {
+                throw new RuntimeException('Could not secure database backup ' . $label . '.');
+            }
+        } catch (\Throwable $e) {
+            fclose($handle);
+            @unlink($path);
+            throw $e;
+        }
+        fclose($handle);
     }
 
     private function pgDumpBinary(): string

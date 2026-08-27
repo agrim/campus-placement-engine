@@ -6,15 +6,41 @@ define('CPE_SKIP_HTTP_BOOTSTRAP', true);
 require __DIR__ . '/../app/bootstrap.php';
 
 use App\Hosted\HostedBootstrap;
+use App\Install\SystemRequirements;
+use App\Security\OperationalBearerAuthorization;
 use App\Support\Database;
+use App\Support\IncidentReporter;
+
+$ready = (string) ($_GET['ready'] ?? '') === '1';
+$platformBootstrap = trim((string) (getenv('CPE_PLATFORM_BOOTSTRAP') ?: ''));
+if (
+    $ready
+    && (HostedBootstrap::enabled() || $platformBootstrap !== '')
+    && !OperationalBearerAuthorization::authorizes(
+        $_SERVER,
+        (string) (getenv('CPE_METRICS_TOKEN') ?: ''),
+    )
+) {
+    http_response_code(404);
+    header('Content-Type: text/plain; charset=UTF-8');
+    echo "Not found.\n";
+    exit;
+}
 
 header('Content-Type: application/json; charset=UTF-8');
-$ready = (string) ($_GET['ready'] ?? '') === '1';
 $status = 'ok';
 $checks = ['process' => 'ok'];
 if ($ready) {
     try {
-        HostedBootstrap::resolveHttpRequest();
+        cpe_resolve_hosted_http_request();
+        $runtimeFailures = array_filter(
+            (new SystemRequirements())->runtimeChecks(),
+            static fn (array $check): bool => !$check['ok'],
+        );
+        $checks['runtime'] = $runtimeFailures === [] ? 'ok' : 'unavailable';
+        if ($runtimeFailures !== []) {
+            throw new RuntimeException('runtime_requirements');
+        }
         if (!Database::isInstalled()) {
             throw new RuntimeException('not_installed');
         }
@@ -24,9 +50,15 @@ if ($ready) {
         if ($checks['migrations'] !== 'ok') {
             $status = 'unavailable';
         }
-    } catch (Throwable) {
+    } catch (Throwable $e) {
+        IncidentReporter::report(
+            $e,
+            'CPE_HEALTH_READINESS_FAILED',
+            'health',
+            ['mode' => 'readiness', 'operation' => 'probe'],
+        );
         $status = 'unavailable';
-        $checks['database'] = 'unavailable';
+        $checks['database'] = ($checks['runtime'] ?? '') === 'unavailable' ? 'not_checked' : 'unavailable';
     }
 }
 http_response_code($status === 'ok' ? 200 : 503);

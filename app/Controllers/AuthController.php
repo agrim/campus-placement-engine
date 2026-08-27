@@ -8,8 +8,8 @@ use App\Security\Csrf;
 use App\Security\ExternalIdentityService;
 use App\Security\LoginThrottle;
 use App\Support\Auth;
+use App\Support\ControllerFailure;
 use App\Support\Flash;
-use App\Support\StructuredLogger;
 
 final class AuthController
 {
@@ -34,11 +34,7 @@ final class AuthController
             Flash::add('error', 'Invalid login.');
             redirect(url('login'));
         } catch (\Throwable $e) {
-            StructuredLogger::log('warning', 'auth.password_error', ['exception' => get_class($e), 'message' => $e->getMessage()]);
-            $message = str_starts_with($e->getMessage(), 'Too many sign-in attempts')
-                ? $e->getMessage()
-                : 'Sign-in could not be completed. Please try again.';
-            Flash::add('error', $message);
+            ControllerFailure::flash($e, 'CPE_AUTH_PASSWORD_FAILURE', 'auth.password');
             redirect(url('login'));
         }
     }
@@ -51,8 +47,7 @@ final class AuthController
             Csrf::rotate();
             Flash::add('success', 'Signed out.');
         } catch (\Throwable $e) {
-            StructuredLogger::log('warning', 'auth.logout_error', ['exception' => get_class($e), 'message' => $e->getMessage()]);
-            Flash::add('error', 'Sign-out could not be completed. Please try again.');
+            ControllerFailure::flash($e, 'CPE_AUTH_LOGOUT_FAILURE', 'auth.logout');
         }
         redirect(url('login'));
     }
@@ -64,8 +59,7 @@ final class AuthController
             Csrf::rotate();
             redirect('/');
         } catch (\Throwable $e) {
-            StructuredLogger::log('warning', 'auth.sso_error', ['exception' => get_class($e), 'message' => $e->getMessage()]);
-            Flash::add('error', 'Institutional sign-in could not be completed. Contact your portal administrator.');
+            ControllerFailure::flash($e, 'CPE_AUTH_SSO_FAILURE', 'auth.sso');
             redirect(url('login'));
         }
     }

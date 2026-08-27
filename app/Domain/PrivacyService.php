@@ -50,7 +50,7 @@ final class PrivacyService
         $anonymousExternalId = 'ANON-' . $candidateId;
         $now = cpe_now();
         $ownsTransaction = !$this->pdo->inTransaction();
-        $safetyPath = $ownsTransaction ? $this->safetyCopy() : '';
+        $safety = $ownsTransaction ? $this->safetyCopy() : null;
 
         if ($ownsTransaction) {
             $this->pdo->beginTransaction();
@@ -132,7 +132,7 @@ final class PrivacyService
             'candidate_id' => $candidateId,
             'external_id' => $anonymousExternalId,
             'anonymized_at' => $now,
-            'safety_path' => $safetyPath,
+            'safety_reference' => $safety?->reference() ?? '',
             'applications' => count($applicationIds),
             'preference_requests' => count($preferenceIds),
             'wanted_alerts' => count($wantedIds),
@@ -182,12 +182,12 @@ final class PrivacyService
         $stmt->execute([$from, $to]);
     }
 
-    private function safetyCopy(): string
+    private function safetyCopy(): \App\Core\Backup\BackupArtifact
     {
         $dir = getenv('CPE_PRIVACY_SNAPSHOT_DIR') ?: cpe_data_path('privacy');
         if (!is_dir($dir) && !mkdir($dir, 0775, true)) {
             throw new RuntimeException('Could not create privacy data directory.');
         }
-        return (string) (new DatabaseBackupService($this->pdo))->create('candidate-anonymize-safety', $dir)['path'];
+        return (new DatabaseBackupService($this->pdo))->create('candidate-anonymize-safety', $dir);
     }
 }

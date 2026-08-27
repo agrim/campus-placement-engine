@@ -5,13 +5,17 @@ declare(strict_types=1);
 namespace App\Support;
 
 use App\Core\Install\PortalKernelSynchronizer;
+use App\Core\Persistence\DatabaseOwnership;
+use App\Core\Persistence\DatabaseLockException;
+use App\Core\Persistence\DatabaseConnectionInvalidException;
+use App\Core\Persistence\SqlMigrationRunner;
 use App\Core\Persistence\ConnectionProvider;
 use App\Infrastructure\Persistence\SqliteConnectionProvider;
 use App\Infrastructure\Persistence\PostgresConnectionProvider;
 use App\Modules\Placement\Install\LegacyDomainSynchronizer;
 use App\Modules\Placement\Workflow\WorkflowPublisher;
 use PDO;
-use RuntimeException;
+use Throwable;
 
 final class Database
 {
@@ -62,41 +66,118 @@ final class Database
         }
     }
 
-    public static function migrate(): void
+    public static function migrate(bool $synchronize = true): void
     {
-        $pdo = self::connection();
-        $pdo->exec(self::driver() === 'pgsql'
-            ? 'CREATE TABLE IF NOT EXISTS migrations (id BIGSERIAL PRIMARY KEY, migration TEXT NOT NULL UNIQUE, applied_at TEXT NOT NULL)'
-            : 'CREATE TABLE IF NOT EXISTS migrations (id INTEGER PRIMARY KEY AUTOINCREMENT, migration TEXT NOT NULL UNIQUE, applied_at TEXT NOT NULL)');
-        $migrationDirectory = self::driver() === 'pgsql' ? 'database/migrations/pgsql' : 'database/migrations';
-        $files = glob(cpe_path($migrationDirectory . '/*.sql')) ?: [];
-        sort($files);
-
-        foreach ($files as $file) {
-            $name = basename($file);
-            $exists = $pdo->prepare('SELECT COUNT(*) FROM migrations WHERE migration = ?');
-            $exists->execute([$name]);
-            if ((int) $exists->fetchColumn() > 0) {
-                continue;
+        try {
+            $pdo = self::connection();
+            DatabaseOwnership::claimOrVerify($pdo, DatabaseOwnership::OWNER_ENGINE_INSTITUTION);
+            $migrationDirectory = self::driver() === 'pgsql' ? 'database/migrations/pgsql' : 'database/migrations';
+            $afterMigrations = $synchronize
+                ? static function (PDO $pdo): void {
+                    (new PortalKernelSynchronizer())->synchronize($pdo);
+                    (new LegacyDomainSynchronizer())->synchronize($pdo);
+                    (new WorkflowPublisher($pdo))->synchronize();
+                }
+                : null;
+            (new SqlMigrationRunner(
+                $pdo,
+                'migrations',
+                cpe_path($migrationDirectory),
+                'cpe.engine-migrations',
+            ))->run($afterMigrations);
+        } catch (Throwable $e) {
+            if (self::failureRequiresConnectionReset($e)) {
+                self::reset();
             }
-            $sql = file_get_contents($file);
-            if ($sql === false) {
-                throw new RuntimeException('Unable to read migration: ' . $name);
-            }
-            $pdo->beginTransaction();
-            try {
-                $pdo->exec($sql);
-                $stmt = $pdo->prepare('INSERT INTO migrations (migration, applied_at) VALUES (?, ?)');
-                $stmt->execute([$name, cpe_now()]);
-                $pdo->commit();
-            } catch (\Throwable $e) {
-                $pdo->rollBack();
-                throw $e;
-            }
+            throw $e;
         }
-        (new PortalKernelSynchronizer())->synchronize($pdo);
-        (new LegacyDomainSynchronizer())->synchronize($pdo);
-        (new WorkflowPublisher($pdo))->synchronize();
+    }
+
+    public static function adoptInstalledEngineOwnershipForUpgrade(): string
+    {
+        try {
+            $pdo = self::connection();
+            $before = DatabaseOwnership::strictInstalledEngineIdentity($pdo);
+            DatabaseOwnership::claimOrVerifyInstalledEngine($pdo, $before);
+            $after = DatabaseOwnership::strictInstalledEngineIdentity($pdo);
+            if (!hash_equals($before, $after)) {
+                throw new \RuntimeException(
+                    DatabaseOwnership::ERROR_CORRUPT
+                    . ': installed institution identity changed during ownership adoption.',
+                );
+            }
+            return $after;
+        } catch (Throwable $e) {
+            if (self::failureRequiresConnectionReset($e)) {
+                self::reset();
+            }
+            throw $e;
+        }
+    }
+
+    private static function failureRequiresConnectionReset(Throwable $e): bool
+    {
+        $lockFailure = DatabaseLockException::find($e);
+        if ($lockFailure !== null && $lockFailure->requiresConnectionReset()) {
+            return true;
+        }
+        $cleanupFailure = DatabaseConnectionInvalidException::find($e);
+        return $cleanupFailure !== null && $cleanupFailure->requiresConnectionReset();
+    }
+
+    /**
+     * Strict read-only probe used before installation may claim ownership or
+     * apply migrations. A missing settings relation means an install may
+     * proceed; every other probe failure is allowed to escape and fail closed.
+     */
+    public static function hasInstalledMarkerStrict(): bool
+    {
+        $driver = self::driver();
+        if ($driver === 'sqlite') {
+            $identifier = self::path();
+            if ($identifier !== ':memory:'
+                && !str_starts_with($identifier, 'file:')
+                && !is_file($identifier)) {
+                return false;
+            }
+            $pdo = self::connection();
+            $relations = $pdo->query(
+                "SELECT type FROM sqlite_master WHERE name = 'settings' ORDER BY type",
+            )->fetchAll(PDO::FETCH_COLUMN);
+            if ($relations === []) {
+                return false;
+            }
+            if (count($relations) !== 1 || !in_array($relations[0], ['table', 'view'], true)) {
+                throw new \RuntimeException('SQLite settings relation is invalid for installation preflight.');
+            }
+            return $pdo->query("SELECT 1 FROM settings WHERE key = 'installed_at' LIMIT 1")->fetchColumn() !== false;
+        }
+        if ($driver === 'pgsql') {
+            $pdo = self::connection();
+            $schema = trim((string) $pdo->query('SELECT current_schema()')->fetchColumn());
+            if ($schema === '' || in_array(strtolower($schema), ['pg_catalog', 'information_schema'], true)) {
+                throw new \RuntimeException('PostgreSQL application schema is unavailable for installation preflight.');
+            }
+            $relation = $pdo->prepare(
+                "SELECT c.relkind
+                 FROM pg_catalog.pg_class c
+                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+                 WHERE n.nspname = CAST(? AS TEXT) AND c.relname = 'settings'",
+            );
+            $relation->execute([$schema]);
+            $relations = $relation->fetchAll(PDO::FETCH_COLUMN);
+            if ($relations === []) {
+                return false;
+            }
+            if (count($relations) !== 1) {
+                throw new \RuntimeException('PostgreSQL settings relation is ambiguous for installation preflight.');
+            }
+            $qualifiedSettings = '"' . str_replace('"', '""', $schema) . '"."settings"';
+            return $pdo->query(
+                "SELECT 1 FROM {$qualifiedSettings} WHERE key = 'installed_at' LIMIT 1",
+            )->fetchColumn() !== false;
+        }
+        throw new \RuntimeException('Unsupported database driver for installation preflight.');
     }
 
     public static function isInstalled(): bool

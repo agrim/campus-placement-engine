@@ -4,13 +4,23 @@ declare(strict_types=1);
 
 namespace App\Core\Modules;
 
+use App\Core\Http\UserVisibleException;
 use App\Core\Portal;
 use App\Hosted\HostedContext;
 use PDO;
 use RuntimeException;
 
+/**
+ * Stable Engine-owned module lifecycle for self-hosted and managed deployments.
+ *
+ * Managed hosting contract v1 exposes modules(), enable(), and disable(). Those
+ * operations are idempotent, retain module data on disable, and must be invoked
+ * only after the caller has selected and verified the institution data plane.
+ */
 final class ModuleLifecycleService
 {
+    public const CONTRACT_VERSION = 1;
+
     private array $definitions;
 
     public function __construct(private readonly PDO $pdo, ?array $definitions = null)
@@ -54,7 +64,7 @@ final class ModuleLifecycleService
         }
         foreach ($manifest->requiresModules() as $dependency) {
             if (!$this->installed($dependency)) {
-                throw new RuntimeException("Install required module {$dependency} before {$moduleKey}.");
+                throw new UserVisibleException('MODULE_DEPENDENCY_REQUIRED', 'Install required modules before enabling this module.');
             }
         }
         $ownsTransaction = !$this->pdo->inTransaction();
@@ -90,14 +100,14 @@ final class ModuleLifecycleService
     {
         $manifest = $this->manifest($moduleKey);
         if (!HostedContext::allowsModule($moduleKey)) {
-            throw new RuntimeException('This module is not included in the hosted tenant entitlement.');
+            throw new UserVisibleException('MODULE_NOT_ENTITLED', 'This module is not included in the hosted tenant entitlement.');
         }
         if (!$this->installed($moduleKey)) {
             $this->install($moduleKey, $actorId);
         }
         foreach ($manifest->requiresModules() as $dependency) {
             if (!$this->enabled($dependency)) {
-                throw new RuntimeException("Enable required module {$dependency} before {$moduleKey}.");
+                throw new UserVisibleException('MODULE_DEPENDENCY_DISABLED', 'Enable required modules before enabling this module.');
             }
         }
         if ($this->enabled($moduleKey)) {
@@ -127,7 +137,7 @@ final class ModuleLifecycleService
             if (!$candidate['enabled'] || !in_array($moduleKey, $candidate['requires_modules'], true)) {
                 continue;
             }
-            throw new RuntimeException("Disable dependent module {$candidate['key']} before {$moduleKey}.");
+            throw new UserVisibleException('MODULE_DEPENDENT_ENABLED', 'Disable dependent modules before disabling this module.');
         }
         if (!$this->enabled($moduleKey)) {
             return;
@@ -151,19 +161,19 @@ final class ModuleLifecycleService
     {
         $this->manifest($moduleKey);
         if ($this->enabled($moduleKey)) {
-            throw new RuntimeException('Disable the module before uninstalling it.');
+            throw new UserVisibleException('MODULE_DISABLE_REQUIRED', 'Disable the module before uninstalling it.');
         }
         if (!$exportCompleted || !$destructiveConfirmed) {
-            throw new RuntimeException('Module uninstall requires a successful export and explicit destructive confirmation.');
+            throw new UserVisibleException('MODULE_UNINSTALL_CONFIRMATION_REQUIRED', 'Module uninstall requires a successful export and explicit destructive confirmation.');
         }
-        throw new RuntimeException('This bundled module has no destructive uninstall handler. Data remains preserved.');
+        throw new UserVisibleException('MODULE_UNINSTALL_UNAVAILABLE', 'This bundled module has no destructive uninstall handler. Data remains preserved.');
     }
 
     private function manifest(string $moduleKey): ModuleManifest
     {
         $definition = $this->definitions[$moduleKey] ?? null;
         if (!is_array($definition)) {
-            throw new RuntimeException('Unknown module: ' . $moduleKey);
+            throw new UserVisibleException('MODULE_UNKNOWN', 'Unknown module.');
         }
         $manifest = ModuleManifest::fromArray($moduleKey, $definition);
         $manifest->assertCompatible((string) cpe_config('app.version', '0.0.0'), $this->definitions);

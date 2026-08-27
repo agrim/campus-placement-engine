@@ -19,7 +19,9 @@ administrator, and whether to begin with sample data.
    php placement setup
    ```
 
-4. Open the address printed in the terminal and complete the guided setup.
+4. Open the address printed in the terminal, enter the one-time setup code
+   printed beside it, and complete the guided setup. The code is valid for 20
+   minutes and is consumed by the setup grant; do not put it in a URL.
 
 `setup` checks the computer first and then starts PHP's local web server. It
 does not silently create a database or administrator. To run only the checks:
@@ -30,11 +32,27 @@ php placement setup --check
 
 ## Install on university web hosting
 
-1. Confirm the host provides PHP 8.2 or newer with `pdo_sqlite` and `sqlite3`.
+1. Confirm the host provides PHP 8.2 or newer with `mbstring`, `pdo_sqlite`, and `sqlite3`.
 2. Upload the extracted release folder.
 3. Point the domain's document root at the release's `public/` folder.
 4. Make the `data/` folder writable by PHP.
-5. Open the domain over HTTPS and complete the guided setup.
+5. Generate a 32-byte base64url setup token and set it as `CPE_SETUP_TOKEN` in
+   the host's environment or secret manager before allowing public traffic:
+
+   ```bash
+   php -r 'echo rtrim(strtr(base64_encode(random_bytes(32)), "+/", "-_"), "="), PHP_EOL;'
+   ```
+
+6. Open `/install.php` over HTTPS, enter that token on the authorization page,
+   and complete the guided setup. Never put the token in a query string or URL.
+7. Remove `CPE_SETUP_TOKEN` from the runtime after installation.
+
+Browser setup uses a file-backed preinstall session so the new administrator
+stays logged in across the transition. If the deployment explicitly configures
+`CPE_SESSION_DRIVER=database`, install from SSH with `php placement install`
+instead. Loopback source addresses do not authorize an environment-token
+exchange. A TLS-terminating proxy must set `CPE_SESSION_SECURE=force`;
+forwarded headers do not authorize setup.
 
 On Apache shared hosting where the document root cannot be changed, the root
 `.htaccess` provides a fallback. The `public/` document root remains the safer
@@ -78,3 +96,22 @@ php placement upgrade
 The upgrade command writes another backup before applying migrations. Review
 [docs/disaster-recovery.md](docs/disaster-recovery.md) before upgrading a live
 installation.
+
+For a public `v0.1.0-alpha.1` installation, `upgrade` first validates the
+complete installed legacy Engine signature and immutable institution identity,
+then permanently claims Engine database ownership before creating the
+metadata-backed pre-migration backup. Mixed, partial, opposite-plane, or
+identity-drifted databases fail closed.
+
+Old alpha.1 SQLite backup files use a one-line checksum and cannot be restored
+directly by current releases. Preserve the original archive and checksum, then
+create a new current-format copy explicitly:
+
+```bash
+php placement convert-legacy-backup /secure/path/to/old.sqlite \
+  --confirm=CONVERT --target-dir=/secure/path/to/converted
+```
+
+The converted archive has ownership evidence, metadata, and a two-entry
+checksum. Legacy PostgreSQL archives require an isolated restore validation and
+are intentionally not converted by this command.

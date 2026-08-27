@@ -19,6 +19,7 @@ ob_start();
       <li><strong>5</strong><span>Start live dummy drive</span></li>
     </ol>
     <form method="post" action="/install.php">
+      <input type="hidden" name="_setup_action" value="install">
       <?= Csrf::input() ?>
       <fieldset class="setup-section">
         <legend><span>1</span> College and site identity</legend>
@@ -144,11 +145,9 @@ ob_start();
       <?php foreach (($requirements ?? []) as $check): ?>
         <tr>
           <th><?= h($check['label']) ?></th>
-          <td><span class="badge <?= $check['ok'] ? 'ok' : 'fail' ?>"><?= $check['ok'] ? 'OK' : 'ERROR' ?></span></td>
-          <td><?= h($check['value']) ?></td>
+          <td colspan="2"><span class="badge <?= $check['ok'] ? 'ok' : 'fail' ?>"><?= $check['ok'] ? 'OK' : 'ERROR' ?></span></td>
         </tr>
       <?php endforeach; ?>
-      <tr><th>Database</th><td colspan="2"><?= h($databasePath ?? '') ?></td></tr>
       <tr><th>Frontend</th><td colspan="2">No images, no build step</td></tr>
     </table>
     <h2>After install</h2>

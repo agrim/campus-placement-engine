@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Modules\Placement\Workflow;
 
+use App\Core\Http\UserVisibleException;
 use PDO;
 use RuntimeException;
 
@@ -32,7 +33,7 @@ final class WorkflowDefinitionFileService
         if (file_put_contents($path, $json . "\n") === false) {
             throw new RuntimeException('Could not write workflow export: ' . $path);
         }
-        return ['path' => $path, 'workflow_key' => $workflow['key'], 'version' => $workflow['version_number']];
+        return ['file_reference' => $this->fileReference($path), 'workflow_key' => $workflow['key'], 'version' => $workflow['version_number']];
     }
 
     public function payloadForVersion(int $versionId): array
@@ -55,7 +56,7 @@ final class WorkflowDefinitionFileService
         $payload = $this->read($path);
         $this->validator->assertValid($payload['definition']);
         return [
-            'path' => $path,
+            'file_reference' => $this->fileReference($path),
             'workflow_key' => $payload['workflow_key'],
             'states' => count($payload['definition']['states']),
             'transitions' => count($payload['definition']['transitions']),
@@ -83,7 +84,11 @@ final class WorkflowDefinitionFileService
         try {
             $payload = json_decode((string) file_get_contents($path), true, 512, JSON_THROW_ON_ERROR);
         } catch (\JsonException $e) {
-            throw new RuntimeException('Workflow definition is not valid JSON: ' . $e->getMessage());
+            throw new UserVisibleException(
+                'WORKFLOW_DEFINITION_JSON_INVALID',
+                'Workflow definition is not valid JSON.',
+                $e,
+            );
         }
         if (!is_array($payload) || ($payload['schema'] ?? '') !== self::SCHEMA) {
             throw new RuntimeException('Unsupported workflow definition schema.');
@@ -92,6 +97,12 @@ final class WorkflowDefinitionFileService
             throw new RuntimeException('Workflow definition payload is incomplete.');
         }
         return $payload;
+    }
+
+    private function fileReference(string $path): string
+    {
+        $hash = is_file($path) ? hash_file('sha256', $path) : false;
+        return 'workflow_' . substr(is_string($hash) ? $hash : hash('sha256', basename($path)), 0, 24);
     }
 
     private function definition(array $workflow): array

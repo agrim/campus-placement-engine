@@ -6,7 +6,7 @@ runtime. The default self-hosted shape is still plain PHP plus SQLite.
 ## Requirements
 
 - PHP 8.2 or newer.
-- `pdo_sqlite` and `sqlite3` extensions for the default SQLite shape.
+- `mbstring` plus `pdo_sqlite` and `sqlite3` for the default SQLite shape.
 - A writable `data/` directory.
 - No Node.js, Composer runtime, Redis, image assets, or container runtime is
   required. PostgreSQL is optional for hosted or larger deployments.
@@ -25,10 +25,10 @@ php placement doctor
 ```
 
 The doctor command is intentionally the whole local preflight. In SQLite mode it
-checks PHP, extensions, and writable paths. In PostgreSQL mode it checks
-`pdo_pgsql` and the configured connection. `INFO installed: no` is expected
-before first-time setup. The browser installer displays the same driver-specific
-checks and blocks installation until they pass.
+checks PHP, `mbstring`, database extensions, and writable paths. In PostgreSQL
+mode it checks `pdo_pgsql` and the configured connection. `INFO installed: no`
+is expected before first-time setup. The browser installer displays the same
+driver-specific checks and blocks installation until they pass.
 
 CSV imports are paste-based and do not store uploaded files. The default import
 limits are 5,000,000 bytes and 10,000 non-empty data rows. Technical operators
@@ -56,10 +56,22 @@ real `.env` files or gateway credentials.
 ## Local Development
 
 ```bash
-php placement serve
+php placement setup
 ```
 
-Open `http://localhost:8000/` and run the installer.
+Open `http://localhost:8000/install.php`, enter the one-time code printed by the
+setup command, and run the installer. The command accepts only
+`127.0.0.1:PORT` or `localhost:PORT`, normalizes the latter to numeric loopback,
+and passes the random capability to its child process only through the
+environment. The code is printed once to the trusted local terminal, expires
+after 20 minutes, and is never placed in the command line, URL, redirect, form
+default, session, or database. Loopback topology and an exact Host value are
+negative checks, not proof of possession; a requester without the code sees
+only the unlock page. This local setup path is unsupported behind a proxy.
+
+`php placement serve` starts an ordinary local server without setup authority.
+Use it after installation, or provision `CPE_SETUP_TOKEN` separately when
+testing the remote-hosting unlock flow.
 The installer is intentionally Drupal/WordPress-like in shape but much smaller:
 it performs the local system preflight, collects college/text-identity/cycle/
 terminology/admin and workflow values, creates the SQLite database, and can
@@ -71,7 +83,7 @@ Once setup writes the `installed_at` marker, the installer is locked. For a
 fresh local or staging setup, point `CPE_DB_PATH` at a different SQLite file
 instead of rerunning the installer over an existing live database.
 
-`php placement serve` is only a convenience wrapper around:
+The ordinary `php placement serve` command is only a convenience wrapper around:
 
 ```bash
 php -S 127.0.0.1:8000 -t public
@@ -99,9 +111,44 @@ The target database must be empty for first install. Use a dedicated database
 and least-privilege application role. PostgreSQL backup/restore also requires
 `pg_dump` and `pg_restore`; Homebrew's `libpq` binaries are detected in their
 standard locations, or set explicit binary paths from `environment.md`.
+
+On the first mutating startup, the Engine permanently claims the target as an
+`engine_institution` database before creating the migration registry. Existing
+Engine databases are adopted automatically only when all reserved legacy Engine
+markers are present and no Cloud marker exists. A partial, mixed, unknown, or
+`cloud_control_plane` database is refused with a fixed ownership recovery
+identifier. Do not add, delete, or rewrite `cpe_database_ownership` to work
+around that refusal; stop writes, preserve a backup, and investigate the target
+database identity.
+
+PostgreSQL ownership locking requires a direct or session-affine connection for
+the duration of the claim. Transaction-pooling endpoints that can change the
+backend session are unsupported. The claim is scoped to the physical PostgreSQL
+database, not merely the current `search_path`; use one dedicated application
+schema and never place Engine and Cloud markers in different schemas of the same
+database. SQLite keeps a persistent lock file adjacent to the canonical database
+file; do not delete it as routine cleanup. Relative paths and symbolic-link
+aliases resolve to the same lock identity.
+
+After ownership succeeds, Engine migration registry and product DDL run under
+the separate `cpe.engine-migrations` lock. Concurrent installers or upgrades
+serialize on that namespace, re-read `migrations` only after acquiring it, and
+record each sorted SQL file exactly once in the same transaction as that file's
+DDL. Do not run migration SQL manually or substitute the ownership, tenant
+mutation, and Engine migration lock namespaces for one another.
+
 First-run installation is transactional after migrations and validates an IANA
 timezone such as `Asia/Kolkata`; the installer lock is written only after the
 administrator, optional demo data, portal kernel, and workflow setup succeed.
+
+After database ownership and migrations release their distinct locks, every
+CLI, browser, demo, and hosted installation enters the shared
+`cpe.engine-installation` database lock with a bounded 60-second wait. The
+installer rechecks `settings.installed_at` inside that lock and again inside its
+write transaction, so concurrent attempts produce one complete winner and a
+stable already-installed refusal without mixing administrators, settings,
+institution identity, audit rows, or demo payloads. PostgreSQL additionally
+pins and verifies the advisory-lock backend session across the transaction.
 
 Do not use shared schemas or a `tenant_id` column as a managed-hosting isolation
 model. Each hosted institution resolves to its own PostgreSQL database through
@@ -132,9 +179,21 @@ The package includes layered `.htaccess` safeguards:
   document-root layout.
 
 After copying files to an Apache host, run `php placement doctor` from SSH if
-available, then open the browser installer. After installation, direct visits
-to the installer redirect to the app and installer service calls refuse to
-mutate the installed database.
+available. Before exposing an uninstalled site, generate a random 32-byte
+base64url value, store it as `CPE_SETUP_TOKEN` in the PHP process environment,
+and open `/install.php` over HTTPS. The first page contains only the token
+unlock form; the installation fields appear only after a valid token and CSRF
+check establish the 20-minute browser grant. Never place the token in a URL or
+query string, and remove it from the service environment after installation.
+
+The unlock request must arrive over direct HTTPS. When TLS terminates at a
+trusted reverse proxy, set `CPE_SESSION_SECURE=force` explicitly; forwarded
+headers and loopback source addresses do not establish environment-token
+transport authority. Preinstall browser sessions are
+file-backed and SameSite=Strict. Deployments configured with
+`CPE_SESSION_DRIVER=database` must use `php placement install` from SSH instead
+of silently switching session storage. After installation, GET and HEAD visits
+to the installer redirect to the app and POST replays are rejected.
 
 ## Nginx With PHP-FPM
 
@@ -210,10 +269,13 @@ Additional demo users use the same password:
 
 The default SQLite database is `data/app.sqlite`. `php placement backup` writes
 a consistent timestamped SQLite copy; PostgreSQL mode writes a custom-format
-dump. Both receive a `.sha256` sidecar. `php placement restore` verifies an
-required sidecar and writes a restore-safety backup before changing the live
-database. A missing or mismatched sidecar is rejected. Stop concurrent writes
-first. See `disaster-recovery.md`.
+dump. Each receives versioned `.metadata.json` identity metadata; the `.sha256`
+sidecar binds both files. `php placement restore` validates archive checksums,
+driver, ownership contract, and exact institution identity before writing a
+restore-safety backup or changing the live database. SQLite also receives a
+read-only integrity and identity inspection; PostgreSQL custom archives must
+pass `pg_restore --list` structural inspection. Stop concurrent writes first.
+See `disaster-recovery.md`.
 
 The app also ships CLI helpers:
 
@@ -252,6 +314,17 @@ Use `php placement upgrade` after replacing the application files with a newer
 release. It checks driver-specific requirements, writes an upgrade backup,
 applies migrations, and prints readiness checks.
 
+Upgrade verifies the permanent database owner before any migration DDL. An
+ownership conflict, ambiguous legacy signature, corrupt singleton, or unsupported
+contract version stops the upgrade. These conditions require operator review;
+there is intentionally no force/rebind flag.
+
+The upgrade then holds `cpe.engine-migrations` through the final migration
+registry check and post-migration synchronizers. A failed SQL file rolls back
+that file and its registry row. A failed synchronizer leaves already committed
+migration rows accurate; fix the synchronizer cause and rerun the upgrade. Never
+insert a registry row by hand to bypass a failed file.
+
 Candidate anonymization writes safety copies under `data/privacy/` and redacts
 candidate identity while preserving aggregate placement history. See
 `docs/privacy-retention.md`.
@@ -271,8 +344,8 @@ Backups contain the complete local placement database, including candidate,
 company, account, audit, and notification data. Keep `data/backups/` out of Git,
 copy live-day backups to institution-controlled storage, and encrypt them with
 the college's approved disk, archive, or backup tooling before moving them off
-the operator machine. Keep the `.sqlite` file and matching `.sha256` sidecar
-together so restore can verify integrity.
+the operator machine. Keep the archive, `.metadata.json`, and `.sha256`
+sidecars together so restore can validate integrity and target identity.
 
 The live board refreshes with a plain HTML meta refresh on board pages only.
 The default interval is 45 seconds. Administrators can tune
@@ -307,11 +380,17 @@ inside one database transaction after validation. See `docs/imports.md`.
 
 ## Operations Endpoints And Workers
 
-Use `/health.php` for liveness and `/health.php?ready=1` for readiness. Protect
-`/metrics.php` with `CPE_METRICS_TOKEN`; it intentionally returns 404 when the
-token is absent or invalid. Configure the scheduler to run any enabled
-notification handoff and `php placement work-outbox`. See
-`security-operations.md`.
+Use `/health.php` for public process liveness; it never loads the managed
+platform adapter or tenant database. Use `/health.php?ready=1` for readiness.
+Self-hosted readiness remains unauthenticated. When `CPE_HOSTED_MODE=1` or
+`CPE_PLATFORM_BOOTSTRAP` is configured, send `Authorization: Bearer
+<CPE_METRICS_TOKEN>` to readiness as well as `/metrics.php`; absent, malformed,
+invalid, or shorter-than-24-character configuration is concealed as 404 before
+tenant resolution. A production reverse proxy must pass the monitor's
+`Authorization` header and the intended tenant `Host` header unchanged to PHP.
+Query parameters, cookies, client IP, and `X-Forwarded-*` identity headers are
+not credentials. Configure the scheduler to run any enabled notification
+handoff and `php placement work-outbox`. See `security-operations.md`.
 
 Use `php placement export` after major placement-day milestones or before
 upgrades when a readable CSV audit trail is useful. See `docs/exports.md`.
@@ -341,7 +420,7 @@ moving the release package between machines.
 Verify the package before publishing or installing it elsewhere:
 
 ```bash
-php placement verify-package dist/campus-placement-engine-0.1.0-alpha.1.zip
+php placement verify-package dist/campus-placement-engine-0.1.0-alpha.2.zip
 ```
 
 Before publishing a package, extract it into a clean temp directory and run:

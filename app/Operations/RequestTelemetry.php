@@ -17,8 +17,11 @@ final class RequestTelemetry
     public static function start(string $route, string $method): void
     {
         self::$startedAt = microtime(true);
-        self::$route = $route;
-        self::$method = strtoupper($method);
+        self::$route = preg_match('/\A(?:bootstrap|unknown|login|sso|logout|portal|modules|public|student|board|move|return-to-idle|board-preferences|notifications|notification-acknowledge|candidate|records|records-candidate|records-company|records-round|records-schedule|records-panelist|records-slot-assignment|records-application|reports|import|import-rollback|admin|admin-user|admin-users|admin-password|admin-workflow|preferences|preferences-resolve|wanted|wanted-resolve|system|system-clear-demo|advising|advising-appointment|advising-status|advising-note|advising-task)\z/D', $route) === 1
+            ? $route
+            : 'unknown';
+        $normalizedMethod = strtoupper($method);
+        self::$method = in_array($normalizedMethod, ['GET', 'POST', 'HEAD'], true) ? $normalizedMethod : 'UNKNOWN';
         if (!headers_sent()) {
             header('X-Request-ID: ' . StructuredLogger::requestId());
         }
@@ -41,7 +44,7 @@ final class RequestTelemetry
             'status' => http_response_code() ?: 200,
             'duration_ms' => round((microtime(true) - self::$startedAt) * 1000, 2),
             'peak_memory_bytes' => memory_get_peak_usage(true),
-            'tenant' => HostedContext::isActive() ? HostedContext::current()->slug() : 'self-hosted',
+            'tenant' => HostedContext::isActive() ? 'hosted' : 'self-hosted',
             'user_id' => isset($_SESSION['user_id']) ? (int) $_SESSION['user_id'] : null,
             'fatal' => $fatal,
         ]);

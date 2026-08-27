@@ -29,16 +29,38 @@ jobs:
           --health-retries 5
     steps:
       - name: Check out tagged source
-        uses: actions/checkout@v4
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
 
       - name: Set up PHP
-        uses: shivammathur/setup-php@v2
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
         with:
           php-version: "8.2"
-          extensions: pdo_sqlite, sqlite3, pdo_pgsql, curl
+          extensions: mbstring, pdo_sqlite, sqlite3, pdo_pgsql, curl
           coverage: none
+
+      - name: Install PostgreSQL 17 client
+        shell: bash
+        run: |
+          set -euo pipefail
+          PGDG_KEY="$RUNNER_TEMP/postgresql-pgdg.asc"
+          curl --fail --silent --show-error --location \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            --output "$PGDG_KEY"
+          printf '%s  %s\n' \
+            '0144068502a1eddd2a0280ede10ef607d1ec592ce819940991203941564e8e76' \
+            "$PGDG_KEY" | sha256sum --check --strict
+          sudo install -d -m 0755 /etc/apt/keyrings
+          sudo install -m 0644 "$PGDG_KEY" /etc/apt/keyrings/postgresql-pgdg.asc
+          . /etc/os-release
+          printf '%s\n' \
+            "deb [signed-by=/etc/apt/keyrings/postgresql-pgdg.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/postgresql-pgdg.list >/dev/null
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends postgresql-client-17
+          /usr/lib/postgresql/17/bin/pg_dump --version
+          /usr/lib/postgresql/17/bin/pg_restore --version
 
       - name: Validate release tag and source branch
         shell: bash
@@ -56,14 +78,122 @@ jobs:
           find app config public tests -name '*.php' -print0 | xargs -0 -n 1 php -l
           php -l placement
           php tests/run.php
+          php tests/backup_restore_contract.php
+          php tests/database_connection_cleanup_contract.php
+          php tests/incident_boundary_contract.php
+          php tests/legacy_backup_compatibility_contract.php
+          php tests/worker_delivery_contract.php
           php tests/database_contract.php
+          php tests/database_ownership_contract.php
+          php tests/migration_lock_contract.php
+          php tests/database_lock_release_contract.php
+          php tests/install_concurrency_contract.php
+          php tests/hosted_install_atomicity_contract.php
+          php tests/hosted_install_preflight_contract.php
+          php tests/setup_authorization_contract.php
+          php tests/hosted_install_contract.php
           php tests/managed_hosting_contract.php
+
+      - name: Test exact public alpha.1 compatibility
+        shell: bash
+        run: |
+          CPE_ALPHA1_SOURCE="$RUNNER_TEMP/cpe-alpha1-source"
+          CPE_ALPHA1_DATABASE="$RUNNER_TEMP/cpe-alpha1-installed.sqlite"
+          CPE_ALPHA1_BACKUPS="$RUNNER_TEMP/cpe-alpha1-backups"
+          mkdir -p "$CPE_ALPHA1_SOURCE" "$CPE_ALPHA1_BACKUPS"
+          git archive --format=tar v0.1.0-alpha.1 | tar -x -C "$CPE_ALPHA1_SOURCE"
+          CPE_DB_DRIVER=sqlite CPE_DB_PATH="$CPE_ALPHA1_DATABASE" php "$CPE_ALPHA1_SOURCE/placement" install-demo
+          CPE_DB_DRIVER=sqlite CPE_DB_PATH="$CPE_ALPHA1_DATABASE" CPE_BACKUP_DIR="$CPE_ALPHA1_BACKUPS" php "$CPE_ALPHA1_SOURCE/placement" backup
+          mapfile -t CPE_ALPHA1_ARCHIVES < <(find "$CPE_ALPHA1_BACKUPS" -maxdepth 1 -type f -name '*.sqlite' -print)
+          test "${#CPE_ALPHA1_ARCHIVES[@]}" -eq 1
+          CPE_ALPHA1_DATABASE_FIXTURE="$CPE_ALPHA1_DATABASE" CPE_ALPHA1_BACKUP_FIXTURE="${CPE_ALPHA1_ARCHIVES[0]}" php tests/alpha1_release_acceptance.php
 
       - name: Test PostgreSQL data plane
         env:
           CPE_DB_DRIVER: pgsql
           CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_contract?sslmode=disable
         run: php tests/database_contract.php
+
+      - name: Test PostgreSQL worker delivery
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_worker_contract?sslmode=disable
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_worker_contract'
+          php tests/worker_delivery_contract.php
+
+      - name: Test PostgreSQL backup and restore
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_backup_restore_contract?sslmode=disable
+          CPE_PG_DUMP_BINARY: /usr/lib/postgresql/17/bin/pg_dump
+          CPE_PG_RESTORE_BINARY: /usr/lib/postgresql/17/bin/pg_restore
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_backup_restore_contract'
+          php tests/backup_restore_contract.php
+
+      - name: Test PostgreSQL hosted installation
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_hosted_contract?sslmode=disable
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_hosted_contract'
+          php tests/hosted_install_contract.php
+
+      - name: Test PostgreSQL hosted installation atomicity
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_hosted_atomicity_contract?sslmode=disable
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_hosted_atomicity_contract'
+          php tests/hosted_install_atomicity_contract.php
+
+      - name: Test PostgreSQL database ownership
+        env:
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_database_ownership_contract?sslmode=disable
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_database_ownership_contract'
+          php tests/database_ownership_contract.php
+
+      - name: Test PostgreSQL migration locking
+        env:
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_migration_lock_contract?sslmode=disable
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_migration_lock_contract'
+          php tests/migration_lock_contract.php
+
+      - name: Test PostgreSQL checked lock release
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_database_lock_release_contract?sslmode=disable
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_database_lock_release_contract'
+          php tests/database_lock_release_contract.php
+
+      - name: Test PostgreSQL invalid-connection cleanup
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_database_connection_cleanup_contract?sslmode=disable
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_database_connection_cleanup_contract'
+          php tests/database_connection_cleanup_contract.php
+
+      - name: Test PostgreSQL installation locking
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_install_concurrency_contract?sslmode=disable
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_install_concurrency_contract'
+          php tests/install_concurrency_contract.php
 
       - name: Build and verify downloadable assets
         shell: bash

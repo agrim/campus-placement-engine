@@ -6,8 +6,10 @@ namespace App\Core\Events;
 
 use App\Core\Modules\ModuleManager;
 use App\Core\Modules\ProvidesEventSubscribers;
+use App\Support\IncidentReporter;
 use PDO;
 use RuntimeException;
+use Throwable;
 
 final class EventDispatcher
 {
@@ -81,9 +83,21 @@ final class EventDispatcher
         $stmt->execute([cpe_now(), '', $eventId]);
     }
 
-    public function markFailed(int $eventId, string $error): void
+    public function markFailed(int $eventId, Throwable|string $failure): void
     {
+        $exception = $failure instanceof Throwable
+            ? $failure
+            : new RuntimeException('Domain event dispatch failed.');
+        $incidentId = IncidentReporter::report(
+            $exception,
+            'CPE_DOMAIN_EVENT_DISPATCH_FAILED',
+            'worker',
+            ['operation' => 'domain_event.dispatch', 'status' => 'failed'],
+        );
         $stmt = $this->pdo->prepare('UPDATE domain_event_outbox SET attempts = attempts + 1, last_error = ? WHERE id = ?');
-        $stmt->execute([mb_substr($error, 0, 1000), $eventId]);
+        $stmt->execute([
+            IncidentReporter::reference('CPE_DOMAIN_EVENT_DISPATCH_FAILED', $incidentId),
+            $eventId,
+        ]);
     }
 }

@@ -53,13 +53,20 @@ ownership and account-linking risks.
 
 - `GET /health.php` is a process liveness check and touches no operational data.
 - `GET /health.php?ready=1` checks tenant resolution, installation, database
-  access, and pending migrations without returning record counts.
+  access, and pending migrations without returning record counts. Ordinary
+  self-hosting does not require a token. Hosted mode, or a configured platform
+  bootstrap, requires the metrics Bearer token before the platform adapter,
+  tenant Host resolution, or database access.
 - `GET /metrics.php` requires `Authorization: Bearer ...` with a
   `CPE_METRICS_TOKEN` of at least 24 characters; absent or invalid access returns
   404.
 
 Metrics expose migration, outbox, notification, advising-task, and module-state
-gauges. Do not place the metrics token in a URL.
+gauges. Hosted-readiness and metrics credentials are accepted only from the
+HTTP `Authorization` header. Do not place the token in a URL, cookie,
+`X-Forwarded-*` header, or client-address allowlist. Missing, malformed, invalid,
+or weakly configured operational credentials receive the same concealed 404
+text response and no authentication challenge.
 
 ## Structured Logs
 

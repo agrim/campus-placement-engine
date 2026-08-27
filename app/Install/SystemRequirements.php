@@ -4,8 +4,8 @@ declare(strict_types=1);
 
 namespace App\Install;
 
+use App\Core\Http\UserVisibleException;
 use App\Support\Database;
-use RuntimeException;
 
 final class SystemRequirements
 {
@@ -31,12 +31,7 @@ final class SystemRequirements
         $databaseDirectoryWritable = self::databaseDirectoryWritable($databasePath);
 
         return [
-            [
-                'key' => 'PHP',
-                'label' => 'PHP',
-                'ok' => version_compare(PHP_VERSION, $this->minimumPhp, '>='),
-                'value' => PHP_VERSION . ' (requires >= ' . $this->minimumPhp . ')',
-            ],
+            ...$this->runtimeChecks(),
             [
                 'key' => 'pdo_sqlite',
                 'label' => 'pdo_sqlite',
@@ -67,21 +62,15 @@ final class SystemRequirements
     private function postgresChecks(): array
     {
         $connectionOk = false;
-        $connectionValue = Database::path();
         if (extension_loaded('pdo_pgsql')) {
             try {
                 $connectionOk = (int) Database::connection()->query('SELECT 1')->fetchColumn() === 1;
-            } catch (\Throwable $e) {
-                $connectionValue .= ' (' . $e->getMessage() . ')';
+            } catch (\Throwable) {
+                $connectionOk = false;
             }
         }
         return [
-            [
-                'key' => 'PHP',
-                'label' => 'PHP',
-                'ok' => version_compare(PHP_VERSION, $this->minimumPhp, '>='),
-                'value' => PHP_VERSION . ' (requires >= ' . $this->minimumPhp . ')',
-            ],
+            ...$this->runtimeChecks(),
             [
                 'key' => 'pdo_pgsql',
                 'label' => 'pdo_pgsql',
@@ -92,7 +81,28 @@ final class SystemRequirements
                 'key' => 'postgres_connection',
                 'label' => 'postgres_connection',
                 'ok' => $connectionOk,
-                'value' => $connectionOk ? $connectionValue : $connectionValue,
+                'value' => $connectionOk ? 'reachable' : 'unavailable',
+            ],
+        ];
+    }
+
+    /**
+     * @return array<int, array{key: string, label: string, ok: bool, value: string}>
+     */
+    public function runtimeChecks(): array
+    {
+        return [
+            [
+                'key' => 'PHP',
+                'label' => 'PHP',
+                'ok' => version_compare(PHP_VERSION, $this->minimumPhp, '>='),
+                'value' => PHP_VERSION . ' (requires >= ' . $this->minimumPhp . ')',
+            ],
+            [
+                'key' => 'mbstring',
+                'label' => 'mbstring',
+                'ok' => extension_loaded('mbstring'),
+                'value' => extension_loaded('mbstring') ? 'yes' : 'no',
             ],
         ];
     }
@@ -120,7 +130,10 @@ final class SystemRequirements
     {
         $failures = $this->failures();
         if ($failures !== []) {
-            throw new RuntimeException('System requirements are not met: ' . implode(', ', $failures) . '.');
+            throw new UserVisibleException(
+                'SETUP_REQUIREMENTS_NOT_MET',
+                'System requirements are not met: ' . implode(', ', $failures) . '.',
+            );
         }
     }
 

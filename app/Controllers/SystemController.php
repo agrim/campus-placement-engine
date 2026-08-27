@@ -4,11 +4,13 @@ declare(strict_types=1);
 
 namespace App\Controllers;
 
+use App\Core\Http\UserVisibleException;
 use App\Domain\DemoDataService;
 use App\Domain\ReadinessService;
 use App\Domain\Workflow;
 use App\Security\Csrf;
 use App\Support\Auth;
+use App\Support\ControllerFailure;
 use App\Support\Database;
 use App\Support\Flash;
 
@@ -19,14 +21,16 @@ final class SystemController
         Auth::requireCapability('placement.system.view', 'Your role cannot open System.');
         $pdo = Database::connection();
         view('system', [
-            'dbPath' => Database::path(),
             'phpVersion' => PHP_VERSION,
-            'databaseDriver' => Database::driver(),
-            'databaseVersion' => Database::serverVersion(),
+            'databaseDescription' => 'Configured relational database',
             'workflowErrors' => (new Workflow())->validate(),
             'readiness' => (new ReadinessService($pdo))->snapshot(),
             'demoData' => (new DemoDataService($pdo))->counts(),
-            'audit' => $pdo->query('SELECT a.*, u.name AS actor_name FROM audit_logs a LEFT JOIN users u ON u.id = a.actor_user_id ORDER BY a.id DESC LIMIT 20')->fetchAll(),
+            'audit' => $pdo->query("SELECT a.id, a.actor_user_id, a.action, a.subject_type, a.subject_id,
+                                           'Audit event recorded.' AS detail, '' AS ip_address, '' AS user_agent,
+                                           a.created_at, u.name AS actor_name
+                                    FROM audit_logs a LEFT JOIN users u ON u.id = a.actor_user_id
+                                    ORDER BY a.id DESC LIMIT 20")->fetchAll(),
         ]);
     }
 
@@ -36,7 +40,7 @@ final class SystemController
         try {
             Csrf::verify($_POST['_token'] ?? null);
             if (($_POST['confirm'] ?? '') !== 'clear-demo-data') {
-                throw new \RuntimeException('Confirm the dummy-data cleanup before continuing.');
+                throw new UserVisibleException('DEMO_CLEAR_CONFIRMATION_REQUIRED', 'Confirm the dummy-data cleanup before continuing.');
             }
             $result = (new DemoDataService(Database::connection()))->clear((int) $user['id']);
             $deleted = $result['deleted'];
@@ -49,7 +53,7 @@ final class SystemController
                 (int) ($deleted['demo_users'] ?? 0) . ' demo users removed.'
             );
         } catch (\Throwable $e) {
-            Flash::add('error', $e->getMessage());
+            ControllerFailure::flash($e, 'CPE_DEMO_CLEAR_FAILURE', 'system.clear_demo_data');
         }
         redirect(url('system'));
     }

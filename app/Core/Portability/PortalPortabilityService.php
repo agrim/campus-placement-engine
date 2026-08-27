@@ -5,11 +5,13 @@ declare(strict_types=1);
 namespace App\Core\Portability;
 
 use App\Core\Backup\DatabaseBackupService;
+use App\Core\Http\UserVisibleException;
 use App\Core\Install\PortalKernelSynchronizer;
 use App\Core\Modules\Module;
 use App\Core\Modules\ModuleLifecycleService;
 use App\Core\Modules\ProvidesPortability;
 use App\Core\Portal;
+use App\Core\Persistence\TransactionRollbackGuard;
 use App\Domain\ConfigurationSnapshotService;
 use App\Support\Database;
 use PDO;
@@ -88,7 +90,7 @@ final class PortalPortabilityService
                 throw new RuntimeException('Could not finalize portability bundle.');
             }
             return [
-                'path' => $targetDirectory,
+                'bundle_reference' => (string) $manifest['bundle_id'],
                 'bundle_id' => $manifest['bundle_id'],
                 'modules' => count($moduleEntries),
                 'files' => count($files) + 1,
@@ -160,9 +162,15 @@ final class PortalPortabilityService
             (array) ($declaredFiles['core.json']['custom_roles'] ?? [])
         )));
         $this->validateCorePayload($declaredFiles['core.json'], $workflowDefinitions, $knownRoleKeys);
+        $manifestInstitutionPublicId = (string) ($manifest['institution_public_id'] ?? '');
+        $coreInstitutionPublicId = (string) ($declaredFiles['core.json']['institution']['public_id'] ?? '');
+        if ($manifestInstitutionPublicId === ''
+            || !hash_equals($manifestInstitutionPublicId, $coreInstitutionPublicId)) {
+            throw new RuntimeException('Portability bundle institution identity is inconsistent.');
+        }
         $this->rejectUnexpectedFiles($directory, array_keys($declaredFiles));
         return [
-            'path' => $directory,
+            'bundle_reference' => (string) $manifest['bundle_id'],
             'bundle_id' => (string) $manifest['bundle_id'],
             'institution_public_id' => (string) ($manifest['institution_public_id'] ?? ''),
             'modules' => $moduleResults,
@@ -176,6 +184,7 @@ final class PortalPortabilityService
             throw new RuntimeException('Install the target portal before importing a portability bundle.');
         }
         $validation = $this->validate($directory);
+        $this->assertTargetIdentityCompatible((string) $validation['institution_public_id']);
         $manifest = $validation['manifest'];
         $payloads = [];
         foreach ($manifest['files'] as $file) {
@@ -212,16 +221,16 @@ final class PortalPortabilityService
                 $this->pdo->commit();
             }
         } catch (\Throwable $e) {
-            if ($ownsTransaction && $this->pdo->inTransaction()) {
-                $this->pdo->rollBack();
+            if ($ownsTransaction) {
+                TransactionRollbackGuard::rethrow($this->pdo, $e, 'portability.import', true);
             }
-            throw new RuntimeException($e->getMessage() . ' Restore from backup: ' . $backup['path'], 0, $e);
+            throw $e;
         }
         (new PortalKernelSynchronizer())->synchronize($this->pdo);
         Portal::reset();
         return [
             'bundle_id' => $validation['bundle_id'],
-            'backup_path' => $backup['path'],
+            'safety_reference' => $backup->reference(),
             'modules' => $moduleResults,
         ];
     }
@@ -284,12 +293,6 @@ final class PortalPortabilityService
             (array) ($payload['custom_roles'] ?? [])
         )));
         $this->validateCorePayload($payload, [], $knownRoleKeys);
-        $institution = $payload['institution'];
-        $stmt = $this->pdo->prepare(
-            "UPDATE institutions SET public_id = ?, created_at = ?, updated_at = ? WHERE slug = 'default'"
-        );
-        $stmt->execute([$institution['public_id'], $institution['created_at'], $institution['updated_at']]);
-
         $role = $this->pdo->prepare(
             'INSERT INTO roles (role_key, label, system_role, created_at, updated_at) VALUES (?, ?, 0, ?, ?)
              ON CONFLICT(role_key) DO UPDATE SET label = excluded.label, updated_at = excluded.updated_at'
@@ -346,6 +349,20 @@ final class PortalPortabilityService
             throw new RuntimeException('The portal has no default institution.');
         }
         return $row;
+    }
+
+    private function assertTargetIdentityCompatible(string $bundleInstitutionPublicId): void
+    {
+        $targetInstitutionPublicId = (string) ($this->institutionRow()['public_id'] ?? '');
+        if (preg_match('/\Ainst_[a-f0-9]{32}\z/D', $targetInstitutionPublicId) === 1
+            && preg_match('/\Ainst_[a-f0-9]{32}\z/D', $bundleInstitutionPublicId) === 1) {
+            return;
+        }
+        if (preg_match('/\Atenant_[a-f0-9]{32}\z/D', $targetInstitutionPublicId) === 1
+            && hash_equals($targetInstitutionPublicId, $bundleInstitutionPublicId)) {
+            return;
+        }
+        throw new RuntimeException('Portability bundle identity is not compatible with the installed target.');
     }
 
     private function installedModules(): array
@@ -415,7 +432,7 @@ final class PortalPortabilityService
         try {
             $payload = json_decode((string) file_get_contents($path), true, 512, JSON_THROW_ON_ERROR);
         } catch (\JsonException $e) {
-            throw new RuntimeException('Portability JSON is invalid: ' . $e->getMessage());
+            throw new UserVisibleException('PORTABILITY_JSON_INVALID', 'Portability JSON is invalid.', $e);
         }
         if (!is_array($payload)) {
             throw new RuntimeException('Portability JSON root must be an object: ' . $path);

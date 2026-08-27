@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Modules\Placement\Workflow;
 
+use App\Core\Http\UserVisibleException;
 use App\Support\Database;
 use PDO;
 use RuntimeException;
@@ -82,7 +83,7 @@ final class WorkflowRepository
         $stmt->execute([$applicationId]);
         $versionId = $stmt->fetchColumn();
         if ($versionId === false) {
-            throw new RuntimeException('Application not found.');
+            throw new UserVisibleException('WORKFLOW_APPLICATION_NOT_FOUND', 'Application not found.');
         }
         if ($versionId === null) {
             $this->ensureApplicationInstance($applicationId);
@@ -165,7 +166,7 @@ final class WorkflowRepository
         $stmt->execute([$applicationId]);
         $application = $stmt->fetch();
         if (!$application) {
-            throw new RuntimeException('Application not found.');
+            throw new UserVisibleException('WORKFLOW_APPLICATION_NOT_FOUND', 'Application not found.');
         }
 
         $versionId = (int) ($application['workflow_version_id'] ?? 0);
@@ -236,7 +237,7 @@ final class WorkflowRepository
         $toState = (string) $transition['to'];
         $state = $workflow['states'][$toState] ?? null;
         if ($state === null) {
-            throw new RuntimeException('Transition target is not in the pinned workflow.');
+            throw new UserVisibleException('WORKFLOW_TRANSITION_INVALID', 'Transition target is not in the pinned workflow.');
         }
         $now = cpe_now();
         $update = $this->pdo->prepare(
