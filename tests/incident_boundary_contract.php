@@ -51,9 +51,10 @@ function incident_reserve_port(): int
 
 /**
  * @param array<string, string> $environment
+ * @param array<string, string> $iniSettings
  * @return array{0: resource, 1: array<int, resource>, 2: int}
  */
-function incident_start_server(array $environment, string $phpLogPath): array
+function incident_start_server(array $environment, string $phpLogPath, array $iniSettings = []): array
 {
     $port = incident_reserve_port();
     $processEnvironment = getenv();
@@ -79,9 +80,15 @@ function incident_start_server(array $environment, string $phpLogPath): array
         unset($processEnvironment[$key]);
     }
     $processEnvironment = array_merge($processEnvironment, $environment);
+    $command = [PHP_BINARY, '-d', 'display_errors=1'];
+    foreach ($iniSettings as $name => $value) {
+        $command[] = '-d';
+        $command[] = $name . '=' . $value;
+    }
+    array_push($command, '-S', '127.0.0.1:' . $port, '-t', cpe_path('public'));
     $pipes = [];
     $process = proc_open(
-        [PHP_BINARY, '-d', 'display_errors=1', '-S', '127.0.0.1:' . $port, '-t', cpe_path('public')],
+        $command,
         [0 => ['pipe', 'r'], 1 => ['file', $phpLogPath, 'a'], 2 => ['file', $phpLogPath, 'a']],
         $pipes,
         cpe_path(),
@@ -320,6 +327,7 @@ $paths = [];
 $process = null;
 $pipes = [];
 $streamRegistered = false;
+$setupSessionDirectory = null;
 
 try {
     $visible = new UserVisibleException('SETUP_CONTRACT_INVALID', 'Reviewed setup guidance.');
@@ -844,6 +852,11 @@ try {
     $setupDatabase = sys_get_temp_dir() . '/cpe-incident-setup-' . $suffix . '.sqlite';
     $setupPhpLog = sys_get_temp_dir() . '/cpe-incident-setup-' . $suffix . '.log';
     $setupStructuredLog = $safeTmp . '/cpe-incident-setup-' . $suffix . '.jsonl';
+    $setupSessionDirectory = $safeTmp . '/cpe-incident-setup-sessions-' . $suffix;
+    incident_true(
+        mkdir($setupSessionDirectory, 0700),
+        'Could not create private setup session storage.',
+    );
     array_push($paths, $setupDatabase, $setupDatabase . '-shm', $setupDatabase . '-wal', $setupPhpLog, $setupStructuredLog);
     putenv('CPE_DB_PATH=' . $setupDatabase);
     Database::reset();
@@ -864,10 +877,20 @@ try {
         'CPE_SETUP_TOKEN' => $setupToken,
         'CPE_SESSION_SECURE' => 'force',
         'CPE_LOG_PATH' => $setupStructuredLog,
-    ], $setupPhpLog);
+    ], $setupPhpLog, [
+        'session.save_path' => $setupSessionDirectory,
+        'session.gc_probability' => '0',
+    ]);
     $cookie = '';
     $unlockForm = incident_request($port, 'GET', '/install.php');
+    incident_same($unlockForm['status'], 200, 'Setup unlock form was unavailable.');
     $cookie = incident_cookie($unlockForm, $cookie);
+    incident_true($cookie !== '', 'Setup unlock form did not establish a session cookie.');
+    incident_same(
+        count(glob($setupSessionDirectory . '/sess_*') ?: []),
+        1,
+        'Setup CSRF state was not persisted in private session storage.',
+    );
     $unlock = incident_request(
         $port,
         'POST',
@@ -1168,6 +1191,14 @@ try {
     putenv('CPE_NOTIFICATION_SMS_AUTHORIZATION');
     if ($streamRegistered) {
         stream_wrapper_unregister('incidentfail');
+    }
+    if (is_string($setupSessionDirectory) && is_dir($setupSessionDirectory)) {
+        foreach (glob($setupSessionDirectory . '/*') ?: [] as $sessionFile) {
+            if (is_file($sessionFile) || is_link($sessionFile)) {
+                unlink($sessionFile);
+            }
+        }
+        rmdir($setupSessionDirectory);
     }
     foreach (array_unique($paths) as $path) {
         if (is_dir($path)) {
