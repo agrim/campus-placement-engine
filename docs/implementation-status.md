@@ -2,6 +2,16 @@
 
 Date: 2026-07-18
 
+> Release update, 2026-08-28: public Engine `v0.1.0-alpha.2` is published from
+> the exact tagged commit with verified ZIP, tar.gz, and checksum assets. The
+> private Cloud control plane consumes that immutable artifact and its versioned
+> managed-hosting contract. Cloud CI now covers package verification,
+> control-plane isolation, and a full PostgreSQL hosted lifecycle with two
+> separately credentialed institution databases. This is repository evidence,
+> not a production-SaaS claim: real infrastructure, secrets, DNS/TLS, offsite
+> retention and restore drills, monitoring, billing, and support/SLO operations
+> remain deployment gates.
+
 > Repository-boundary update, 2026-08-26: hosted control-plane, tenant
 > provisioning, fleet-operation, and support-management implementation now lives
 > in a separate private Cloud repository. This public repository retains the
