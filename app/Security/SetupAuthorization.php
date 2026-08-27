@@ -119,7 +119,9 @@ final class SetupAuthorization
             : Closure::fromCallable($sessionIdProvider);
         $this->sessionRegenerator = $sessionRegenerator === null
             ? static function (): void {
-                if (session_status() !== PHP_SESSION_ACTIVE || !session_regenerate_id(true)) {
+                if (session_status() !== PHP_SESSION_ACTIVE
+                    || headers_sent()
+                    || !@session_regenerate_id(true)) {
                     throw new SetupAuthorizationDenied(SetupAuthorizationDenied::STATE_UNAVAILABLE);
                 }
             }

@@ -966,8 +966,15 @@ try {
             );
         }
         if ($stateSize === 0 && $unlockResponseSessionId === $setupSessionId) {
+            $oldSessionAfterFailure = @lstat($setupSessionPath);
+            if (is_array($oldSessionAfterFailure)
+                && (($oldSessionAfterFailure['mode'] ?? 0) & 0170000) === 0100000) {
+                throw new RuntimeException(
+                    'Setup unlock could not destroy the pre-authorization session during rotation.',
+                );
+            }
             throw new RuntimeException(
-                'Setup unlock reached protected state creation but session regeneration did not complete.',
+                'Setup unlock destroyed the pre-authorization session but did not complete rotation.',
             );
         }
         if ($stateSize === 0) {
