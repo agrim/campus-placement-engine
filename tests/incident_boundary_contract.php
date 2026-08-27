@@ -209,6 +209,20 @@ function incident_cookie(array $response, string $current = ''): string
     return implode('; ', $pairs);
 }
 
+function incident_cookie_value(string $cookie, string $name): ?string
+{
+    foreach (explode('; ', $cookie) as $pair) {
+        if (!str_contains($pair, '=')) {
+            continue;
+        }
+        [$candidate, $value] = explode('=', $pair, 2);
+        if (hash_equals($name, $candidate)) {
+            return $value;
+        }
+    }
+    return null;
+}
+
 function incident_csrf(string $html): string
 {
     if (preg_match('/name="_token" value="([a-f0-9]{64})"/', $html, $matches) !== 1) {
@@ -886,10 +900,38 @@ try {
     incident_same($unlockForm['status'], 200, 'Setup unlock form was unavailable.');
     $cookie = incident_cookie($unlockForm, $cookie);
     incident_true($cookie !== '', 'Setup unlock form did not establish a session cookie.');
+    $unlockCookieHeaders = implode('; ', $unlockForm['headers']['set-cookie'] ?? []);
+    incident_true(
+        stripos($unlockCookieHeaders, 'secure') !== false,
+        'Setup unlock server did not apply the forced secure-session transport policy.',
+    );
+    $setupSessionName = cpe_config('security.session_name', 'cpe_session');
+    $setupSessionId = incident_cookie_value($cookie, $setupSessionName);
+    incident_true(
+        is_string($setupSessionId)
+            && preg_match('/\A[A-Za-z0-9,-]{16,256}\z/D', $setupSessionId) === 1,
+        'Setup unlock form returned an invalid session identifier.',
+    );
+    $setupSessionPath = $setupSessionDirectory . '/sess_' . $setupSessionId;
     incident_same(
         count(glob($setupSessionDirectory . '/sess_*') ?: []),
         1,
         'Setup CSRF state was not persisted in private session storage.',
+    );
+    $setupSessionStat = @lstat($setupSessionPath);
+    incident_true(
+        is_array($setupSessionStat)
+            && (($setupSessionStat['mode'] ?? 0) & 0170000) === 0100000
+            && is_int($setupSessionStat['size'] ?? null)
+            && $setupSessionStat['size'] > 0
+            && $setupSessionStat['size'] <= 4096,
+        'Setup CSRF session storage was empty, unsafe, or oversized.',
+    );
+    $unlockCsrf = incident_csrf($unlockForm['body']);
+    $setupSessionContents = @file_get_contents($setupSessionPath);
+    incident_true(
+        is_string($setupSessionContents) && str_contains($setupSessionContents, $unlockCsrf),
+        'Setup CSRF state was not present in the session selected by the response cookie.',
     );
     $unlock = incident_request(
         $port,
@@ -898,10 +940,45 @@ try {
         ['Cookie' => $cookie],
         http_build_query([
             '_setup_action' => 'unlock',
-            '_token' => incident_csrf($unlockForm['body']),
+            '_token' => $unlockCsrf,
             'setup_token' => $setupToken,
         ]),
     );
+    if ($unlock['status'] !== 303) {
+        $unlockResponseCookie = incident_cookie($unlock, $cookie);
+        $unlockResponseSessionId = incident_cookie_value($unlockResponseCookie, $setupSessionName);
+        $stateStat = @lstat($setupStatePath);
+        if (!is_array($stateStat)) {
+            if ($unlockResponseSessionId !== $setupSessionId) {
+                throw new RuntimeException(
+                    'Setup unlock POST did not resume the submitted session before authorization.',
+                );
+            }
+            throw new RuntimeException(
+                'Setup unlock was denied before protected authorization-state creation despite persisted CSRF and forced transport.',
+            );
+        }
+        $stateSize = is_int($stateStat['size'] ?? null) ? $stateStat['size'] : -1;
+        $stateMode = ($stateStat['mode'] ?? 0) & 0777;
+        if ($stateSize === 0 && $stateMode !== 0600) {
+            throw new RuntimeException(
+                'Setup unlock created authorization state but failed its protected file checks.',
+            );
+        }
+        if ($stateSize === 0 && $unlockResponseSessionId === $setupSessionId) {
+            throw new RuntimeException(
+                'Setup unlock reached protected state creation but session regeneration did not complete.',
+            );
+        }
+        if ($stateSize === 0) {
+            throw new RuntimeException(
+                'Setup unlock regenerated the session but failed before durable grant-state write.',
+            );
+        }
+        throw new RuntimeException(
+            'Setup unlock created non-empty authorization state but did not return the required redirect.',
+        );
+    }
     incident_same($unlock['status'], 303, 'Setup unlock no longer uses 303.');
     $cookie = incident_cookie($unlock, $cookie);
     $setupForm = incident_request($port, 'GET', '/install.php', ['Cookie' => $cookie]);
