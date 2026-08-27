@@ -948,6 +948,33 @@ try {
         ]),
     );
     if ($unlock['status'] !== 303) {
+        $unlockFailureRecords = incident_log_records($setupStructuredLog);
+        $rotationIncidents = array_values(array_filter(
+            $unlockFailureRecords,
+            static fn (array $record): bool => ($record['context']['diagnostic_code'] ?? null)
+                === 'CPE_SETUP_AUTHORIZATION_STATE_UNAVAILABLE'
+                && ($record['context']['safe_context']['operation'] ?? null) === 'unlock',
+        ));
+        if (count($rotationIncidents) === 1) {
+            $rotationPhase = $rotationIncidents[0]['context']['safe_context']['phase'] ?? 'session_rotation_unknown';
+            if (!in_array($rotationPhase, [
+                'session_write', 'session_reopen', 'session_id_create', 'session_id_read',
+                'session_cookie_reset', 'session_rotation_unknown',
+            ], true)) {
+                $rotationPhase = 'session_rotation_unknown';
+            }
+            throw new RuntimeException(
+                'Setup unlock session rotation failed during fixed phase: ' . $rotationPhase . '.',
+            );
+        }
+        $unexpectedRotationIncidents = array_values(array_filter(
+            $unlockFailureRecords,
+            static fn (array $record): bool => ($record['context']['diagnostic_code'] ?? null)
+                === 'CPE_SETUP_UNLOCK_FAILED',
+        ));
+        if (count($unexpectedRotationIncidents) === 1) {
+            throw new RuntimeException('Setup unlock session rotation threw an unclassified internal failure.');
+        }
         $unlockResponseCookie = incident_cookie($unlock, $cookie);
         $unlockResponseSessionId = incident_cookie_value($unlockResponseCookie, $setupSessionName);
         $stateStat = @lstat($setupStatePath);

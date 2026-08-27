@@ -25,7 +25,8 @@ final class IncidentReporter
         'mode' => ['readiness', 'liveness', 'environment_token', 'local'],
         'phase' => [
             'error_handler', 'uncaught', 'shutdown', 'authorization_header', 'payload_json', 'rollback',
-            'acknowledgment', 'failure_state',
+            'acknowledgment', 'failure_state', 'session_write', 'session_reopen', 'session_id_create',
+            'session_id_read', 'session_cookie_reset', 'session_rotation_unknown',
         ],
         'status' => ['failed'],
         'route' => [

@@ -8,6 +8,7 @@ require __DIR__ . '/../app/bootstrap.php';
 use App\Security\SetupAuthorization;
 use App\Security\SetupAuthorizationDenied;
 use App\Security\SetupHttp;
+use App\Security\SetupSessionRotationFailure;
 
 function setup_b64(string $bytes): string
 {
@@ -30,6 +31,44 @@ function setup_true(bool $condition, string $message): void
         throw new RuntimeException($message);
     }
 }
+
+$rotationDiagnosticSentinel = '/private/setup-rotation-sentinel session-id-sentinel';
+foreach ([
+    'Session write failed. ID: files (path: ' . $rotationDiagnosticSentinel . ')' => SetupSessionRotationFailure::SESSION_WRITE,
+    'Failed to open session: files (path: ' . $rotationDiagnosticSentinel . ')' => SetupSessionRotationFailure::HANDLER_REOPEN,
+    'Failed to create new session ID: files (path: ' . $rotationDiagnosticSentinel . ')' => SetupSessionRotationFailure::ID_CREATE,
+    'Failed to create session ID by collision: files (path: ' . $rotationDiagnosticSentinel . ')' => SetupSessionRotationFailure::ID_CREATE,
+    'Failed to create(read) session ID: files (path: ' . $rotationDiagnosticSentinel . ')' => SetupSessionRotationFailure::ID_READ,
+    'Cannot set session ID - session ID is not initialized' => SetupSessionRotationFailure::COOKIE_RESET,
+    'unexpected rotation diagnostic ' . $rotationDiagnosticSentinel => SetupSessionRotationFailure::UNKNOWN,
+] as $diagnostic => $expectedPhase) {
+    $rotationFailure = SetupSessionRotationFailure::fromPhpDiagnostic($diagnostic);
+    setup_same($rotationFailure->phase(), $expectedPhase, 'Setup session rotation diagnostic classification changed');
+    $denied = new SetupAuthorizationDenied(SetupAuthorizationDenied::STATE_UNAVAILABLE, $rotationFailure);
+    $chain = $denied;
+    $chainDepth = 0;
+    while ($chain instanceof Throwable) {
+        setup_true(
+            !str_contains($chain->getMessage(), $rotationDiagnosticSentinel),
+            'Setup session rotation failure chain reflected a raw PHP diagnostic',
+        );
+        setup_true(
+            in_array($chain->getMessage(), [
+                'Setup authorization state is unavailable.',
+                'Setup session rotation failed.',
+            ], true),
+            'Setup session rotation failure chain included an unreviewed message',
+        );
+        $chainDepth++;
+        $chain = $chain->getPrevious();
+    }
+    setup_same($chainDepth, 2, 'Setup session rotation failure chain retained an unexpected cause');
+}
+setup_same(
+    SetupSessionRotationFailure::withoutPhpDiagnostic()->phase(),
+    SetupSessionRotationFailure::UNKNOWN,
+    'A warning-free PHP 8.2 rotation failure must remain unclassified',
+);
 
 /** @param callable(): mixed $callback */
 function setup_denied(callable $callback, string $reason, string $message): void

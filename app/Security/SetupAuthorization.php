@@ -7,6 +7,7 @@ namespace App\Security;
 use App\Support\Database;
 use Closure;
 use JsonException;
+use Throwable;
 
 /**
  * Versioned first-run setup authorization core.
@@ -121,10 +122,36 @@ final class SetupAuthorization
             ? static function (): void {
                 // No setup authorization grant is assigned until rotation has
                 // completed, so the retained pre-rotation ID stays unauthorized.
-                if (session_status() !== PHP_SESSION_ACTIVE
-                    || headers_sent()
-                    || !@session_regenerate_id(false)) {
+                if (session_status() !== PHP_SESSION_ACTIVE || headers_sent()) {
                     throw new SetupAuthorizationDenied(SetupAuthorizationDenied::STATE_UNAVAILABLE);
+                }
+                $warningFailure = null;
+                set_error_handler(static function (int $severity, string $message) use (&$warningFailure): bool {
+                    $candidate = SetupSessionRotationFailure::fromPhpDiagnostic($message);
+                    if ($warningFailure === null
+                        || ($warningFailure->phase() === SetupSessionRotationFailure::UNKNOWN
+                            && $candidate->phase() !== SetupSessionRotationFailure::UNKNOWN)) {
+                        $warningFailure = $candidate;
+                    }
+                    return true;
+                }, E_WARNING);
+                try {
+                    try {
+                        $rotated = session_regenerate_id(false);
+                    } catch (Throwable $e) {
+                        throw new SetupAuthorizationDenied(
+                            SetupAuthorizationDenied::STATE_UNAVAILABLE,
+                            SetupSessionRotationFailure::fromPhpDiagnostic($e->getMessage()),
+                        );
+                    }
+                } finally {
+                    restore_error_handler();
+                }
+                if (!$rotated || $warningFailure instanceof SetupSessionRotationFailure) {
+                    throw new SetupAuthorizationDenied(
+                        SetupAuthorizationDenied::STATE_UNAVAILABLE,
+                        $warningFailure ?? SetupSessionRotationFailure::withoutPhpDiagnostic(),
+                    );
                 }
             }
             : Closure::fromCallable($sessionRegenerator);

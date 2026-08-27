@@ -112,7 +112,8 @@ final class StructuredLogger
             'mode' => in_array($value, ['readiness', 'liveness', 'environment_token', 'local'], true),
             'phase' => in_array($value, [
                 'error_handler', 'uncaught', 'shutdown', 'authorization_header', 'payload_json', 'rollback',
-                'acknowledgment', 'failure_state',
+                'acknowledgment', 'failure_state', 'session_write', 'session_reopen', 'session_id_create',
+                'session_id_read', 'session_cookie_reset', 'session_rotation_unknown',
             ], true),
             'status' => in_array($value, ['failed'], true),
             'route' => preg_match('/\A(?:bootstrap|unknown|login|sso|logout|portal|modules|public|student|board|move|return-to-idle|board-preferences|notifications|notification-acknowledge|candidate|records(?:-(?:candidate|company|round|schedule|panelist|slot-assignment|application))?|reports|import(?:-rollback)?|admin(?:-(?:user|users|password|workflow))?|preferences(?:-resolve)?|wanted(?:-resolve)?|system(?:-clear-demo)?|advising(?:-(?:appointment|status|note|task))?)\z/D', $value) === 1,

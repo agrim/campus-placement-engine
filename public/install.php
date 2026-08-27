@@ -12,6 +12,7 @@ use App\Security\Csrf;
 use App\Security\SetupAuthorization;
 use App\Security\SetupAuthorizationDenied;
 use App\Security\SetupHttp;
+use App\Security\SetupSessionRotationFailure;
 use App\Support\Database;
 use App\Support\IncidentReporter;
 
@@ -28,11 +29,16 @@ function cpe_setup_authorization_denied(
     string $operation,
 ): never {
     if ($exception->reason() === SetupAuthorizationDenied::STATE_UNAVAILABLE) {
+        $context = ['operation' => $operation];
+        $cause = $exception->getPrevious();
+        if ($cause instanceof SetupSessionRotationFailure) {
+            $context['phase'] = $cause->phase();
+        }
         IncidentReporter::report(
             $exception,
             'CPE_SETUP_AUTHORIZATION_STATE_UNAVAILABLE',
             'setup',
-            ['operation' => $operation],
+            $context,
         );
     }
     cpe_setup_not_found();
