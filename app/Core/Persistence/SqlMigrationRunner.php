@@ -90,7 +90,7 @@ final class SqlMigrationRunner
         $started = false;
         $callbackFailure = null;
         try {
-            $this->pdo->exec('BEGIN IMMEDIATE');
+            $this->pdo->beginTransaction();
             $started = true;
             $this->createAndVerifyRegistry('sqlite', $table);
             $applied = $this->appliedSet($table);
@@ -122,7 +122,7 @@ final class SqlMigrationRunner
                     }
                 }
             }
-            $this->pdo->exec('COMMIT');
+            $this->pdo->commit();
             $started = false;
         } catch (Throwable $e) {
             if ($started) {
