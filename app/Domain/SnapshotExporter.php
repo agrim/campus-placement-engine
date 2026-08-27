@@ -260,7 +260,7 @@ final class SnapshotExporter
                 'headers' => ['id', 'recipient_role', 'recipient_scope_type', 'recipient_scope_value', 'channel', 'template_key', 'subject', 'body', 'status', 'source_type', 'source_id', 'created_by_email', 'acknowledged_by_email', 'created_at', 'acknowledged_at'],
                 'sql' => 'SELECT n.id, n.recipient_role, n.recipient_scope_type, n.recipient_scope_value,
                                  n.channel, n.template_key, n.subject, n.body, n.status,
-                                 n.source_type, COALESCE(n.source_id, \'\') AS source_id,
+                                 n.source_type, n.source_id,
                                  COALESCE(cu.email, \'\') AS created_by_email,
                                  COALESCE(au.email, \'\') AS acknowledged_by_email,
                                  n.created_at, COALESCE(n.acknowledged_at, \'\') AS acknowledged_at
@@ -344,7 +344,7 @@ final class SnapshotExporter
                 'headers' => ['id', 'candidate_external_id', 'company_code', 'current_status', 'previous_company_code', 'next_company_code', 'waitlist_rank', 'created_at', 'updated_at'],
                 'sql' => 'SELECT a.id, c.external_id AS candidate_external_id, co.code AS company_code, a.current_status,
                                  COALESCE(pc.code, \'\') AS previous_company_code, COALESCE(nc.code, \'\') AS next_company_code,
-                                 COALESCE(a.waitlist_rank, \'\') AS waitlist_rank, a.created_at, a.updated_at
+                                 a.waitlist_rank, a.created_at, a.updated_at
                           FROM applications a
                           JOIN candidates c ON c.id = a.candidate_id
                           JOIN companies co ON co.id = a.company_id
@@ -397,7 +397,7 @@ final class SnapshotExporter
             'audit_logs' => [
                 'headers' => ['id', 'actor_email', 'action', 'subject_type', 'subject_id', 'detail', 'ip_address', 'user_agent', 'created_at'],
                 'sql' => 'SELECT a.id, COALESCE(u.email, \'\') AS actor_email, a.action, a.subject_type,
-                                 COALESCE(a.subject_id, \'\') AS subject_id, \'Audit event recorded.\' AS detail,
+                                 a.subject_id, \'Audit event recorded.\' AS detail,
                                  \'\' AS ip_address, \'\' AS user_agent, a.created_at
                           FROM audit_logs a
                           LEFT JOIN users u ON u.id = a.actor_user_id
