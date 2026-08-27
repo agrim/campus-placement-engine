@@ -235,7 +235,10 @@ function incident_csrf(string $html): string
 function incident_log_records(string $path): array
 {
     $records = [];
-    foreach (file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [] as $line) {
+    if (!is_file($path)) {
+        return $records;
+    }
+    foreach (@file($path, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [] as $line) {
         $record = json_decode($line, true, 32, JSON_THROW_ON_ERROR);
         if (is_array($record)) {
             $records[] = $record;
@@ -966,15 +969,8 @@ try {
             );
         }
         if ($stateSize === 0 && $unlockResponseSessionId === $setupSessionId) {
-            $oldSessionAfterFailure = @lstat($setupSessionPath);
-            if (is_array($oldSessionAfterFailure)
-                && (($oldSessionAfterFailure['mode'] ?? 0) & 0170000) === 0100000) {
-                throw new RuntimeException(
-                    'Setup unlock could not destroy the pre-authorization session during rotation.',
-                );
-            }
             throw new RuntimeException(
-                'Setup unlock destroyed the pre-authorization session but did not complete rotation.',
+                'Setup unlock reached protected state creation but did not complete session rotation.',
             );
         }
         if ($stateSize === 0) {
@@ -987,7 +983,118 @@ try {
         );
     }
     incident_same($unlock['status'], 303, 'Setup unlock no longer uses 303.');
-    $cookie = incident_cookie($unlock, $cookie);
+    $authorizedCookie = incident_cookie($unlock, $cookie);
+    $authorizedSessionId = incident_cookie_value($authorizedCookie, $setupSessionName);
+    incident_true(
+        is_string($authorizedSessionId)
+            && preg_match('/\A[A-Za-z0-9,-]{16,256}\z/D', $authorizedSessionId) === 1
+            && !hash_equals($setupSessionId, $authorizedSessionId),
+        'Setup authorization did not rotate to a distinct session identifier.',
+    );
+    $oldSessionContents = @file_get_contents($setupSessionPath);
+    incident_true(
+        is_string($oldSessionContents)
+            && str_contains($oldSessionContents, $unlockCsrf)
+            && !str_contains($oldSessionContents, 'cpe_setup_authorization_v1'),
+        'The pre-authorization session received setup grant state.',
+    );
+    $authorizedSessionPath = $setupSessionDirectory . '/sess_' . $authorizedSessionId;
+    $authorizedSessionStat = @lstat($authorizedSessionPath);
+    $authorizedSessionContents = @file_get_contents($authorizedSessionPath);
+    incident_true(
+        is_array($authorizedSessionStat)
+            && (($authorizedSessionStat['mode'] ?? 0) & 0170000) === 0100000
+            && is_int($authorizedSessionStat['size'] ?? null)
+            && $authorizedSessionStat['size'] > 0
+            && $authorizedSessionStat['size'] <= 8192
+            && is_string($authorizedSessionContents)
+            && str_contains($authorizedSessionContents, 'cpe_setup_authorization_v1')
+            && !str_contains($authorizedSessionContents, $setupToken),
+        'The rotated setup session did not persist bounded grant state safely.',
+    );
+    $oldSessionForm = incident_request($port, 'GET', '/install.php', ['Cookie' => $cookie]);
+    incident_same($oldSessionForm['status'], 200, 'The pre-authorization session was not handled safely.');
+    incident_true(
+        str_contains($oldSessionForm['body'], 'Authorize first-run setup')
+            && !str_contains($oldSessionForm['body'], 'name="admin_email"'),
+        'The pre-authorization session gained access to the setup form.',
+    );
+    $oldSessionRetry = incident_request(
+        $port,
+        'POST',
+        '/install.php',
+        ['Cookie' => $cookie],
+        http_build_query([
+            '_setup_action' => 'unlock',
+            '_token' => incident_csrf($oldSessionForm['body']),
+            'setup_token' => $setupToken,
+        ]),
+    );
+    incident_same(
+        $oldSessionRetry['status'],
+        404,
+        'The pre-authorization session bypassed the active setup lease.',
+    );
+    $oldSessionAfterRetry = incident_request($port, 'GET', '/install.php', ['Cookie' => $cookie]);
+    incident_same($oldSessionAfterRetry['status'], 200, 'The rejected pre-authorization session was not retry-safe.');
+    incident_true(
+        str_contains($oldSessionAfterRetry['body'], 'Authorize first-run setup')
+            && !str_contains($oldSessionAfterRetry['body'], 'name="admin_email"'),
+        'The rejected pre-authorization session acquired setup access.',
+    );
+    $recordsBeforeStateFailure = incident_log_records($setupStructuredLog);
+    incident_same(
+        count($recordsBeforeStateFailure),
+        0,
+        'Rejected setup credentials or lease retries entered the incident log.',
+    );
+    incident_true(chmod($setupStatePath, 0000), 'Could not create the setup state-unavailable fixture.');
+    try {
+        $stateUnavailable = incident_request(
+            $port,
+            'GET',
+            '/install.php',
+            ['Cookie' => $authorizedCookie],
+        );
+    } finally {
+        chmod($setupStatePath, 0600);
+    }
+    incident_same($stateUnavailable['status'], 404, 'Setup state failure was not concealed.');
+    incident_same($stateUnavailable['body'], "Not found.\n", 'Setup state failure changed the concealed response.');
+    $recordsAfterStateFailure = incident_log_records($setupStructuredLog);
+    $stateFailureRecords = array_values(array_filter(
+        array_slice($recordsAfterStateFailure, count($recordsBeforeStateFailure)),
+        static fn (array $record): bool => ($record['context']['diagnostic_code'] ?? null)
+            === 'CPE_SETUP_AUTHORIZATION_STATE_UNAVAILABLE',
+    ));
+    incident_same(
+        count($recordsAfterStateFailure),
+        count($recordsBeforeStateFailure) + 1,
+        'Setup state failure created unexpected protected log records.',
+    );
+    incident_same(count($stateFailureRecords), 1, 'Setup state failure did not create one protected incident.');
+    incident_true(
+        preg_match(
+            '/\Ainc_[a-f0-9]{32}\z/D',
+            (string) ($stateFailureRecords[0]['context']['incident_id'] ?? ''),
+        ) === 1,
+        'Setup state failure did not create a valid opaque incident identifier.',
+    );
+    incident_same(
+        $stateFailureRecords[0]['context']['safe_context']['operation'] ?? null,
+        'authorization',
+        'Setup state failure recorded the wrong fixed operation.',
+    );
+    $stateFailureLog = (string) @file_get_contents($setupStructuredLog)
+        . (is_file($setupPhpLog) ? (string) @file_get_contents($setupPhpLog) : '');
+    incident_assert_absent($stateFailureLog, [
+        'database_path' => $setupDatabase,
+        'session_id' => $setupSessionId,
+        'authorized_session_id' => $authorizedSessionId,
+        'setup_token' => $setupToken,
+        'state_path' => $setupStatePath,
+    ], 'Setup state-unavailable logs');
+    $cookie = $authorizedCookie;
     $setupForm = incident_request($port, 'GET', '/install.php', ['Cookie' => $cookie]);
     incident_same($setupForm['status'], 200, 'Authorized setup form was unavailable.');
     incident_true(!str_contains($setupForm['body'], $setupDatabase), 'Setup form exposed the database path.');

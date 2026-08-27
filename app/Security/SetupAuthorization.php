@@ -119,9 +119,11 @@ final class SetupAuthorization
             : Closure::fromCallable($sessionIdProvider);
         $this->sessionRegenerator = $sessionRegenerator === null
             ? static function (): void {
+                // No setup authorization grant is assigned until rotation has
+                // completed, so the retained pre-rotation ID stays unauthorized.
                 if (session_status() !== PHP_SESSION_ACTIVE
                     || headers_sent()
-                    || !@session_regenerate_id(true)) {
+                    || !@session_regenerate_id(false)) {
                     throw new SetupAuthorizationDenied(SetupAuthorizationDenied::STATE_UNAVAILABLE);
                 }
             }

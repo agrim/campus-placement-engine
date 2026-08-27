@@ -23,6 +23,21 @@ function cpe_setup_not_found(): never
     exit;
 }
 
+function cpe_setup_authorization_denied(
+    SetupAuthorizationDenied $exception,
+    string $operation,
+): never {
+    if ($exception->reason() === SetupAuthorizationDenied::STATE_UNAVAILABLE) {
+        IncidentReporter::report(
+            $exception,
+            'CPE_SETUP_AUTHORIZATION_STATE_UNAVAILABLE',
+            'setup',
+            ['operation' => $operation],
+        );
+    }
+    cpe_setup_not_found();
+}
+
 function cpe_setup_hosted_unavailable(): never
 {
     http_response_code(503);
@@ -110,8 +125,8 @@ try {
             localCapability: $localCapability,
         );
         $access = $authorization->accessState();
-    } catch (SetupAuthorizationDenied) {
-        cpe_setup_not_found();
+    } catch (SetupAuthorizationDenied $e) {
+        cpe_setup_authorization_denied($e, 'authorization');
     } catch (Throwable $e) {
         IncidentReporter::report(
             $e,
@@ -170,8 +185,8 @@ try {
                 }
                 $authorization->unlockWithEnvironmentToken($_POST['setup_token'] ?? null);
             }
-        } catch (SetupAuthorizationDenied) {
-            cpe_setup_not_found();
+        } catch (SetupAuthorizationDenied $e) {
+            cpe_setup_authorization_denied($e, 'unlock');
         } catch (Throwable $e) {
             IncidentReporter::report(
                 $e,
@@ -189,14 +204,14 @@ try {
         }
         try {
             (new InstallController())->install($authorization);
-        } catch (SetupAuthorizationDenied) {
-            cpe_setup_not_found();
+        } catch (SetupAuthorizationDenied $e) {
+            cpe_setup_authorization_denied($e, 'install');
         }
         exit;
     }
     cpe_setup_not_found();
-} catch (SetupAuthorizationDenied) {
-    cpe_setup_not_found();
+} catch (SetupAuthorizationDenied $e) {
+    cpe_setup_authorization_denied($e, 'request');
 } catch (Throwable $e) {
     cpe_setup_unexpected($e, 'CPE_SETUP_REQUEST_FAILED', 'request');
 }
