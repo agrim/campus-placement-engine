@@ -962,6 +962,8 @@ try {
                 'session_write', 'session_reopen', 'session_id_create', 'session_id_read',
                 'session_cookie_reset', 'session_warning_storage', 'session_warning_response',
                 'session_warning_other', 'session_returned_false', 'session_threw',
+                'state_prepare', 'state_permissions', 'session_fingerprint',
+                'state_write_prepare', 'state_write_io', 'state_sync',
             ], true)) {
                 throw new RuntimeException(
                     'Setup unlock state-unavailable incident omitted a recognized fixed session phase.',

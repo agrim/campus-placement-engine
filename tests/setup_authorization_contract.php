@@ -7,6 +7,7 @@ require __DIR__ . '/../app/bootstrap.php';
 
 use App\Security\SetupAuthorization;
 use App\Security\SetupAuthorizationDenied;
+use App\Security\SetupAuthorizationStageFailure;
 use App\Security\SetupHttp;
 use App\Security\SetupSessionRotationFailure;
 
@@ -81,6 +82,18 @@ foreach ([
     setup_same($preconditionFailure->phase(), $expectedPhase, 'Setup session precondition phase changed');
     setup_same($preconditionFailure->getMessage(), 'Setup session rotation failed.', 'Setup session precondition message changed');
     setup_true($preconditionFailure->getPrevious() === null, 'Setup session precondition retained an unsafe cause');
+}
+foreach ([
+    [SetupAuthorizationStageFailure::statePrepare(), SetupAuthorizationStageFailure::STATE_PREPARE],
+    [SetupAuthorizationStageFailure::statePermissions(), SetupAuthorizationStageFailure::STATE_PERMISSIONS],
+    [SetupAuthorizationStageFailure::sessionFingerprint(), SetupAuthorizationStageFailure::SESSION_FINGERPRINT],
+    [SetupAuthorizationStageFailure::stateWritePrepare(), SetupAuthorizationStageFailure::STATE_WRITE_PREPARE],
+    [SetupAuthorizationStageFailure::stateWriteIo(), SetupAuthorizationStageFailure::STATE_WRITE_IO],
+    [SetupAuthorizationStageFailure::stateSync(), SetupAuthorizationStageFailure::STATE_SYNC],
+] as [$stageFailure, $expectedPhase]) {
+    setup_same($stageFailure->phase(), $expectedPhase, 'Setup authorization stage phase changed');
+    setup_same($stageFailure->getMessage(), 'Setup authorization stage failed.', 'Setup authorization stage message changed');
+    setup_true($stageFailure->getPrevious() === null, 'Setup authorization stage retained an unsafe cause');
 }
 
 /** @param callable(): mixed $callback */
@@ -181,7 +194,13 @@ function setup_reserve_port(): int
  * @param array<string, string> $iniSettings
  * @return array{0: resource, 1: array<int, resource>, 2: int}
  */
-function setup_start_server(array $environment, string $logPath, ?int $port = null, array $iniSettings = []): array
+function setup_start_server(
+    array $environment,
+    string $logPath,
+    ?int $port = null,
+    array $iniSettings = [],
+    ?int $processUmask = null,
+): array
 {
     $port ??= setup_reserve_port();
     $processEnvironment = getenv();
@@ -213,13 +232,20 @@ function setup_start_server(array $environment, string $logPath, ?int $port = nu
     }
     array_push($command, '-S', '127.0.0.1:' . $port, '-t', cpe_path('public'));
     $pipes = [];
-    $process = proc_open(
-        $command,
-        [0 => ['pipe', 'r'], 1 => ['file', $logPath, 'a'], 2 => ['file', $logPath, 'a']],
-        $pipes,
-        cpe_path(),
-        $processEnvironment,
-    );
+    $priorUmask = $processUmask === null ? null : umask($processUmask);
+    try {
+        $process = proc_open(
+            $command,
+            [0 => ['pipe', 'r'], 1 => ['file', $logPath, 'a'], 2 => ['file', $logPath, 'a']],
+            $pipes,
+            cpe_path(),
+            $processEnvironment,
+        );
+    } finally {
+        if ($priorUmask !== null) {
+            umask($priorUmask);
+        }
+    }
     if (!is_resource($process)) {
         throw new RuntimeException('Could not start setup HTTP contract server.');
     }
@@ -431,6 +457,40 @@ $server = [
     'HTTP_X_FORWARDED_FOR' => '198.51.100.200',
     'HTTP_FORWARDED' => 'for=198.51.100.200',
 ];
+
+foreach (['pre-rotation-session', ''] as $postRotationSessionId) {
+    $rotationSession = [];
+    $rotationSessionId = 'pre-rotation-session';
+    $rotationDirectory = $root . '/rotation-' . ($postRotationSessionId === '' ? 'empty' : 'unchanged');
+    $rotationAuthorization = new SetupAuthorization(
+        environmentToken: $token,
+        stateDirectory: $rotationDirectory,
+        targetIdentity: 'rotation-' . ($postRotationSessionId === '' ? 'empty' : 'unchanged'),
+        session: $rotationSession,
+        server: $server,
+        clock: static fn (): int => 1000,
+        randomBytes: static fn (int $length): string => str_repeat("\x5A", $length),
+        sessionIdProvider: static function () use (&$rotationSessionId): string {
+            return $rotationSessionId;
+        },
+        sessionRegenerator: static function () use (&$rotationSessionId, $postRotationSessionId): void {
+            $rotationSessionId = $postRotationSessionId;
+        },
+        csrfRotator: static function (): void {
+        },
+    );
+    try {
+        $rotationAuthorization->unlockWithEnvironmentToken($token);
+        throw new RuntimeException('Setup authorization accepted an empty or unchanged post-rotation session ID.');
+    } catch (SetupAuthorizationDenied $e) {
+        setup_same($e->reason(), SetupAuthorizationDenied::STATE_UNAVAILABLE, 'Unsafe session rotation used the wrong denial');
+        $cause = $e->getPrevious();
+        setup_true($cause instanceof SetupAuthorizationStageFailure, 'Unsafe session rotation omitted its fixed stage');
+        setup_same($cause->phase(), SetupAuthorizationStageFailure::SESSION_FINGERPRINT, 'Unsafe session rotation used the wrong stage');
+        setup_true($cause->getPrevious() === null, 'Unsafe session rotation retained a raw cause');
+    }
+    setup_same($rotationSession, [], 'Unsafe session rotation assigned a setup grant');
+}
 
 // Canonical token configuration and request validation.
 foreach ([
@@ -1171,7 +1231,7 @@ try {
         'CPE_SETUP_TOKEN' => $httpToken,
         'CPE_SESSION_SECURE' => 'force',
         'CPE_LOG_PATH' => $httpLog . '.jsonl',
-    ], $httpLog);
+    ], $httpLog, processUmask: 0022);
     $httpHost = '127.0.0.1:' . $httpPort;
     $queryAttempt = setup_http_request(
         $httpPort,
@@ -1222,6 +1282,8 @@ try {
     setup_same($wrongToken['body'], $wrongCsrf['body'], 'Wrong token and wrong CSRF must use the same fixed body');
     setup_true(!is_file($httpDatabase), 'Rejected unlock attempts must not initialize the database');
 
+    $preAuthorizationCookie = $httpCookie;
+    $preAuthorizationSessionId = $httpSessionIds[count($httpSessionIds) - 1] ?? null;
     $unlock = setup_http_request(
         $httpPort,
         'POST',
@@ -1238,6 +1300,36 @@ try {
     setup_same(setup_header($unlock, 'Location'), '/install.php', 'Correct token unlock must remove the credential from navigation');
     setup_true(!str_contains((string) setup_header($unlock, 'Location'), $httpToken), 'Unlock redirect must not contain the setup token');
     setup_update_cookie($unlock, $httpCookie, $httpSessionIds);
+    $authorizedSessionId = $httpSessionIds[count($httpSessionIds) - 1] ?? null;
+    setup_true(
+        is_string($preAuthorizationSessionId)
+            && is_string($authorizedSessionId)
+            && !hash_equals($preAuthorizationSessionId, $authorizedSessionId),
+        'Correct token unlock must rotate to a distinct session identifier under umask 0022',
+    );
+    clearstatcache(true, $httpStatePath);
+    $httpStateStat = @lstat($httpStatePath);
+    setup_true(
+        is_array($httpStateStat)
+            && (($httpStateStat['mode'] ?? 0) & 0170000) === 0100000
+            && (($httpStateStat['mode'] ?? 0) & 0777) === 0600
+            && is_int($httpStateStat['size'] ?? null)
+            && $httpStateStat['size'] > 0,
+        'Correct token unlock must create nonempty mode-0600 state under umask 0022',
+    );
+    $preAuthorizationRetry = setup_http_request(
+        $httpPort,
+        'GET',
+        '/install.php',
+        $httpHost,
+        ['Cookie' => $preAuthorizationCookie],
+    );
+    setup_same($preAuthorizationRetry['status'], 200, 'The pre-rotation session must remain safely usable');
+    setup_true(
+        str_contains($preAuthorizationRetry['body'], 'Authorize first-run setup')
+            && !str_contains($preAuthorizationRetry['body'], 'name="admin_email"'),
+        'The pre-rotation session received the setup authorization grant',
+    );
 
     $installForm = setup_http_request(
         $httpPort,

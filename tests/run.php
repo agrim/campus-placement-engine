@@ -1575,6 +1575,7 @@ test_case('release package includes public source and excludes private runtime d
         assert_true(str_contains($joined, '/app/Install/InstallationStepObserver.php'), 'Package should include the installation stage observer contract');
         assert_true(str_contains($joined, '/app/Security/OperationalBearerAuthorization.php'), 'Package should include operational Bearer authorization');
         assert_true(str_contains($joined, '/app/Security/SetupAuthorization.php'), 'Package should include the setup authorization core');
+        assert_true(str_contains($joined, '/app/Security/SetupAuthorizationStageFailure.php'), 'Package should include fixed setup authorization stage failures');
         assert_true(str_contains($joined, '/app/Security/SetupHttp.php'), 'Package should include the setup HTTP boundary');
         assert_true(str_contains($joined, '/app/Views/setup-unlock.php'), 'Package should include the setup unlock view');
         assert_true(str_contains($joined, '/public/install.php'), 'Package should include the protected installer entrypoint');

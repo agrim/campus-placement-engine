@@ -28,7 +28,8 @@ final class IncidentReporter
             'acknowledgment', 'failure_state', 'session_not_active', 'session_response_started',
             'session_write', 'session_reopen', 'session_id_create',
             'session_id_read', 'session_cookie_reset', 'session_warning_storage', 'session_warning_response',
-            'session_warning_other', 'session_returned_false', 'session_threw',
+            'session_warning_other', 'session_returned_false', 'session_threw', 'state_prepare',
+            'state_permissions', 'session_fingerprint', 'state_write_prepare', 'state_write_io', 'state_sync',
         ],
         'status' => ['failed'],
         'route' => [

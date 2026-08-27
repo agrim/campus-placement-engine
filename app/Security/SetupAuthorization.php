@@ -320,7 +320,21 @@ final class SetupAuthorization
                 // lease created with its predecessor.
             }
 
+            $sessionIdBefore = ($this->sessionIdProvider)();
+            if (!$this->isValidSessionId($sessionIdBefore)) {
+                throw new SetupAuthorizationDenied(
+                    SetupAuthorizationDenied::STATE_UNAVAILABLE,
+                    SetupAuthorizationStageFailure::sessionFingerprint(),
+                );
+            }
             ($this->sessionRegenerator)();
+            $sessionIdAfter = ($this->sessionIdProvider)();
+            if (!$this->isValidSessionId($sessionIdAfter) || hash_equals($sessionIdBefore, $sessionIdAfter)) {
+                throw new SetupAuthorizationDenied(
+                    SetupAuthorizationDenied::STATE_UNAVAILABLE,
+                    SetupAuthorizationStageFailure::sessionFingerprint(),
+                );
+            }
             ($this->csrfRotator)();
             $grantId = self::base64UrlEncode($this->secureRandom(self::TOKEN_MIN_BYTES));
             $issued = $now;
@@ -509,8 +523,11 @@ final class SetupAuthorization
     private function fingerprint(string $grantId): string
     {
         $sessionId = ($this->sessionIdProvider)();
-        if (!is_string($sessionId) || $sessionId === '' || strlen($sessionId) > 256) {
-            throw new SetupAuthorizationDenied(SetupAuthorizationDenied::STATE_UNAVAILABLE);
+        if (!$this->isValidSessionId($sessionId)) {
+            throw new SetupAuthorizationDenied(
+                SetupAuthorizationDenied::STATE_UNAVAILABLE,
+                SetupAuthorizationStageFailure::sessionFingerprint(),
+            );
         }
         $remoteAddress = $this->server['REMOTE_ADDR'] ?? '';
         if (!is_string($remoteAddress)) {
@@ -537,6 +554,11 @@ final class SetupAuthorization
             . self::lengthPrefix($addressBytes)
             . self::lengthPrefix($userAgent);
         return hash('sha256', $material);
+    }
+
+    private function isValidSessionId(mixed $sessionId): bool
+    {
+        return is_string($sessionId) && $sessionId !== '' && strlen($sessionId) <= 256;
     }
 
     private static function lengthPrefix(string $value): string
@@ -609,16 +631,28 @@ final class SetupAuthorization
             $this->assertRegularStateStat($before);
         }
 
-        $handle = @fopen($path, 'c+b');
+        $priorUmask = umask(0077);
+        try {
+            $handle = @fopen($path, 'c+b');
+        } finally {
+            umask($priorUmask);
+        }
         if (!is_resource($handle)) {
-            throw new SetupAuthorizationDenied(SetupAuthorizationDenied::STATE_UNAVAILABLE);
+            throw new SetupAuthorizationDenied(
+                SetupAuthorizationDenied::STATE_UNAVAILABLE,
+                SetupAuthorizationStageFailure::statePrepare(),
+            );
         }
         $locked = false;
         try {
             $opened = fstat($handle);
+            clearstatcache(true, $path);
             $after = @lstat($path);
             if (!is_array($opened) || !is_array($after)) {
-                throw new SetupAuthorizationDenied(SetupAuthorizationDenied::STATE_UNAVAILABLE);
+                throw new SetupAuthorizationDenied(
+                    SetupAuthorizationDenied::STATE_UNAVAILABLE,
+                    SetupAuthorizationStageFailure::statePrepare(),
+                );
             }
             $this->assertRegularStateStat($opened);
             $this->assertRegularStateStat($after);
@@ -627,25 +661,38 @@ final class SetupAuthorization
                 throw new SetupAuthorizationDenied(SetupAuthorizationDenied::INVALID_STATE);
             }
             if (!@flock($handle, LOCK_EX)) {
-                throw new SetupAuthorizationDenied(SetupAuthorizationDenied::STATE_UNAVAILABLE);
+                throw new SetupAuthorizationDenied(
+                    SetupAuthorizationDenied::STATE_UNAVAILABLE,
+                    SetupAuthorizationStageFailure::statePrepare(),
+                );
             }
             $locked = true;
             $lockedStat = fstat($handle);
             if (!is_array($lockedStat)) {
-                throw new SetupAuthorizationDenied(SetupAuthorizationDenied::STATE_UNAVAILABLE);
+                throw new SetupAuthorizationDenied(
+                    SetupAuthorizationDenied::STATE_UNAVAILABLE,
+                    SetupAuthorizationStageFailure::statePrepare(),
+                );
             }
             $this->assertRegularStateStat($lockedStat);
             if (!@chmod($path, 0600)) {
-                throw new SetupAuthorizationDenied(SetupAuthorizationDenied::STATE_UNAVAILABLE);
+                throw new SetupAuthorizationDenied(
+                    SetupAuthorizationDenied::STATE_UNAVAILABLE,
+                    SetupAuthorizationStageFailure::statePermissions(),
+                );
             }
             $permissions = fstat($handle);
+            clearstatcache(true, $path);
             $permissionPath = @lstat($path);
             if (!is_array($permissions)
                 || !is_array($permissionPath)
                 || !$this->sameFile($permissions, $permissionPath)
                 || (($permissions['mode'] ?? 0) & 0777) !== 0600
                 || (($permissionPath['mode'] ?? 0) & 0777) !== 0600) {
-                throw new SetupAuthorizationDenied(SetupAuthorizationDenied::STATE_UNAVAILABLE);
+                throw new SetupAuthorizationDenied(
+                    SetupAuthorizationDenied::STATE_UNAVAILABLE,
+                    SetupAuthorizationStageFailure::statePermissions(),
+                );
             }
             return $callback($handle, $created);
         } finally {
@@ -661,7 +708,10 @@ final class SetupAuthorization
         $stat = @lstat($this->stateDirectory);
         if ($stat === false) {
             if (!@mkdir($this->stateDirectory, 0700, true) && !is_dir($this->stateDirectory)) {
-                throw new SetupAuthorizationDenied(SetupAuthorizationDenied::STATE_UNAVAILABLE);
+                throw new SetupAuthorizationDenied(
+                    SetupAuthorizationDenied::STATE_UNAVAILABLE,
+                    SetupAuthorizationStageFailure::statePrepare(),
+                );
             }
             $stat = @lstat($this->stateDirectory);
         }
@@ -669,11 +719,18 @@ final class SetupAuthorization
             throw new SetupAuthorizationDenied(SetupAuthorizationDenied::INVALID_STATE);
         }
         if (!@chmod($this->stateDirectory, 0700)) {
-            throw new SetupAuthorizationDenied(SetupAuthorizationDenied::STATE_UNAVAILABLE);
+            throw new SetupAuthorizationDenied(
+                SetupAuthorizationDenied::STATE_UNAVAILABLE,
+                SetupAuthorizationStageFailure::statePermissions(),
+            );
         }
+        clearstatcache(true, $this->stateDirectory);
         $permissions = @lstat($this->stateDirectory);
         if (!is_array($permissions) || (($permissions['mode'] ?? 0) & 0777) !== 0700) {
-            throw new SetupAuthorizationDenied(SetupAuthorizationDenied::STATE_UNAVAILABLE);
+            throw new SetupAuthorizationDenied(
+                SetupAuthorizationDenied::STATE_UNAVAILABLE,
+                SetupAuthorizationStageFailure::statePermissions(),
+            );
         }
     }
 
@@ -758,23 +815,35 @@ final class SetupAuthorization
     {
         try {
             $json = json_encode($state, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES) . "\n";
-        } catch (JsonException $e) {
-            throw new SetupAuthorizationDenied(SetupAuthorizationDenied::STATE_UNAVAILABLE, $e);
+        } catch (JsonException) {
+            throw new SetupAuthorizationDenied(
+                SetupAuthorizationDenied::STATE_UNAVAILABLE,
+                SetupAuthorizationStageFailure::stateWritePrepare(),
+            );
         }
         if (strlen($json) > self::STATE_MAX_BYTES || !rewind($handle) || !ftruncate($handle, 0)) {
-            throw new SetupAuthorizationDenied(SetupAuthorizationDenied::STATE_UNAVAILABLE);
+            throw new SetupAuthorizationDenied(
+                SetupAuthorizationDenied::STATE_UNAVAILABLE,
+                SetupAuthorizationStageFailure::stateWritePrepare(),
+            );
         }
         $offset = 0;
         $length = strlen($json);
         while ($offset < $length) {
             $written = fwrite($handle, substr($json, $offset));
             if (!is_int($written) || $written < 1) {
-                throw new SetupAuthorizationDenied(SetupAuthorizationDenied::STATE_UNAVAILABLE);
+                throw new SetupAuthorizationDenied(
+                    SetupAuthorizationDenied::STATE_UNAVAILABLE,
+                    SetupAuthorizationStageFailure::stateWriteIo(),
+                );
             }
             $offset += $written;
         }
         if (!fflush($handle) || !fsync($handle)) {
-            throw new SetupAuthorizationDenied(SetupAuthorizationDenied::STATE_UNAVAILABLE);
+            throw new SetupAuthorizationDenied(
+                SetupAuthorizationDenied::STATE_UNAVAILABLE,
+                SetupAuthorizationStageFailure::stateSync(),
+            );
         }
     }
 
