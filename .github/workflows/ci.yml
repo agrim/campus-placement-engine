@@ -39,6 +39,28 @@ jobs:
           extensions: mbstring, pdo_sqlite, sqlite3, pdo_pgsql, curl
           coverage: none
 
+      - name: Install PostgreSQL 17 client
+        shell: bash
+        run: |
+          set -euo pipefail
+          PGDG_KEY="$RUNNER_TEMP/postgresql-pgdg.asc"
+          curl --fail --silent --show-error --location \
+            https://www.postgresql.org/media/keys/ACCC4CF8.asc \
+            --output "$PGDG_KEY"
+          printf '%s  %s\n' \
+            '0144068502a1eddd2a0280ede10ef607d1ec592ce819940991203941564e8e76' \
+            "$PGDG_KEY" | sha256sum --check --strict
+          sudo install -d -m 0755 /etc/apt/keyrings
+          sudo install -m 0644 "$PGDG_KEY" /etc/apt/keyrings/postgresql-pgdg.asc
+          . /etc/os-release
+          printf '%s\n' \
+            "deb [signed-by=/etc/apt/keyrings/postgresql-pgdg.asc] https://apt.postgresql.org/pub/repos/apt ${VERSION_CODENAME}-pgdg main" \
+            | sudo tee /etc/apt/sources.list.d/postgresql-pgdg.list >/dev/null
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends postgresql-client-17
+          /usr/lib/postgresql/17/bin/pg_dump --version
+          /usr/lib/postgresql/17/bin/pg_restore --version
+
       - name: Show runtime
         run: php -v
 
@@ -99,6 +121,8 @@ jobs:
         env:
           CPE_DB_DRIVER: pgsql
           CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_backup_restore_contract?sslmode=disable
+          CPE_PG_DUMP_BINARY: /usr/lib/postgresql/17/bin/pg_dump
+          CPE_PG_RESTORE_BINARY: /usr/lib/postgresql/17/bin/pg_restore
           PGPASSWORD: cpe-contract-password
         run: |
           psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_backup_restore_contract'
