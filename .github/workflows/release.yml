@@ -70,7 +70,12 @@ jobs:
         shell: bash
         run: |
           if [[ -z "${CPE_POSTGRES_TLS_TEST_URL:-}" ]]; then
-            echo '::notice title=Live PostgreSQL TLS evidence skipped::CPE_POSTGRES_TLS_TEST_URL is not configured; production-endpoint negotiated TLS is not proven and this alpha remains evaluation-only.'
+            if [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]]; then
+              echo '::notice title=Live PostgreSQL TLS evidence skipped::CPE_POSTGRES_TLS_TEST_URL is not configured; production-endpoint negotiated TLS is not proven and this alpha remains evaluation-only.'
+            else
+              echo '::error title=Live PostgreSQL TLS evidence required::CPE_POSTGRES_TLS_TEST_URL may be omitted only for evaluation alpha tags shaped v<major>.<minor>.<patch>-alpha.<number>; beta, RC, stable, malformed, and other tag releases require live negotiated-TLS evidence.' >&2
+              exit 1
+            fi
           fi
           CPE_RELEASE_VERSION="$(php -r '$config = require "config/defaults.php"; echo $config["app"]["version"];')"
           test "v${CPE_RELEASE_VERSION}" = "${GITHUB_REF_NAME}"

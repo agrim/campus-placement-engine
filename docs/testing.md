@@ -53,10 +53,14 @@ it skips unless `CPE_POSTGRES_TLS_TEST_URL` names a disposable production-shaped
 it requires post-connect `pg_stat_ssl` negotiated-TLS evidence. Pull-request CI
 maps the optional secret of the same name, so forks without it record an explicit
 skip rather than claiming live TLS proof. Tag releases also map the optional
-secret and always invoke the conditional contract. Without it, the workflow
-publishes a notice: strict TLS parsing, policy, redaction, and loopback behavior
-remain tested, but live production-endpoint negotiated TLS is skipped and is not
-evidence claimed by this evaluation alpha.
+secret and always invoke the conditional contract. Only evaluation alpha tags
+matching the complete `v<major>.<minor>.<patch>-alpha.<number>` structure may
+omit it; their workflow publishes a notice that strict TLS parsing, policy,
+redaction, and loopback behavior remain tested while live production-endpoint
+negotiated TLS is skipped and not claimed. Beta, release candidate, stable,
+malformed lookalikes such as `v1.0.0-beta.1-alpha.1` or
+`v1.0.0-not-alpha.2`, and every other tag fail before publication when the
+endpoint is absent or empty.
 `tests/mutation_concurrency_contract.php` releases paired independent processes
 against one database. It proves same-key board retries return one stored result,
 different-key stale moves cannot both mutate the card, and repeated concurrent
