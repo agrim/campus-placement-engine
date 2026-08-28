@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Core\Modules;
 
 use App\Core\Http\UserVisibleException;
+use App\Core\Persistence\WriteTransaction;
 use App\Core\Portal;
 use App\Hosted\HostedContext;
 use PDO;
@@ -59,41 +60,33 @@ final class ModuleLifecycleService
     public function install(string $moduleKey, ?int $actorId = null): void
     {
         $manifest = $this->manifest($moduleKey);
-        if ($this->installed($moduleKey)) {
-            return;
-        }
-        foreach ($manifest->requiresModules() as $dependency) {
-            if (!$this->installed($dependency)) {
-                throw new UserVisibleException('MODULE_DEPENDENCY_REQUIRED', 'Install required modules before enabling this module.');
+        $changed = $this->transaction(function () use ($manifest, $moduleKey, $actorId): bool {
+            foreach ($manifest->requiresModules() as $dependency) {
+                if (!$this->installed($dependency)) {
+                    throw new UserVisibleException('MODULE_DEPENDENCY_REQUIRED', 'Install required modules before enabling this module.');
+                }
             }
-        }
-        $ownsTransaction = !$this->pdo->inTransaction();
-        if ($ownsTransaction) {
-            $this->pdo->beginTransaction();
-        }
-        try {
             $now = cpe_now();
             $stmt = $this->pdo->prepare(
                 'INSERT INTO module_installations
                  (module_key, version, enabled, installed_at, updated_at, installed_by, enabled_at, configuration_json)
-                 VALUES (?, ?, 0, ?, ?, ?, NULL, ?)'
+                 VALUES (?, ?, 0, ?, ?, ?, NULL, ?)
+                 ON CONFLICT(module_key) DO NOTHING'
             );
             $stmt->execute([$moduleKey, $manifest->version(), $now, $now, $actorId, '{}']);
+            if ($stmt->rowCount() === 0) {
+                return false;
+            }
             $module = $this->instance($moduleKey);
             if ($module instanceof ModuleLifecycleHooks) {
                 $module->onInstall();
             }
             $this->record($moduleKey, 'installed', null, $manifest->version(), $actorId, 'Module installed with data preserved by default.');
-            if ($ownsTransaction) {
-                $this->pdo->commit();
-            }
-        } catch (\Throwable $e) {
-            if ($ownsTransaction && $this->pdo->inTransaction()) {
-                $this->pdo->rollBack();
-            }
-            throw $e;
+            return true;
+        });
+        if ($changed) {
+            Portal::reset();
         }
-        Portal::reset();
     }
 
     public function enable(string $moduleKey, ?int $actorId = null): void
@@ -105,56 +98,64 @@ final class ModuleLifecycleService
         if (!$this->installed($moduleKey)) {
             $this->install($moduleKey, $actorId);
         }
-        foreach ($manifest->requiresModules() as $dependency) {
-            if (!$this->enabled($dependency)) {
-                throw new UserVisibleException('MODULE_DEPENDENCY_DISABLED', 'Enable required modules before enabling this module.');
+        $changed = $this->transaction(function () use ($manifest, $moduleKey, $actorId): bool {
+            foreach ($manifest->requiresModules() as $dependency) {
+                if (!$this->enabled($dependency)) {
+                    throw new UserVisibleException('MODULE_DEPENDENCY_DISABLED', 'Enable required modules before enabling this module.');
+                }
             }
-        }
-        if ($this->enabled($moduleKey)) {
-            return;
-        }
-        $this->transaction(function () use ($manifest, $moduleKey, $actorId): void {
             $now = cpe_now();
             $stmt = $this->pdo->prepare(
                 'UPDATE module_installations
                  SET enabled = 1, version = ?, enabled_at = ?, disabled_at = NULL, updated_at = ?
-                 WHERE module_key = ?'
+                 WHERE module_key = ? AND enabled = 0'
             );
             $stmt->execute([$manifest->version(), $now, $now, $moduleKey]);
+            if ($stmt->rowCount() === 0) {
+                return false;
+            }
             $module = $this->instance($moduleKey);
             if ($module instanceof ModuleLifecycleHooks) {
                 $module->onEnable();
             }
             $this->record($moduleKey, 'enabled', $manifest->version(), $manifest->version(), $actorId, 'Module enabled.');
+            return true;
         });
-        Portal::reset();
+        if ($changed) {
+            Portal::reset();
+        }
     }
 
     public function disable(string $moduleKey, ?int $actorId = null): void
     {
         $this->manifest($moduleKey);
-        foreach ($this->modules() as $candidate) {
-            if (!$candidate['enabled'] || !in_array($moduleKey, $candidate['requires_modules'], true)) {
-                continue;
+        $changed = $this->transaction(function () use ($moduleKey, $actorId): bool {
+            foreach ($this->modules() as $candidate) {
+                if (!$candidate['enabled'] || !in_array($moduleKey, $candidate['requires_modules'], true)) {
+                    continue;
+                }
+                throw new UserVisibleException('MODULE_DEPENDENT_ENABLED', 'Disable dependent modules before disabling this module.');
             }
-            throw new UserVisibleException('MODULE_DEPENDENT_ENABLED', 'Disable dependent modules before disabling this module.');
-        }
-        if (!$this->enabled($moduleKey)) {
-            return;
-        }
-        $this->transaction(function () use ($moduleKey, $actorId): void {
             $now = cpe_now();
             $stmt = $this->pdo->prepare(
-                'UPDATE module_installations SET enabled = 0, disabled_at = ?, updated_at = ? WHERE module_key = ?'
+                'UPDATE module_installations
+                 SET enabled = 0, disabled_at = ?, updated_at = ?
+                 WHERE module_key = ? AND enabled = 1'
             );
             $stmt->execute([$now, $now, $moduleKey]);
+            if ($stmt->rowCount() === 0) {
+                return false;
+            }
             $module = $this->instance($moduleKey);
             if ($module instanceof ModuleLifecycleHooks) {
                 $module->onDisable();
             }
             $this->record($moduleKey, 'disabled', $module->manifest()->version(), $module->manifest()->version(), $actorId, 'Module disabled; its data was retained.');
+            return true;
         });
-        Portal::reset();
+        if ($changed) {
+            Portal::reset();
+        }
     }
 
     public function uninstall(string $moduleKey, bool $exportCompleted, bool $destructiveConfirmed, ?int $actorId = null): never
@@ -220,22 +221,8 @@ final class ModuleLifecycleService
         $stmt->execute([$moduleKey, $event, $fromVersion, $toVersion, $actorId, $detail, cpe_now()]);
     }
 
-    private function transaction(callable $callback): void
+    private function transaction(callable $callback): mixed
     {
-        $ownsTransaction = !$this->pdo->inTransaction();
-        if ($ownsTransaction) {
-            $this->pdo->beginTransaction();
-        }
-        try {
-            $callback();
-            if ($ownsTransaction) {
-                $this->pdo->commit();
-            }
-        } catch (\Throwable $e) {
-            if ($ownsTransaction && $this->pdo->inTransaction()) {
-                $this->pdo->rollBack();
-            }
-            throw $e;
-        }
+        return WriteTransaction::run($this->pdo, $callback);
     }
 }

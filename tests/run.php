@@ -29,6 +29,8 @@ use App\Core\Events\DomainEvent;
 use App\Core\Events\DomainEventOutboxWorker;
 use App\Core\Http\AuthorizationException;
 use App\Core\Http\UserVisibleException;
+use App\Core\Persistence\DatabaseConnectionInvalidException;
+use App\Core\Persistence\WriteTransaction;
 use App\Core\Modules\ModuleLifecycleService;
 use App\Core\Modules\ModuleManifest;
 use App\Core\Portability\PortalPortabilityService;
@@ -46,6 +48,7 @@ use App\Modules\Placement\Workflow\WorkflowSimulationService;
 use App\Operations\MetricsService;
 use App\Import\CsvImporter;
 use App\Import\ImportRollbackService;
+use App\Core\Install\PortalKernelSynchronizer;
 use App\Install\Installer;
 use App\Install\SystemRequirements;
 use App\Security\DatabaseSessionHandler;
@@ -159,6 +162,167 @@ function render_view_for_test(string $template, array $vars): string
     return ob_get_clean() ?: '';
 }
 
+/**
+ * Raw SQL and PDO transaction boundaries are not interoperable across every
+ * supported pdo_sqlite runtime. Keep this regression double honest by
+ * rejecting PDO boundaries while still executing SQL boundaries.
+ */
+final class LegacySqliteManualTransactionPdo extends PDO
+{
+    public int $sqlBeginCalls = 0;
+    public int $pdoCommitCalls = 0;
+    public int $pdoRollbackCalls = 0;
+    public bool $failNextSqlCommit = false;
+    public bool $failNextSqlRollback = false;
+
+    public function __construct(string $path)
+    {
+        parent::__construct('sqlite:' . $path);
+        $this->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        $this->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
+        $this->exec('PRAGMA foreign_keys = ON');
+        $this->exec('PRAGMA busy_timeout = 5000');
+    }
+
+    public function inTransaction(): bool
+    {
+        return false;
+    }
+
+    public function exec(string $statement): int|false
+    {
+        $boundary = strtoupper(trim($statement));
+        if ($boundary === 'BEGIN IMMEDIATE') {
+            $this->sqlBeginCalls++;
+        } elseif ($boundary === 'COMMIT' && $this->failNextSqlCommit) {
+            $this->failNextSqlCommit = false;
+            parent::exec('ROLLBACK');
+            throw new RuntimeException('Forced SQL commit uncertainty.');
+        } elseif ($boundary === 'ROLLBACK' && $this->failNextSqlRollback) {
+            $this->failNextSqlRollback = false;
+            parent::exec('ROLLBACK');
+            throw new RuntimeException('Forced SQL rollback uncertainty.');
+        }
+        return parent::exec($statement);
+    }
+
+    public function commit(): bool
+    {
+        $this->pdoCommitCalls++;
+        throw new RuntimeException('PDO commit cannot close a SQL-level SQLite transaction on this runtime.');
+    }
+
+    public function rollBack(): bool
+    {
+        $this->pdoRollbackCalls++;
+        throw new RuntimeException('PDO rollback cannot close a SQL-level SQLite transaction on this runtime.');
+    }
+}
+
+final class PdoWriteTransactionFaultDouble extends PDO
+{
+    public bool $active = false;
+    public int $beginCalls = 0;
+    public int $commitCalls = 0;
+    public int $rollbackCalls = 0;
+    public ?Throwable $commitFailure = null;
+    public ?Throwable $rollbackFailure = null;
+
+    public function __construct()
+    {
+        parent::__construct('sqlite::memory:');
+    }
+
+    public function getAttribute(int $attribute): mixed
+    {
+        return $attribute === PDO::ATTR_DRIVER_NAME
+            ? 'pgsql'
+            : parent::getAttribute($attribute);
+    }
+
+    public function beginTransaction(): bool
+    {
+        $this->beginCalls++;
+        $this->active = true;
+        return true;
+    }
+
+    public function inTransaction(): bool
+    {
+        return $this->active;
+    }
+
+    public function commit(): bool
+    {
+        $this->commitCalls++;
+        if ($this->commitFailure !== null) {
+            throw $this->commitFailure;
+        }
+        $this->active = false;
+        return true;
+    }
+
+    public function rollBack(): bool
+    {
+        $this->rollbackCalls++;
+        if ($this->rollbackFailure !== null) {
+            throw $this->rollbackFailure;
+        }
+        $this->active = false;
+        return true;
+    }
+}
+
+test_case('PDO write transaction preserves primary and cleanup failures', function (): void {
+    $operationPrimary = new RuntimeException('forced PDO operation failure');
+    $operationCleanup = new RuntimeException('forced PDO operation rollback failure');
+    $operationPdo = new PdoWriteTransactionFaultDouble();
+    $operationPdo->rollbackFailure = $operationCleanup;
+    try {
+        WriteTransaction::run($operationPdo, static function () use ($operationPrimary): never {
+            throw $operationPrimary;
+        });
+        throw new RuntimeException('Expected PDO operation cleanup failure.');
+    } catch (DatabaseConnectionInvalidException $e) {
+        assert_same(WriteTransaction::ERROR_CLEANUP, $e->failureCode(), 'Operation rollback cleanup should use the write transaction failure code');
+        assert_true($e->getPrevious() === $operationPrimary, 'Operation rollback cleanup should preserve the primary failure');
+        assert_true($e->cleanupCause() === $operationCleanup, 'Operation rollback cleanup should preserve the cleanup failure');
+        assert_true($e->requiresConnectionReset(), 'Operation rollback cleanup should require connection reset');
+    }
+    assert_same(1, $operationPdo->beginCalls, 'Operation fault should start one PDO transaction');
+    assert_same(0, $operationPdo->commitCalls, 'Operation fault should not attempt commit');
+    assert_same(1, $operationPdo->rollbackCalls, 'Operation fault should attempt one rollback');
+    assert_true($operationPdo->inTransaction(), 'Failed PDO cleanup should leave transaction state uncertain');
+
+    $commitPrimary = new RuntimeException('forced PDO commit failure');
+    $commitCleanup = new RuntimeException('forced PDO commit rollback failure');
+    $commitPdo = new PdoWriteTransactionFaultDouble();
+    $commitPdo->commitFailure = $commitPrimary;
+    $commitPdo->rollbackFailure = $commitCleanup;
+    try {
+        WriteTransaction::run($commitPdo, static fn (): string => 'result');
+        throw new RuntimeException('Expected PDO commit cleanup failure.');
+    } catch (DatabaseConnectionInvalidException $e) {
+        assert_same(WriteTransaction::ERROR_CLEANUP, $e->failureCode(), 'Commit rollback cleanup should use the write transaction failure code');
+        assert_true($e->getPrevious() === $commitPrimary, 'Commit rollback cleanup should preserve the commit failure');
+        assert_true($e->cleanupCause() === $commitCleanup, 'Commit rollback cleanup should preserve the cleanup failure');
+        assert_true($e->requiresConnectionReset(), 'Commit rollback cleanup should require connection reset');
+    }
+    assert_same(1, $commitPdo->beginCalls, 'Commit fault should start one PDO transaction');
+    assert_same(1, $commitPdo->commitCalls, 'Commit fault should attempt one commit');
+    assert_same(1, $commitPdo->rollbackCalls, 'Commit fault should attempt one rollback');
+    assert_true($commitPdo->inTransaction(), 'Failed commit cleanup should leave transaction state uncertain');
+
+    $callerPdo = new PdoWriteTransactionFaultDouble();
+    $callerPdo->beginTransaction();
+    assert_same('caller result', WriteTransaction::run($callerPdo, static fn (): string => 'caller result'), 'Caller-owned PDO transaction should execute directly');
+    assert_same(1, $callerPdo->beginCalls, 'Shared boundary should not begin inside a caller-owned PDO transaction');
+    assert_same(0, $callerPdo->commitCalls, 'Shared boundary should not commit a caller-owned PDO transaction');
+    assert_same(0, $callerPdo->rollbackCalls, 'Shared boundary should not roll back a caller-owned PDO transaction');
+    assert_true($callerPdo->inTransaction(), 'Caller-owned PDO transaction should remain active');
+    $callerPdo->rollBack();
+});
+
 test_case('installer creates database, admin, settings, and demo data', function (): void {
     try {
         (new Installer())->install([
@@ -266,6 +430,149 @@ test_case('portal kernel establishes institution module and capability context',
     assert_true($context->capabilities()->allows(['role' => 'admin', 'active' => 1], 'portal.settings.manage'), 'Administrator wildcard capability');
 });
 
+test_case('SQLite immediate transactions use SQL boundaries compatible with PHP 8.2 PDO state', function (): void {
+    $path = sys_get_temp_dir() . '/cpe-legacy-pdo-state-' . bin2hex(random_bytes(4)) . '.sqlite';
+    $source = Database::connection();
+    $source->exec('VACUUM INTO ' . $source->quote($path));
+    try {
+        $pdo = new LegacySqliteManualTransactionPdo($path);
+        $now = cpe_now();
+        $pdo->exec("UPDATE module_installations SET version = '0.0.1' WHERE module_key = 'advising'");
+        $pdo->exec("DELETE FROM role_capabilities WHERE role_key = 'control' AND capability = 'placement.board.view'");
+        $pdo->exec(
+            "CREATE TRIGGER fail_legacy_pdo_kernel_sync BEFORE INSERT ON role_capabilities
+             WHEN NEW.role_key = 'control' AND NEW.capability = 'portal.access'
+             BEGIN SELECT RAISE(ABORT, 'forced legacy PDO rollback'); END"
+        );
+        try {
+            (new PortalKernelSynchronizer())->synchronize($pdo);
+            throw new RuntimeException('Expected legacy PDO synchronization rollback.');
+        } catch (RuntimeException $e) {
+            assert_true(str_contains($e->getMessage(), 'forced legacy PDO rollback'), 'Expected forced legacy PDO synchronization failure');
+        } finally {
+            $pdo->exec('DROP TRIGGER fail_legacy_pdo_kernel_sync');
+        }
+        assert_same('0.0.1', $pdo->query("SELECT version FROM module_installations WHERE module_key = 'advising'")->fetchColumn(), 'SQL-level rollback should restore module synchronization state');
+        assert_same(0, (int) $pdo->query("SELECT COUNT(*) FROM role_capabilities WHERE role_key = 'control' AND capability = 'placement.board.view'")->fetchColumn(), 'SQL-level rollback should restore role capability state');
+
+        (new PortalKernelSynchronizer())->synchronize($pdo);
+        assert_same('0.1.0', $pdo->query("SELECT version FROM module_installations WHERE module_key = 'advising'")->fetchColumn(), 'SQL-level commit should persist kernel synchronization');
+
+        $lifecycle = new ModuleLifecycleService($pdo);
+        $lifecycle->disable('placement', 1);
+        $lifecycle->enable('placement', 1);
+        assert_same(1, (int) $pdo->query("SELECT enabled FROM module_installations WHERE module_key = 'placement'")->fetchColumn(), 'SQL-level module lifecycle commit should persist');
+
+        $applicationId = (int) $pdo->query("SELECT id FROM applications WHERE current_status = 'idle' ORDER BY id LIMIT 1")->fetchColumn();
+        assert_true($applicationId > 0, 'Compatibility fixture should contain an idle application');
+        $result = (new PlacementService($pdo))->applyBoardMove(
+            $applicationId,
+            1,
+            'admin',
+            'scheduled',
+            '',
+            'legacy PDO transaction compatibility',
+            'idle',
+            bin2hex(random_bytes(16)),
+        );
+        assert_same(['duplicate' => false, 'status' => 'scheduled'], $result, 'SQL-level board transaction commit should persist');
+        assert_same(0, $pdo->pdoCommitCalls, 'SQL-level SQLite transactions must not call PDO::commit()');
+        assert_same(0, $pdo->pdoRollbackCalls, 'SQL-level SQLite transactions must not call PDO::rollBack()');
+
+        $siteName = (string) $pdo->query("SELECT value FROM settings WHERE key = 'site_name'")->fetchColumn();
+        $beginCalls = $pdo->sqlBeginCalls;
+        $pdo->failNextSqlCommit = true;
+        try {
+            WriteTransaction::run($pdo, static function () use ($pdo): void {
+                $pdo->exec("UPDATE settings SET value = 'uncertain commit' WHERE key = 'site_name'");
+            });
+            throw new RuntimeException('Expected uncertain SQL commit failure.');
+        } catch (DatabaseConnectionInvalidException $e) {
+            assert_same(WriteTransaction::ERROR_CLEANUP, $e->failureCode(), 'Commit cleanup failure should invalidate the connection');
+        }
+        assert_same($siteName, $pdo->query("SELECT value FROM settings WHERE key = 'site_name'")->fetchColumn(), 'Uncertain SQL commit fixture should be rolled back');
+        WriteTransaction::run($pdo, static function () use ($pdo): void {
+            $pdo->exec("UPDATE settings SET value = 'after commit failure' WHERE key = 'site_name'");
+        });
+        assert_same($beginCalls + 2, $pdo->sqlBeginCalls, 'Commit failure must not leave stale shared transaction ownership');
+
+        $pdo->failNextSqlRollback = true;
+        $beginCalls = $pdo->sqlBeginCalls;
+        try {
+            WriteTransaction::run($pdo, static function () use ($pdo): void {
+                $pdo->exec("UPDATE settings SET value = 'uncertain rollback' WHERE key = 'site_name'");
+                throw new RuntimeException('Forced transaction operation failure.');
+            });
+            throw new RuntimeException('Expected uncertain SQL rollback failure.');
+        } catch (DatabaseConnectionInvalidException $e) {
+            assert_same(WriteTransaction::ERROR_CLEANUP, $e->failureCode(), 'Rollback cleanup failure should invalidate the connection');
+        }
+        assert_same('after commit failure', $pdo->query("SELECT value FROM settings WHERE key = 'site_name'")->fetchColumn(), 'Uncertain SQL rollback fixture should be rolled back');
+        WriteTransaction::run($pdo, static function () use ($pdo): void {
+            $pdo->exec("UPDATE settings SET value = 'after rollback failure' WHERE key = 'site_name'");
+        });
+        assert_same($beginCalls + 2, $pdo->sqlBeginCalls, 'Rollback failure must not leave stale shared transaction ownership');
+
+        $caller = new PDO('sqlite:' . $path);
+        $caller->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        $caller->beginTransaction();
+        WriteTransaction::run($caller, static function () use ($caller): void {
+            $caller->exec("UPDATE settings SET value = 'caller owned' WHERE key = 'site_name'");
+        });
+        assert_true($caller->inTransaction(), 'Shared boundary must not commit a caller-owned PDO transaction');
+        $caller->rollBack();
+        assert_same('after rollback failure', $caller->query("SELECT value FROM settings WHERE key = 'site_name'")->fetchColumn(), 'Caller-owned PDO rollback should remain authoritative');
+    } finally {
+        unset($pdo);
+        if (is_file($path)) {
+            unlink($path);
+        }
+    }
+});
+
+test_case('portal kernel synchronization is atomic and exactly reconciles system grants', function (): void {
+    $pdo = Database::connection();
+    $now = cpe_now();
+    $pdo->exec("UPDATE module_installations SET version = '0.0.1' WHERE module_key = 'advising'");
+    $pdo->prepare(
+        'INSERT INTO roles (role_key, label, system_role, created_at, updated_at)
+         VALUES (?, ?, 0, ?, ?) ON CONFLICT(role_key) DO NOTHING'
+    )->execute(['local_test_role', 'Local Test Role', $now, $now]);
+    $pdo->exec("INSERT INTO role_capabilities (role_key, capability) VALUES ('local_test_role', 'placement.board.view')");
+    $pdo->exec("INSERT INTO role_capabilities (role_key, capability) VALUES ('control', 'placement.retired.manage')");
+    $pdo->exec("DELETE FROM role_capabilities WHERE role_key = 'control' AND capability = 'placement.board.view'");
+    $pdo->prepare(
+        'INSERT INTO roles (role_key, label, system_role, created_at, updated_at) VALUES (?, ?, 1, ?, ?)'
+    )->execute(['retired_system_role', 'Retired System Role', $now, $now]);
+    $pdo->exec("INSERT INTO role_capabilities (role_key, capability) VALUES ('retired_system_role', 'placement.board.view')");
+
+    $pdo->exec(
+        "CREATE TRIGGER fail_kernel_capability_sync BEFORE INSERT ON role_capabilities
+         WHEN NEW.role_key = 'control' AND NEW.capability = 'portal.access'
+         BEGIN SELECT RAISE(ABORT, 'forced kernel synchronization rollback'); END"
+    );
+    try {
+        (new PortalKernelSynchronizer())->synchronize($pdo);
+        throw new RuntimeException('Expected kernel synchronization rollback.');
+    } catch (RuntimeException $e) {
+        assert_true(str_contains($e->getMessage(), 'forced kernel synchronization rollback'), 'Expected forced synchronizer failure');
+    } finally {
+        $pdo->exec('DROP TRIGGER fail_kernel_capability_sync');
+    }
+    assert_same('0.0.1', $pdo->query("SELECT version FROM module_installations WHERE module_key = 'advising'")->fetchColumn(), 'Failed synchronization should roll back module version');
+    assert_same(1, (int) $pdo->query("SELECT COUNT(*) FROM role_capabilities WHERE role_key = 'control' AND capability = 'placement.retired.manage'")->fetchColumn(), 'Failed synchronization should roll back system grant deletion');
+    assert_same(0, (int) $pdo->query("SELECT COUNT(*) FROM role_capabilities WHERE role_key = 'control' AND capability = 'placement.board.view'")->fetchColumn(), 'Failed synchronization should roll back system grant insertion');
+
+    (new PortalKernelSynchronizer())->synchronize($pdo);
+    assert_same('0.1.0', $pdo->query("SELECT version FROM module_installations WHERE module_key = 'advising'")->fetchColumn(), 'Synchronization should converge module version');
+    assert_same(0, (int) $pdo->query("SELECT enabled FROM module_installations WHERE module_key = 'advising'")->fetchColumn(), 'Version synchronization should preserve configured enablement');
+    assert_same(1, (int) $pdo->query("SELECT COUNT(*) FROM role_capabilities WHERE role_key = 'control' AND capability = 'placement.board.view'")->fetchColumn(), 'Synchronization should restore configured system grant');
+    assert_same(0, (int) $pdo->query("SELECT COUNT(*) FROM role_capabilities WHERE role_key = 'control' AND capability = 'placement.retired.manage'")->fetchColumn(), 'Synchronization should revoke obsolete system grant');
+    assert_same(0, (int) $pdo->query("SELECT COUNT(*) FROM role_capabilities WHERE role_key = 'retired_system_role'")->fetchColumn(), 'Synchronization should revoke grants for retired system roles');
+    assert_same(1, (int) $pdo->query("SELECT COUNT(*) FROM role_capabilities WHERE role_key = 'local_test_role' AND capability = 'placement.board.view'")->fetchColumn(), 'Synchronization should preserve custom-role grants');
+    Portal::reset();
+});
+
 test_case('placement module owns its routes and capability-filtered navigation', function (): void {
     Portal::reset();
     $manager = cpe_context()->moduleManager();
@@ -280,6 +587,23 @@ test_case('placement module owns its routes and capability-filtered navigation',
     ))), 'Module routes should be unique by method and name');
     foreach ($routes as $route) {
         assert_same('placement', $route['module'], 'Current operational routes should belong to Placement Operations');
+    }
+
+    $moduleDefinitions = cpe_config('modules', []);
+    foreach (cpe_config('capabilities.roles', []) as $capabilities) {
+        foreach ($capabilities as $capability) {
+            if ($capability === '*' || !str_contains($capability, '.')) {
+                continue;
+            }
+            [$owner] = explode('.', $capability, 2);
+            if (!isset($moduleDefinitions[$owner])) {
+                continue;
+            }
+            assert_true(
+                in_array($capability, $moduleDefinitions[$owner]['capabilities'] ?? [], true),
+                'Module manifest should own configured capability ' . $capability
+            );
+        }
     }
 
     $companyItems = $manager->navigation(['role' => 'company', 'active' => 1]);
@@ -308,8 +632,13 @@ test_case('module lifecycle disables routes without deleting placement data', fu
     $service->disable('placement', 1);
     assert_true(!cpe_context()->modules()->isEnabled('placement'), 'Placement should be disabled in the request context');
     assert_same([], cpe_context()->moduleManager()->routes(), 'Disabled module should contribute no routes');
+    assert_true(!cpe_context()->capabilities()->allows(['role' => 'control', 'active' => 1], 'placement.board.view'), 'Disabled module should deny its granted capability');
+    assert_true(!cpe_context()->capabilities()->allows(['role' => 'admin', 'active' => 1], 'placement.board.view'), 'Disabled module should deny wildcard administrators');
+    assert_true(cpe_context()->capabilities()->allows(['role' => 'admin', 'active' => 1], 'portal.modules.manage'), 'Disabling a module should preserve core portal capability');
     assert_same($candidateCount, (int) $pdo->query('SELECT COUNT(*) FROM candidates')->fetchColumn(), 'Disabling should preserve candidates');
     assert_same($applicationCount, (int) $pdo->query('SELECT COUNT(*) FROM applications')->fetchColumn(), 'Disabling should preserve applications');
+    $service->disable('placement', 1);
+    assert_same(1, (int) $pdo->query("SELECT COUNT(*) FROM module_lifecycle_events WHERE module_key = 'placement' AND event_type = 'disabled'")->fetchColumn(), 'Repeated disable should not duplicate lifecycle event');
     try {
         $service->uninstall('placement', false, false, 1);
         throw new RuntimeException('Expected guarded uninstall failure.');
@@ -319,6 +648,8 @@ test_case('module lifecycle disables routes without deleting placement data', fu
     $service->enable('placement', 1);
     assert_true(cpe_context()->modules()->isEnabled('placement'), 'Placement should be re-enabled');
     assert_true(count(cpe_context()->moduleManager()->routes()) > 0, 'Re-enabled module should restore routes');
+    assert_true(cpe_context()->capabilities()->allows(['role' => 'admin', 'active' => 1], 'placement.board.view'), 'Re-enabled module should reactivate preserved grant');
+    $service->enable('placement', 1);
     assert_same(2, (int) $pdo->query("SELECT COUNT(*) FROM module_lifecycle_events WHERE module_key = 'placement' AND event_type IN ('disabled', 'enabled')")->fetchColumn(), 'Lifecycle changes should be recorded');
 });
 
@@ -1040,9 +1371,11 @@ test_case('custom fields migration adds candidate and company extension columns'
 test_case('idempotency key migration creates live action table', function (): void {
     $pdo = Database::connection();
     $pdo->exec('DROP TABLE IF EXISTS idempotency_keys');
-    $pdo->exec("DELETE FROM migrations WHERE migration = '023_idempotency_keys.sql'");
+    $pdo->exec("DELETE FROM migrations WHERE migration IN ('023_idempotency_keys.sql', '046_idempotency_results.sql')");
     Database::migrate();
     assert_same(1, (int) $pdo->query("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'idempotency_keys'")->fetchColumn(), 'Idempotency migration should create table');
+    assert_same(1, (int) $pdo->query("SELECT COUNT(*) FROM pragma_table_info('idempotency_keys') WHERE name = 'request_hash'")->fetchColumn(), 'Idempotency migration should add request hashes');
+    assert_same(1, (int) $pdo->query("SELECT COUNT(*) FROM pragma_table_info('idempotency_keys') WHERE name = 'result_json'")->fetchColumn(), 'Idempotency migration should add durable results');
 });
 
 test_case('configuration freeze migration defaults upgraded installs to mutable', function (): void {
@@ -1372,7 +1705,7 @@ test_case('starter configuration templates validate for every workflow', functio
 
 test_case('open-source release governance files and ignore protections exist', function (): void {
     $root = dirname(__DIR__);
-    assert_same('0.1.0-alpha.2', cpe_config('app.version'), 'Release package version');
+    assert_same('0.1.0-alpha.3', cpe_config('app.version'), 'Release package version');
     foreach ([
         'README.md',
         'LICENSE',
@@ -1397,6 +1730,7 @@ test_case('open-source release governance files and ignore protections exist', f
         'docs/release-checklist.md',
         'docs/releases/v0.1.0-alpha.1.md',
         'docs/releases/v0.1.0-alpha.2.md',
+        'docs/releases/v0.1.0-alpha.3.md',
         'INSTALL.md',
         'examples/csv-templates/README.md',
         'examples/csv-templates/candidate_unavailability_windows.csv',
@@ -1602,7 +1936,7 @@ test_case('release package includes public source and excludes private runtime d
         assert_true(str_contains($joined, '/tests/hosted_install_contract.php'), 'Package should include the hosted identity immutability contract');
         assert_true(str_contains($joined, '/tests/managed_hosting_contract.php'), 'Package should include the managed-hosting probe contract');
         assert_true(str_contains($joined, '/docs/environment.md'), 'Package should include environment variable guide');
-        assert_true(str_contains($joined, '/docs/releases/v0.1.0-alpha.2.md'), 'Package should include current release notes');
+        assert_true(str_contains($joined, '/docs/releases/v0.1.0-alpha.3.md'), 'Package should include current release notes');
         assert_true(str_contains($joined, '/examples/env/local.env.example'), 'Package should include synthetic env template');
         assert_true(str_contains($joined, '/examples/deployment/apache-vhost.conf'), 'Package should include Apache deployment example');
         assert_true(str_contains($joined, '/examples/deployment/nginx-server.conf'), 'Package should include Nginx deployment example');
@@ -1628,6 +1962,43 @@ test_case('release package includes public source and excludes private runtime d
         $packageRoot = $extractDir . '/' . $rootName;
         assert_true(is_file($packageRoot . '/placement'), 'Extracted package should include CLI entrypoint');
         assert_true(is_file($packageRoot . '/public/index.php'), 'Extracted package should include web entrypoint');
+
+        [$publicationCode, $publicationOut, $publicationErr] = run_cli_from($packageRoot, ['publication-check']);
+        assert_same(0, $publicationCode, 'Git-free extracted package publication check should pass: ' . $publicationErr);
+        assert_true(str_contains($publicationOut, 'OK: Required release files are present.'), 'Extracted package publication check should report success');
+
+        $packageRuntimeFixture = $packageRoot . '/data/restore-staging/package-contract.sqlite';
+        try {
+            if (!is_dir(dirname($packageRuntimeFixture)) && !mkdir(dirname($packageRuntimeFixture), 0700, true)) {
+                throw new RuntimeException('Could not create extracted-package runtime-data fixture directory.');
+            }
+            assert_true(file_put_contents($packageRuntimeFixture, 'runtime-only') !== false, 'Could not create extracted-package runtime-data fixture');
+            [$runtimePublicationCode, $runtimePublicationOut, $runtimePublicationErr] = run_cli_from($packageRoot, ['publication-check']);
+            assert_same(1, $runtimePublicationCode, 'Git-free extracted package publication check should reject runtime data');
+            assert_true(
+                str_contains($runtimePublicationOut . $runtimePublicationErr, 'data/restore-staging/package-contract.sqlite'),
+                'Git-free extracted package publication check should report the deterministic runtime-data path',
+            );
+        } finally {
+            remove_tree($packageRoot . '/data/restore-staging');
+        }
+        assert_true(!file_exists($packageRuntimeFixture), 'Extracted-package runtime-data fixture should be cleaned up');
+
+        $packageSymlinkFixture = $packageRoot . '/data/runtime-link';
+        try {
+            assert_true(symlink($packageRoot . '/README.md', $packageSymlinkFixture), 'Could not create extracted-package data symlink fixture');
+            [$symlinkPublicationCode, $symlinkPublicationOut, $symlinkPublicationErr] = run_cli_from($packageRoot, ['publication-check']);
+            assert_same(1, $symlinkPublicationCode, 'Git-free extracted package publication check should reject data symlinks');
+            assert_true(
+                str_contains($symlinkPublicationOut . $symlinkPublicationErr, 'data/runtime-link'),
+                'Git-free extracted package publication check should report the symlink path without following it',
+            );
+        } finally {
+            if (is_link($packageSymlinkFixture)) {
+                unlink($packageSymlinkFixture);
+            }
+        }
+        assert_true(!is_link($packageSymlinkFixture), 'Extracted-package data symlink fixture should be cleaned up');
 
         [$doctorCode, $doctorOut, $doctorErr] = run_cli_from($packageRoot, ['doctor'], ['CPE_DB_PATH' => $packageDb]);
         assert_same(0, $doctorCode, 'Extracted package doctor should run: ' . $doctorErr);
@@ -2081,6 +2452,60 @@ test_case('idempotency keys prevent repeated live board submissions', function (
     }
 });
 
+test_case('atomic board requests couple idempotency state results and transition evidence', function (): void {
+    $pdo = Database::connection();
+    $service = new PlacementService($pdo);
+    $candidateId = $service->saveCandidate(['external_id' => 'ATM001', 'name' => 'Atomic Candidate'], 1);
+    $companyId = $service->saveCompany(['code' => 'ATM', 'name' => 'Atomic Company'], 1);
+    $service->saveApplication($candidateId, $companyId, 'idle', null, 1);
+    $appId = (int) $pdo->query("SELECT id FROM applications WHERE candidate_id = {$candidateId} AND company_id = {$companyId}")->fetchColumn();
+    $key = bin2hex(random_bytes(16));
+
+    $pdo->exec(
+        "CREATE TRIGGER fail_atomic_board_completion BEFORE UPDATE OF result_json ON idempotency_keys
+         WHEN NEW.key = '{$key}'
+         BEGIN SELECT RAISE(ABORT, 'forced atomic board rollback'); END"
+    );
+    try {
+        $service->applyBoardMove($appId, 1, 'admin', 'scheduled', '', 'atomic move', 'idle', $key);
+        throw new RuntimeException('Expected forced atomic board rollback.');
+    } catch (RuntimeException $e) {
+        assert_true(str_contains($e->getMessage(), 'forced atomic board rollback'), 'Expected forced completion failure');
+    } finally {
+        $pdo->exec('DROP TRIGGER fail_atomic_board_completion');
+    }
+    assert_same('idle', $pdo->query("SELECT current_status FROM applications WHERE id = {$appId}")->fetchColumn(), 'Failed board mutation should roll back application state');
+    assert_same(0, (int) $pdo->query("SELECT COUNT(*) FROM idempotency_keys WHERE key = " . $pdo->quote($key))->fetchColumn(), 'Failed board mutation should roll back key reservation');
+    assert_same(0, (int) $pdo->query("SELECT COUNT(*) FROM events WHERE application_id = {$appId}")->fetchColumn(), 'Failed board mutation should roll back event evidence');
+    assert_same(0, (int) $pdo->query("SELECT COUNT(*) FROM domain_event_outbox WHERE payload_json LIKE '%\"application_id\":{$appId}%'")->fetchColumn(), 'Failed board mutation should roll back outbox evidence');
+    assert_same(0, (int) $pdo->query("SELECT COUNT(*) FROM audit_logs WHERE action = 'transition' AND subject_type = 'application' AND subject_id = {$appId}")->fetchColumn(), 'Failed board mutation should roll back audit evidence');
+
+    $first = $service->applyBoardMove($appId, 1, 'admin', 'scheduled', '', 'atomic move', 'idle', $key);
+    $duplicate = $service->applyBoardMove($appId, 1, 'admin', 'scheduled', '', 'atomic move', 'idle', $key);
+    assert_same(['duplicate' => false, 'status' => 'scheduled'], $first, 'First atomic board request should apply');
+    assert_same(['duplicate' => true, 'status' => 'scheduled'], $duplicate, 'Duplicate atomic board request should return its durable result');
+    assert_same(1, (int) $pdo->query("SELECT COUNT(*) FROM events WHERE application_id = {$appId} AND from_status = 'idle' AND to_status = 'scheduled'")->fetchColumn(), 'Duplicate should not repeat transition event');
+    assert_same(1, (int) $pdo->query("SELECT COUNT(*) FROM workflow_transition_events WHERE application_id = {$appId} AND from_state_key = 'idle' AND to_state_key = 'scheduled'")->fetchColumn(), 'Duplicate should not repeat workflow event');
+    assert_same(1, (int) $pdo->query("SELECT COUNT(*) FROM domain_event_outbox WHERE payload_json LIKE '%\"application_id\":{$appId}%'")->fetchColumn(), 'Duplicate should not repeat outbox event');
+    $stored = $pdo->query("SELECT request_hash, result_json FROM idempotency_keys WHERE key = " . $pdo->quote($key))->fetch();
+    assert_true(preg_match('/^[a-f0-9]{64}$/', (string) $stored['request_hash']) === 1, 'Atomic request should store a request hash');
+    assert_same(['status' => 'scheduled'], json_decode((string) $stored['result_json'], true, 512, JSON_THROW_ON_ERROR), 'Atomic request should store its result');
+
+    try {
+        $service->applyBoardMove($appId, 1, 'admin', 'scheduled', '', 'different request', 'idle', $key);
+        throw new RuntimeException('Expected form submission key conflict.');
+    } catch (UserVisibleException $e) {
+        assert_same('FORM_SUBMISSION_KEY_CONFLICT', $e->publicCode(), 'Same key with a different request should conflict');
+    }
+
+    $returnKey = bin2hex(random_bytes(16));
+    $returned = $service->applyBoardReturnToIdle($appId, 1, 'admin', 'operator_return', 'atomic correction', 'scheduled', $returnKey);
+    $returnDuplicate = $service->applyBoardReturnToIdle($appId, 1, 'admin', 'operator_return', 'atomic correction', 'scheduled', $returnKey);
+    assert_same(['duplicate' => false, 'status' => 'idle'], $returned, 'Atomic return should apply');
+    assert_same(['duplicate' => true, 'status' => 'idle'], $returnDuplicate, 'Atomic return duplicate should reuse the durable result');
+    assert_same(1, (int) $pdo->query("SELECT COUNT(*) FROM events WHERE application_id = {$appId} AND from_status = 'scheduled' AND to_status = 'idle'")->fetchColumn(), 'Return duplicate should not repeat event evidence');
+});
+
 test_case('company users cannot act outside their assigned company scope', function (): void {
     $pdo = Database::connection();
     $service = new PlacementService($pdo);
@@ -2093,6 +2518,27 @@ test_case('company users cannot act outside their assigned company scope', funct
     } catch (RuntimeException $e) {
         assert_true(str_contains($e->getMessage(), 'outside their assigned company scope'), 'Expected scope message');
     }
+
+    $beforeStatus = (string) $pdo->query("SELECT current_status FROM applications WHERE id = {$riverAppId}")->fetchColumn();
+    $key = bin2hex(random_bytes(16));
+    try {
+        $service->applyBoardMove(
+            $riverAppId,
+            1,
+            'company',
+            '',
+            '',
+            'out-of-scope atomic attempt',
+            $beforeStatus,
+            $key,
+            ['id' => 1, 'role' => 'company', 'scope_type' => 'company', 'scope_value' => 'ATLAS'],
+        );
+        throw new RuntimeException('Expected atomic company scope failure');
+    } catch (UserVisibleException $e) {
+        assert_same('PLACEMENT_COMPANY_SCOPE_FORBIDDEN', $e->publicCode(), 'Atomic scope check should fail with the fixed code');
+    }
+    assert_same($beforeStatus, $pdo->query("SELECT current_status FROM applications WHERE id = {$riverAppId}")->fetchColumn(), 'Atomic scope denial should not mutate application state');
+    assert_same(0, (int) $pdo->query("SELECT COUNT(*) FROM idempotency_keys WHERE key = " . $pdo->quote($key))->fetchColumn(), 'Atomic scope denial should not retain an idempotency reservation');
 });
 
 test_case('candidate detail access follows the requesting role visibility', function (): void {

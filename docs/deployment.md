@@ -102,7 +102,8 @@ Use PostgreSQL when operating the hosted edition or when an institution has
 already chosen to operate a database server:
 
 ```bash
-export CPE_DATABASE_URL='postgresql://USER:PASSWORD@DB_HOST/CAREER_SERVICES'
+export CPE_POSTGRES_POOL_MODE=direct
+export CPE_DATABASE_URL='postgresql://USER:PASSWORD@DB_HOST/CAREER_SERVICES?sslmode=verify-full&sslrootcert=%2Fetc%2Fssl%2Fcerts%2Finstitution-ca.pem&connect_timeout=10'
 php placement doctor
 php placement install --college='Example College' --admin-name='Admin' --admin-email=admin@example.edu
 ```
@@ -123,7 +124,11 @@ database identity.
 
 PostgreSQL ownership locking requires a direct or session-affine connection for
 the duration of the claim. Transaction-pooling endpoints that can change the
-backend session are unsupported. The claim is scoped to the physical PostgreSQL
+backend session are unsupported; set `CPE_POSTGRES_POOL_MODE` to `direct` or
+`session` so any other value fails closed. Production also requires
+`sslmode=verify-full`, an explicit readable `sslrootcert`, and a 1–30 second
+`connect_timeout`. Engine disables persistent PDO connections and verifies
+negotiated TLS through `pg_stat_ssl` after connecting. The claim is scoped to the physical PostgreSQL
 database, not merely the current `search_path`; use one dedicated application
 schema and never place Engine and Cloud markers in different schemas of the same
 database. SQLite keeps a persistent lock file adjacent to the canonical database
@@ -320,10 +325,19 @@ contract version stops the upgrade. These conditions require operator review;
 there is intentionally no force/rebind flag.
 
 The upgrade then holds `cpe.engine-migrations` through the final migration
-registry check and post-migration synchronizers. A failed SQL file rolls back
-that file and its registry row. A failed synchronizer leaves already committed
-migration rows accurate; fix the synchronizer cause and rerun the upgrade. Never
-insert a registry row by hand to bypass a failed file.
+registry check and post-migration synchronizers. If the registry contains a
+filename absent from the running release, upgrade fails closed before pending
+product DDL; deploy the matching or a newer release instead of deleting the
+row. A failed SQL file rolls back
+that file and its registry row. A failed synchronizer that did not edit the
+registry leaves already committed migration rows accurate; fix the synchronizer
+cause and rerun the upgrade.
+Synchronizers must never insert or delete migration rows. The runner checks the
+registry again after a synchronizer returns and refuses success if it changed
+history. Fileless SQLite rolls such changes back with its outer transaction;
+PostgreSQL and file-backed SQLite callback writes are already committed and
+must be preserved as incident evidence and recovered deliberately. Never insert
+a registry row by hand to bypass a failed file.
 
 Candidate anonymization writes safety copies under `data/privacy/` and redacts
 candidate identity while preserving aggregate placement history. See
@@ -407,8 +421,9 @@ The package command writes both `campus-placement-engine-<version>.zip` and
 `campus-placement-engine-<version>.tar.gz`. The ZIP is the simplest download
 for most evaluators and shared-hosting users; the tarball is convenient for
 server operators. Both contain the same allowlisted public app, config,
-migration, doc, example, test, and CI files. The package
-includes `data/.gitkeep` but excludes runtime SQLite files, backups, exports,
+migration, doc, example, test, and CI files. The package includes only
+`data/.gitkeep` and `data/.htaccess` under `data/` and excludes runtime SQLite
+files, backups, exports,
 `.legacy-private/`, `config/local.php`, symbolic links, and local browser-QA
 scratch directories. Packaging runs the publication check first. Verification
 also rejects unsafe paths, multiple archive roots, duplicate entries, and
@@ -420,7 +435,7 @@ moving the release package between machines.
 Verify the package before publishing or installing it elsewhere:
 
 ```bash
-php placement verify-package dist/campus-placement-engine-0.1.0-alpha.2.zip
+php placement verify-package dist/campus-placement-engine-0.1.0-alpha.3.zip
 ```
 
 Before publishing a package, extract it into a clean temp directory and run:
@@ -428,6 +443,7 @@ Before publishing a package, extract it into a clean temp directory and run:
 ```bash
 export CPE_DB_PATH="$(mktemp -t cpe-package-smoke).sqlite"
 php placement doctor
+php placement publication-check
 CPE_ADMIN_PASSWORD='password123' php placement install \
   --college='Package Smoke College' \
   --admin-name='Package Admin' \
@@ -436,8 +452,10 @@ php placement readiness
 php placement export /tmp/cpe-package-export
 ```
 
-The automated test suite performs this extracted-package smoke with isolated
-temporary paths.
+In an extracted Git-free tree, `publication-check` recursively enforces the
+same two-file `data/` allowlist and rejects regular files, symbolic links, or
+other unsafe entries. The automated test suite performs this extracted-package
+smoke with isolated temporary paths.
 
 For legacy spreadsheets, SQL dumps, or old placement apps, follow
 `docs/migration-from-legacy.md` before importing real institutional data into a

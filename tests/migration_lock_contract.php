@@ -92,6 +92,17 @@ function migration_has_sqlite_relation(PDO $pdo, string $name): bool
     return $query->fetchColumn() !== false;
 }
 
+function migration_has_postgres_relation(PDO $pdo, string $schema, string $name): bool
+{
+    $query = $pdo->prepare(
+        'SELECT 1 FROM pg_catalog.pg_class c '
+        . 'JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace '
+        . 'WHERE n.nspname = ? AND c.relname = ? AND c.relkind IN (\'r\', \'p\', \'v\')',
+    );
+    $query->execute([$schema, $name]);
+    return $query->fetchColumn() !== false;
+}
+
 function migration_write_fixture(string $directory, string $name, string $sql): void
 {
     migration_assert(preg_match('/^[0-9]{3}_[a-z0-9_]+\.sql$/', $name) === 1, 'Unsafe migration fixture filename.');
@@ -486,6 +497,67 @@ function migration_sqlite_contract(): void
         migration_assert(mkdir($fixtureDirectory, 0700), 'Could not create fixture migration directory.');
         migration_write_fixture($fixtureDirectory, '001_create_fixture.sql', 'CREATE TABLE fixture_product (id INTEGER PRIMARY KEY);');
 
+        $unknownFileDirectory = $root . '/unknown-file-registry';
+        migration_assert(mkdir($unknownFileDirectory, 0700), 'Could not create file-backed unknown-registry fixture directory.');
+        migration_write_fixture($unknownFileDirectory, '001_known.sql', 'CREATE TABLE unknown_file_known (id INTEGER PRIMARY KEY);');
+        $unknownFilePdo = migration_sqlite($root . '/unknown-file-registry.sqlite');
+        $unknownFileRunner = new SqlMigrationRunner(
+            $unknownFilePdo,
+            'unknown_file_migrations',
+            $unknownFileDirectory,
+            'cpe.unknown-file-migrations',
+        );
+        $unknownFileRunner->run();
+        migration_write_fixture($unknownFileDirectory, '002_pending.sql', 'CREATE TABLE unknown_file_pending (id INTEGER PRIMARY KEY);');
+        $unknownFilePdo->exec(
+            "INSERT INTO unknown_file_migrations (migration, applied_at) VALUES ('999_future.sql', '2030-01-01 00:00:00')",
+        );
+        $unknownFileCallbackRan = false;
+        $unknownFileFailure = migration_assert_throws(
+            SqlMigrationRunner::ERROR_REGISTRY,
+            static function () use ($unknownFileRunner, &$unknownFileCallbackRan): void {
+                $unknownFileRunner->run(static function () use (&$unknownFileCallbackRan): void {
+                    $unknownFileCallbackRan = true;
+                });
+            },
+            'File-backed SQLite accepted a migration registry row absent from the release',
+        );
+        migration_assert(!str_contains($unknownFileFailure->getMessage(), '999_future.sql'), 'Registry failure leaked the unknown file-backed SQLite identifier.');
+        migration_assert(!migration_has_sqlite_relation($unknownFilePdo, 'unknown_file_pending'), 'Unknown file-backed SQLite registry row allowed pending product DDL.');
+        migration_assert(!$unknownFileCallbackRan, 'Unknown file-backed SQLite registry row allowed the post-migration callback.');
+        migration_assert((int) $unknownFilePdo->query('SELECT COUNT(*) FROM unknown_file_migrations')->fetchColumn() === 2, 'File-backed SQLite registry rejection rewrote migration history.');
+
+        $unknownMemoryDirectory = $root . '/unknown-memory-registry';
+        migration_assert(mkdir($unknownMemoryDirectory, 0700), 'Could not create fileless unknown-registry fixture directory.');
+        migration_write_fixture($unknownMemoryDirectory, '001_known.sql', 'CREATE TABLE unknown_memory_known (id INTEGER PRIMARY KEY);');
+        $unknownMemoryPdo = migration_sqlite(':memory:');
+        $unknownMemoryRunner = new SqlMigrationRunner(
+            $unknownMemoryPdo,
+            'unknown_memory_migrations',
+            $unknownMemoryDirectory,
+            'cpe.unknown-memory-migrations',
+        );
+        $unknownMemoryRunner->run();
+        migration_write_fixture($unknownMemoryDirectory, '002_pending.sql', 'CREATE TABLE unknown_memory_pending (id INTEGER PRIMARY KEY);');
+        $unknownMemoryPdo->exec(
+            "INSERT INTO unknown_memory_migrations (migration, applied_at) VALUES ('999_future.sql', '2030-01-01 00:00:00')",
+        );
+        $unknownMemoryCallbackRan = false;
+        $unknownMemoryFailure = migration_assert_throws(
+            SqlMigrationRunner::ERROR_REGISTRY,
+            static function () use ($unknownMemoryRunner, &$unknownMemoryCallbackRan): void {
+                $unknownMemoryRunner->run(static function () use (&$unknownMemoryCallbackRan): void {
+                    $unknownMemoryCallbackRan = true;
+                });
+            },
+            'Fileless SQLite accepted a migration registry row absent from the release',
+        );
+        migration_assert(!str_contains($unknownMemoryFailure->getMessage(), '999_future.sql'), 'Registry failure leaked the unknown fileless SQLite identifier.');
+        migration_assert(!migration_has_sqlite_relation($unknownMemoryPdo, 'unknown_memory_pending'), 'Unknown fileless SQLite registry row allowed pending product DDL.');
+        migration_assert(!$unknownMemoryCallbackRan, 'Unknown fileless SQLite registry row allowed the post-migration callback.');
+        migration_assert(!$unknownMemoryPdo->inTransaction(), 'Unknown fileless SQLite registry rejection left its transaction open.');
+        migration_assert((int) $unknownMemoryPdo->query('SELECT COUNT(*) FROM unknown_memory_migrations')->fetchColumn() === 2, 'Fileless SQLite registry rejection rewrote migration history.');
+
         $activeTransaction = migration_sqlite(':memory:');
         $activeRunner = new SqlMigrationRunner($activeTransaction, 'fixture_migrations', $fixtureDirectory, 'cpe.active-migrations');
         $activeTransaction->beginTransaction();
@@ -613,6 +685,85 @@ function migration_sqlite_contract(): void
             'Callback-owned open transaction was accepted',
         );
         migration_assert(!$callbackPdo->inTransaction(), 'Callback transaction rejection did not roll back the transaction.');
+
+        $callbackMutationDirectory = $root . '/callback-registry-mutations';
+        migration_assert(mkdir($callbackMutationDirectory, 0700), 'Could not create callback registry-mutation fixture directory.');
+        migration_write_fixture($callbackMutationDirectory, '001_callback.sql', 'SELECT 1;');
+
+        $fileCallbackInsertPdo = migration_sqlite($root . '/callback-insert.sqlite');
+        $fileCallbackInsertRunner = new SqlMigrationRunner(
+            $fileCallbackInsertPdo,
+            'callback_migrations',
+            $callbackMutationDirectory,
+            'cpe.callback-insert-migrations',
+        );
+        $fileCallbackInsertRunner->run();
+        migration_assert_throws(
+            SqlMigrationRunner::ERROR_REGISTRY,
+            static fn () => $fileCallbackInsertRunner->run(static function (PDO $pdo): void {
+                $pdo->exec(
+                    "INSERT INTO callback_migrations (migration, applied_at) VALUES ('999_callback.sql', '2030-01-01 00:00:00')",
+                );
+            }),
+            'File-backed SQLite callback inserted an unknown registry row without failing the run',
+        );
+        migration_assert((int) $fileCallbackInsertPdo->query("SELECT COUNT(*) FROM callback_migrations WHERE migration = '999_callback.sql'")->fetchColumn() === 1, 'File-backed SQLite callback insertion was misleadingly reported as rolled back.');
+
+        $fileCallbackDeletePdo = migration_sqlite($root . '/callback-delete.sqlite');
+        $fileCallbackDeleteRunner = new SqlMigrationRunner(
+            $fileCallbackDeletePdo,
+            'callback_migrations',
+            $callbackMutationDirectory,
+            'cpe.callback-delete-migrations',
+        );
+        $fileCallbackDeleteRunner->run();
+        migration_assert_throws(
+            SqlMigrationRunner::ERROR_REGISTRY,
+            static fn () => $fileCallbackDeleteRunner->run(static function (PDO $pdo): void {
+                $pdo->exec("DELETE FROM callback_migrations WHERE migration = '001_callback.sql'");
+            }),
+            'File-backed SQLite callback deleted a discovered registry row without failing the run',
+        );
+        migration_assert((int) $fileCallbackDeletePdo->query('SELECT COUNT(*) FROM callback_migrations')->fetchColumn() === 0, 'File-backed SQLite callback deletion was misleadingly reported as rolled back.');
+
+        $memoryCallbackInsertPdo = migration_sqlite(':memory:');
+        $memoryCallbackInsertRunner = new SqlMigrationRunner(
+            $memoryCallbackInsertPdo,
+            'callback_migrations',
+            $callbackMutationDirectory,
+            'cpe.memory-callback-insert',
+        );
+        $memoryCallbackInsertRunner->run();
+        migration_assert_throws(
+            SqlMigrationRunner::ERROR_REGISTRY,
+            static fn () => $memoryCallbackInsertRunner->run(static function (PDO $pdo): void {
+                $pdo->exec(
+                    "INSERT INTO callback_migrations (migration, applied_at) VALUES ('999_callback.sql', '2030-01-01 00:00:00')",
+                );
+            }),
+            'Fileless SQLite callback inserted an unknown registry row without failing the run',
+        );
+        migration_assert(!$memoryCallbackInsertPdo->inTransaction(), 'Fileless SQLite callback insertion rejection left its outer transaction open.');
+        migration_assert((int) $memoryCallbackInsertPdo->query('SELECT COUNT(*) FROM callback_migrations')->fetchColumn() === 1, 'Fileless SQLite callback insertion was not rolled back with the outer transaction.');
+        migration_assert((int) $memoryCallbackInsertPdo->query("SELECT COUNT(*) FROM callback_migrations WHERE migration = '999_callback.sql'")->fetchColumn() === 0, 'Fileless SQLite callback unknown row survived outer rollback.');
+
+        $memoryCallbackDeletePdo = migration_sqlite(':memory:');
+        $memoryCallbackDeleteRunner = new SqlMigrationRunner(
+            $memoryCallbackDeletePdo,
+            'callback_migrations',
+            $callbackMutationDirectory,
+            'cpe.memory-callback-delete',
+        );
+        $memoryCallbackDeleteRunner->run();
+        migration_assert_throws(
+            SqlMigrationRunner::ERROR_REGISTRY,
+            static fn () => $memoryCallbackDeleteRunner->run(static function (PDO $pdo): void {
+                $pdo->exec("DELETE FROM callback_migrations WHERE migration = '001_callback.sql'");
+            }),
+            'Fileless SQLite callback deleted a discovered registry row without failing the run',
+        );
+        migration_assert(!$memoryCallbackDeletePdo->inTransaction(), 'Fileless SQLite callback deletion rejection left its outer transaction open.');
+        migration_assert((int) $memoryCallbackDeletePdo->query("SELECT COUNT(*) FROM callback_migrations WHERE migration = '001_callback.sql'")->fetchColumn() === 1, 'Fileless SQLite callback deletion was not rolled back with the outer transaction.');
 
         $cleanupDirectory = $root . '/cleanup-failure';
         migration_assert(mkdir($cleanupDirectory, 0700), 'Could not create cleanup-failure fixture directory.');
@@ -801,6 +952,35 @@ function migration_postgres_contract(string $url): void
         migration_assert((int) $pdo->query('SELECT COUNT(*) FROM fixture_migrations')->fetchColumn() === 1, 'PostgreSQL migration was not recorded exactly once.');
         (new SqlMigrationRunner($pdo, 'fixture_migrations', $fixtures, 'cpe.pg-migrations'))->run();
 
+        $unknownDirectory = $root . '/unknown-registry';
+        migration_assert(mkdir($unknownDirectory, 0700), 'Could not create PostgreSQL unknown-registry fixture directory.');
+        migration_write_fixture($unknownDirectory, '001_known.sql', 'CREATE TABLE pg_unknown_known (id BIGINT PRIMARY KEY);');
+        $unknownRunner = new SqlMigrationRunner(
+            $pdo,
+            'unknown_migrations',
+            $unknownDirectory,
+            'cpe.pg-unknown-migrations',
+        );
+        $unknownRunner->run();
+        migration_write_fixture($unknownDirectory, '002_pending.sql', 'CREATE TABLE pg_unknown_pending (id BIGINT PRIMARY KEY);');
+        $pdo->exec(
+            "INSERT INTO unknown_migrations (migration, applied_at) VALUES ('999_future.sql', '2030-01-01 00:00:00')",
+        );
+        $unknownCallbackRan = false;
+        $unknownFailure = migration_assert_throws(
+            SqlMigrationRunner::ERROR_REGISTRY,
+            static function () use ($unknownRunner, &$unknownCallbackRan): void {
+                $unknownRunner->run(static function () use (&$unknownCallbackRan): void {
+                    $unknownCallbackRan = true;
+                });
+            },
+            'PostgreSQL accepted a migration registry row absent from the release',
+        );
+        migration_assert(!str_contains($unknownFailure->getMessage(), '999_future.sql'), 'Registry failure leaked the unknown PostgreSQL identifier.');
+        migration_assert(!migration_has_postgres_relation($pdo, $schema, 'pg_unknown_pending'), 'Unknown PostgreSQL registry row allowed pending product DDL.');
+        migration_assert(!$unknownCallbackRan, 'Unknown PostgreSQL registry row allowed the post-migration callback.');
+        migration_assert((int) $pdo->query('SELECT COUNT(*) FROM unknown_migrations')->fetchColumn() === 2, 'PostgreSQL registry rejection rewrote migration history.');
+
         $postgresControls = [
             'BEGIN',
             'COMMIT TRANSACTION',
@@ -942,6 +1122,44 @@ function migration_postgres_contract(string $url): void
         $callbackRunner->run(static function (PDO $connection): void {
             $connection->exec('CREATE TABLE pg_callback_retry (id BIGINT PRIMARY KEY)');
         });
+
+        $callbackMutationDirectory = $root . '/pg-callback-registry-mutations';
+        migration_assert(mkdir($callbackMutationDirectory, 0700), 'Could not create PostgreSQL callback registry-mutation fixture directory.');
+        migration_write_fixture($callbackMutationDirectory, '001_callback.sql', 'SELECT 1;');
+
+        $callbackInsertRunner = new SqlMigrationRunner(
+            $pdo,
+            'callback_insert_migrations',
+            $callbackMutationDirectory,
+            'cpe.pg-callback-insert',
+        );
+        $callbackInsertRunner->run();
+        migration_assert_throws(
+            SqlMigrationRunner::ERROR_REGISTRY,
+            static fn () => $callbackInsertRunner->run(static function (PDO $connection): void {
+                $connection->exec(
+                    "INSERT INTO callback_insert_migrations (migration, applied_at) VALUES ('999_callback.sql', '2030-01-01 00:00:00')",
+                );
+            }),
+            'PostgreSQL callback inserted an unknown registry row without failing the run',
+        );
+        migration_assert((int) $pdo->query("SELECT COUNT(*) FROM callback_insert_migrations WHERE migration = '999_callback.sql'")->fetchColumn() === 1, 'PostgreSQL callback insertion was misleadingly reported as rolled back.');
+
+        $callbackDeleteRunner = new SqlMigrationRunner(
+            $pdo,
+            'callback_delete_migrations',
+            $callbackMutationDirectory,
+            'cpe.pg-callback-delete',
+        );
+        $callbackDeleteRunner->run();
+        migration_assert_throws(
+            SqlMigrationRunner::ERROR_REGISTRY,
+            static fn () => $callbackDeleteRunner->run(static function (PDO $connection): void {
+                $connection->exec("DELETE FROM callback_delete_migrations WHERE migration = '001_callback.sql'");
+            }),
+            'PostgreSQL callback deleted a discovered registry row without failing the run',
+        );
+        migration_assert((int) $pdo->query('SELECT COUNT(*) FROM callback_delete_migrations')->fetchColumn() === 0, 'PostgreSQL callback deletion was misleadingly reported as rolled back.');
 
         $admin->exec('DROP SCHEMA "' . $schema . '" CASCADE');
         $admin->exec('CREATE SCHEMA "' . $schema . '"');

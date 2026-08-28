@@ -80,6 +80,10 @@ the database file; all old PHP/PDO processes must be stopped because they retain
 handles to the old file. PostgreSQL uses
 `pg_restore --clean --if-exists --single-transaction` and requires
 `CPE_DATABASE_URL` plus `pg_restore`.
+Both PostgreSQL tools use the runtime policy's resolved TLS mode, trusted root,
+and connection timeout. The password is excluded from argv, while inherited
+`PG*` connection settings are scrubbed before the validated child environment
+is installed. This keeps backup and restore transport policy aligned with PDO.
 
 After restore:
 
@@ -104,8 +108,18 @@ Migration recovery is serialized independently under
 so a process crash may leave the registry table itself present but cannot leave
 only one side of a file/row pair. After confirming the database owner and backup,
 rerun the same pinned Engine release; it rechecks every discovered filename and
-resumes only unrecorded files. If the final synchronizer failed, the committed
-registry remains authoritative and the synchronizer is retried on the next run.
+resumes only unrecorded files. A registry filename absent from that release is
+a downgrade, corruption, or manual-edit incident: the runner stops before
+pending product DDL. Preserve the database and registry evidence and recover
+forward with the matching release; never delete the unfamiliar row to force a
+downgrade. If the final synchronizer failed without editing migration rows, the
+committed registry remains authoritative and the synchronizer is retried on the
+next run.
+If a synchronizer returned after inserting or deleting migration rows, the
+runner's final proof still rejects the run. Fileless SQLite rolls that callback
+mutation back; PostgreSQL and file-backed SQLite cannot undo the callback's
+autocommitted write, so preserve the broken registry as incident evidence and
+restore or recover forward from verified history.
 
 Stopping a PHP migration worker does not itself prove that its PostgreSQL
 backend session has ended. A long-running server statement can keep the session

@@ -13,7 +13,10 @@ php tests/database_connection_cleanup_contract.php
 php tests/incident_boundary_contract.php
 php tests/legacy_backup_compatibility_contract.php
 php tests/worker_delivery_contract.php
+php tests/postgres_connection_policy_contract.php
+php tests/postgres_tls_contract.php
 php tests/database_contract.php
+php tests/mutation_concurrency_contract.php
 php tests/database_lock_release_contract.php
 php tests/install_concurrency_contract.php
 php tests/hosted_install_atomicity_contract.php
@@ -24,7 +27,13 @@ php tests/managed_hosting_contract.php
 php placement publication-check
 ```
 
-`tests/run.php` is the broad SQLite integration suite. The installation
+`tests/run.php` is the broad SQLite integration suite.
+`tests/migration_lock_contract.php` proves unknown pre-existing registry rows
+stop pending DDL and that callback insertions and deletions cannot let a run
+return success. Its fileless SQLite cases prove the outer transaction restores
+the exact registry, while file-backed SQLite and conditional PostgreSQL cases
+prove callback mutations remain committed evidence rather than claiming a
+rollback that did not occur.
 `tests/incident_boundary_contract.php` is the mandatory sentinel gate for
 browser, CLI, protected-log, audit, recovery, and persisted-error boundaries.
 It must pass before release; its synthetic secrets must be absent from every
@@ -34,6 +43,22 @@ It runs two independent workers against one queue, verifies token-fenced
 acknowledgement and failure mutations, stale-claim recovery, stable idempotency
 keys, dead-letter thresholds, dry-run immutability, and destination concealment.
 CI runs it against both SQLite and PostgreSQL.
+`tests/postgres_connection_policy_contract.php` is a no-network parser and
+policy gate. It freezes the Cloud-compatible constructor and raw `fromUrl()`
+signatures while proving strict runtime TLS, pool-mode, timeout, redaction,
+duplicate/unknown-query, component-environment, and injection behavior.
+`tests/postgres_tls_contract.php` is a conditional local and pull-request gate:
+it skips unless `CPE_POSTGRES_TLS_TEST_URL` names a disposable production-shaped endpoint with
+`verify-full`, a readable root certificate, and a bounded timeout. When enabled,
+it requires post-connect `pg_stat_ssl` negotiated-TLS evidence. Pull-request CI
+maps the optional secret of the same name, so forks without it record an explicit
+skip rather than claiming live TLS proof. The tag release workflow requires the
+secret and fails before testing or publication when it is absent.
+`tests/mutation_concurrency_contract.php` releases paired independent processes
+against one database. It proves same-key board retries return one stored result,
+different-key stale moves cannot both mutate the card, and repeated concurrent
+module toggles emit one lifecycle event. CI and release run it against SQLite
+and a fresh dedicated PostgreSQL database.
 The installation
 concurrency contract releases two independent processes together against one
 fresh database. Each performs a hosted install with a distinct tenant identity
@@ -108,8 +133,18 @@ package independently of GitHub Actions.
 Point an empty disposable database at the contract:
 
 ```bash
-export CPE_DATABASE_URL='postgresql://USER:PASSWORD@127.0.0.1:5432/EMPTY_DATABASE'
+export CPE_POSTGRES_POOL_MODE=direct
+export CPE_POSTGRES_ALLOW_INSECURE_LOOPBACK=1
+export CPE_DATABASE_URL='postgresql://USER:PASSWORD@127.0.0.1:5432/EMPTY_DATABASE?sslmode=disable'
 php tests/database_contract.php
+```
+
+Run the mutation concurrency contract against a separate fresh database because
+it installs and mutates its own fixture:
+
+```bash
+export CPE_DATABASE_URL='postgresql://USER:PASSWORD@127.0.0.1:5432/EMPTY_CONCURRENCY_DATABASE?sslmode=disable'
+php tests/mutation_concurrency_contract.php
 ```
 
 CI runs this against PostgreSQL 17. Locally, Apple Container is a good optional
@@ -185,10 +220,13 @@ and runs readiness plus HTTP smoke. See `disaster-recovery.md`.
 
 ```bash
 php placement package --target=dist --force
-php placement verify-package dist/campus-placement-engine-0.1.0-alpha.2.tar.gz
-php placement verify-package dist/campus-placement-engine-0.1.0-alpha.2.zip
+php placement verify-package dist/campus-placement-engine-0.1.0-alpha.3.tar.gz
+php placement verify-package dist/campus-placement-engine-0.1.0-alpha.3.zip
 ```
 
-Extract the package into a clean directory, install a throwaway database, and
-repeat doctor, readiness, export, HTTP smoke, and restore. Do not use the
+Extract the package into a clean directory, run `php placement
+publication-check`, install a throwaway database, and repeat doctor, readiness,
+export, HTTP smoke, and restore. The broad suite also injects a runtime file
+under the extracted package's `data/` tree and proves the Git-free publication
+check rejects its deterministic relative path. Do not use the
 historical private archive or real institutional records as fixtures.
