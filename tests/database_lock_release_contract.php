@@ -192,9 +192,17 @@ try {
         lock_release_backend_pid($afterMigration) !== $migrationPid,
         'Migration lock release failure reused the cached PostgreSQL backend.',
     );
+    $expectedMigrationNames = array_map(
+        'basename',
+        glob(__DIR__ . '/../database/migrations/pgsql/*.sql') ?: [],
+    );
+    sort($expectedMigrationNames, SORT_STRING);
+    $recordedMigrationNames = $afterMigration->query(
+        'SELECT migration FROM migrations ORDER BY id',
+    )->fetchAll(PDO::FETCH_COLUMN);
     lock_release_assert(
-        (int) $afterMigration->query('SELECT COUNT(*) FROM migrations')->fetchColumn() === 9,
-        'Migration release fault did not preserve the completed migration registry truthfully.',
+        $recordedMigrationNames === $expectedMigrationNames,
+        'Migration release fault did not preserve the exact completed migration registry truthfully.',
     );
     $afterMigration->exec('DROP TRIGGER cpe_test_unlock_migration ON institutions');
     $afterMigration->exec('DROP FUNCTION cpe_test_unlock_migration()');
