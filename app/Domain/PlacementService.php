@@ -6,6 +6,7 @@ namespace App\Domain;
 
 use App\Core\Http\UserVisibleException;
 use App\Core\Events\DomainEvent;
+use App\Core\Persistence\WriteTransaction;
 use App\Modules\Placement\Install\LegacyDomainSynchronizer;
 use App\Modules\Placement\Workflow\WorkflowEngine;
 use App\Modules\Placement\Workflow\WorkflowPublisher;
@@ -3981,39 +3982,7 @@ final class PlacementService
 
     private function transactional(callable $operation): mixed
     {
-        $ownsTransaction = !$this->pdo->inTransaction();
-        $sqliteImmediate = $ownsTransaction
-            && (string) $this->pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'sqlite';
-        $started = false;
-        if ($ownsTransaction) {
-            if ($sqliteImmediate) {
-                $this->pdo->exec('BEGIN IMMEDIATE');
-            } else {
-                $this->pdo->beginTransaction();
-            }
-            $started = true;
-        }
-        try {
-            $result = $operation();
-            if ($ownsTransaction) {
-                if ($sqliteImmediate) {
-                    $this->pdo->exec('COMMIT');
-                } else {
-                    $this->pdo->commit();
-                }
-                $started = false;
-            }
-            return $result;
-        } catch (\Throwable $e) {
-            if ($started) {
-                if ($sqliteImmediate) {
-                    $this->pdo->exec('ROLLBACK');
-                } elseif ($this->pdo->inTransaction()) {
-                    $this->pdo->rollBack();
-                }
-            }
-            throw $e;
-        }
+        return WriteTransaction::run($this->pdo, $operation);
     }
 
     private function setting(string $key, string $default = ''): string

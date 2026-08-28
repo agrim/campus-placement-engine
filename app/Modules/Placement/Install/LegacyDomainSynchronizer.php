@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Modules\Placement\Install;
 
+use App\Core\Persistence\WriteTransaction;
 use App\Support\Database;
 use PDO;
 use RuntimeException;
@@ -16,11 +17,7 @@ final class LegacyDomainSynchronizer
             return;
         }
 
-        $ownsTransaction = !$pdo->inTransaction();
-        if ($ownsTransaction) {
-            $pdo->beginTransaction();
-        }
-        try {
+        WriteTransaction::run($pdo, function () use ($pdo): void {
             $institutionId = $this->requiredId($pdo, "SELECT id FROM institutions WHERE slug = 'default'");
             $cycleId = $this->requiredId($pdo, "SELECT id FROM placement_cycles WHERE cycle_key = 'default'");
             $this->synchronizeCandidates($pdo, $institutionId, $cycleId);
@@ -28,15 +25,7 @@ final class LegacyDomainSynchronizer
             $this->synchronizeApplications($pdo);
             $this->synchronizePresence($pdo);
             $this->synchronizeOffers($pdo);
-            if ($ownsTransaction) {
-                $pdo->commit();
-            }
-        } catch (\Throwable $e) {
-            if ($ownsTransaction && $pdo->inTransaction()) {
-                $pdo->rollBack();
-            }
-            throw $e;
-        }
+        });
     }
 
     private function synchronizeCandidates(PDO $pdo, int $institutionId, int $cycleId): void

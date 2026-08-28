@@ -29,6 +29,8 @@ use App\Core\Events\DomainEvent;
 use App\Core\Events\DomainEventOutboxWorker;
 use App\Core\Http\AuthorizationException;
 use App\Core\Http\UserVisibleException;
+use App\Core\Persistence\DatabaseConnectionInvalidException;
+use App\Core\Persistence\WriteTransaction;
 use App\Core\Modules\ModuleLifecycleService;
 use App\Core\Modules\ModuleManifest;
 use App\Core\Portability\PortalPortabilityService;
@@ -167,8 +169,11 @@ function render_view_for_test(string $template, array $vars): string
  */
 final class LegacySqliteManualTransactionPdo extends PDO
 {
+    public int $sqlBeginCalls = 0;
     public int $pdoCommitCalls = 0;
     public int $pdoRollbackCalls = 0;
+    public bool $failNextSqlCommit = false;
+    public bool $failNextSqlRollback = false;
 
     public function __construct(string $path)
     {
@@ -177,6 +182,28 @@ final class LegacySqliteManualTransactionPdo extends PDO
         $this->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
         $this->exec('PRAGMA foreign_keys = ON');
         $this->exec('PRAGMA busy_timeout = 5000');
+    }
+
+    public function inTransaction(): bool
+    {
+        return false;
+    }
+
+    public function exec(string $statement): int|false
+    {
+        $boundary = strtoupper(trim($statement));
+        if ($boundary === 'BEGIN IMMEDIATE') {
+            $this->sqlBeginCalls++;
+        } elseif ($boundary === 'COMMIT' && $this->failNextSqlCommit) {
+            $this->failNextSqlCommit = false;
+            parent::exec('ROLLBACK');
+            throw new RuntimeException('Forced SQL commit uncertainty.');
+        } elseif ($boundary === 'ROLLBACK' && $this->failNextSqlRollback) {
+            $this->failNextSqlRollback = false;
+            parent::exec('ROLLBACK');
+            throw new RuntimeException('Forced SQL rollback uncertainty.');
+        }
+        return parent::exec($statement);
     }
 
     public function commit(): bool
@@ -191,6 +218,110 @@ final class LegacySqliteManualTransactionPdo extends PDO
         throw new RuntimeException('PDO rollback cannot close a SQL-level SQLite transaction on this runtime.');
     }
 }
+
+final class PdoWriteTransactionFaultDouble extends PDO
+{
+    public bool $active = false;
+    public int $beginCalls = 0;
+    public int $commitCalls = 0;
+    public int $rollbackCalls = 0;
+    public ?Throwable $commitFailure = null;
+    public ?Throwable $rollbackFailure = null;
+
+    public function __construct()
+    {
+        parent::__construct('sqlite::memory:');
+    }
+
+    public function getAttribute(int $attribute): mixed
+    {
+        return $attribute === PDO::ATTR_DRIVER_NAME
+            ? 'pgsql'
+            : parent::getAttribute($attribute);
+    }
+
+    public function beginTransaction(): bool
+    {
+        $this->beginCalls++;
+        $this->active = true;
+        return true;
+    }
+
+    public function inTransaction(): bool
+    {
+        return $this->active;
+    }
+
+    public function commit(): bool
+    {
+        $this->commitCalls++;
+        if ($this->commitFailure !== null) {
+            throw $this->commitFailure;
+        }
+        $this->active = false;
+        return true;
+    }
+
+    public function rollBack(): bool
+    {
+        $this->rollbackCalls++;
+        if ($this->rollbackFailure !== null) {
+            throw $this->rollbackFailure;
+        }
+        $this->active = false;
+        return true;
+    }
+}
+
+test_case('PDO write transaction preserves primary and cleanup failures', function (): void {
+    $operationPrimary = new RuntimeException('forced PDO operation failure');
+    $operationCleanup = new RuntimeException('forced PDO operation rollback failure');
+    $operationPdo = new PdoWriteTransactionFaultDouble();
+    $operationPdo->rollbackFailure = $operationCleanup;
+    try {
+        WriteTransaction::run($operationPdo, static function () use ($operationPrimary): never {
+            throw $operationPrimary;
+        });
+        throw new RuntimeException('Expected PDO operation cleanup failure.');
+    } catch (DatabaseConnectionInvalidException $e) {
+        assert_same(WriteTransaction::ERROR_CLEANUP, $e->failureCode(), 'Operation rollback cleanup should use the write transaction failure code');
+        assert_true($e->getPrevious() === $operationPrimary, 'Operation rollback cleanup should preserve the primary failure');
+        assert_true($e->cleanupCause() === $operationCleanup, 'Operation rollback cleanup should preserve the cleanup failure');
+        assert_true($e->requiresConnectionReset(), 'Operation rollback cleanup should require connection reset');
+    }
+    assert_same(1, $operationPdo->beginCalls, 'Operation fault should start one PDO transaction');
+    assert_same(0, $operationPdo->commitCalls, 'Operation fault should not attempt commit');
+    assert_same(1, $operationPdo->rollbackCalls, 'Operation fault should attempt one rollback');
+    assert_true($operationPdo->inTransaction(), 'Failed PDO cleanup should leave transaction state uncertain');
+
+    $commitPrimary = new RuntimeException('forced PDO commit failure');
+    $commitCleanup = new RuntimeException('forced PDO commit rollback failure');
+    $commitPdo = new PdoWriteTransactionFaultDouble();
+    $commitPdo->commitFailure = $commitPrimary;
+    $commitPdo->rollbackFailure = $commitCleanup;
+    try {
+        WriteTransaction::run($commitPdo, static fn (): string => 'result');
+        throw new RuntimeException('Expected PDO commit cleanup failure.');
+    } catch (DatabaseConnectionInvalidException $e) {
+        assert_same(WriteTransaction::ERROR_CLEANUP, $e->failureCode(), 'Commit rollback cleanup should use the write transaction failure code');
+        assert_true($e->getPrevious() === $commitPrimary, 'Commit rollback cleanup should preserve the commit failure');
+        assert_true($e->cleanupCause() === $commitCleanup, 'Commit rollback cleanup should preserve the cleanup failure');
+        assert_true($e->requiresConnectionReset(), 'Commit rollback cleanup should require connection reset');
+    }
+    assert_same(1, $commitPdo->beginCalls, 'Commit fault should start one PDO transaction');
+    assert_same(1, $commitPdo->commitCalls, 'Commit fault should attempt one commit');
+    assert_same(1, $commitPdo->rollbackCalls, 'Commit fault should attempt one rollback');
+    assert_true($commitPdo->inTransaction(), 'Failed commit cleanup should leave transaction state uncertain');
+
+    $callerPdo = new PdoWriteTransactionFaultDouble();
+    $callerPdo->beginTransaction();
+    assert_same('caller result', WriteTransaction::run($callerPdo, static fn (): string => 'caller result'), 'Caller-owned PDO transaction should execute directly');
+    assert_same(1, $callerPdo->beginCalls, 'Shared boundary should not begin inside a caller-owned PDO transaction');
+    assert_same(0, $callerPdo->commitCalls, 'Shared boundary should not commit a caller-owned PDO transaction');
+    assert_same(0, $callerPdo->rollbackCalls, 'Shared boundary should not roll back a caller-owned PDO transaction');
+    assert_true($callerPdo->inTransaction(), 'Caller-owned PDO transaction should remain active');
+    $callerPdo->rollBack();
+});
 
 test_case('installer creates database, admin, settings, and demo data', function (): void {
     try {
@@ -347,6 +478,50 @@ test_case('SQLite immediate transactions use SQL boundaries compatible with PHP 
         assert_same(['duplicate' => false, 'status' => 'scheduled'], $result, 'SQL-level board transaction commit should persist');
         assert_same(0, $pdo->pdoCommitCalls, 'SQL-level SQLite transactions must not call PDO::commit()');
         assert_same(0, $pdo->pdoRollbackCalls, 'SQL-level SQLite transactions must not call PDO::rollBack()');
+
+        $siteName = (string) $pdo->query("SELECT value FROM settings WHERE key = 'site_name'")->fetchColumn();
+        $beginCalls = $pdo->sqlBeginCalls;
+        $pdo->failNextSqlCommit = true;
+        try {
+            WriteTransaction::run($pdo, static function () use ($pdo): void {
+                $pdo->exec("UPDATE settings SET value = 'uncertain commit' WHERE key = 'site_name'");
+            });
+            throw new RuntimeException('Expected uncertain SQL commit failure.');
+        } catch (DatabaseConnectionInvalidException $e) {
+            assert_same(WriteTransaction::ERROR_CLEANUP, $e->failureCode(), 'Commit cleanup failure should invalidate the connection');
+        }
+        assert_same($siteName, $pdo->query("SELECT value FROM settings WHERE key = 'site_name'")->fetchColumn(), 'Uncertain SQL commit fixture should be rolled back');
+        WriteTransaction::run($pdo, static function () use ($pdo): void {
+            $pdo->exec("UPDATE settings SET value = 'after commit failure' WHERE key = 'site_name'");
+        });
+        assert_same($beginCalls + 2, $pdo->sqlBeginCalls, 'Commit failure must not leave stale shared transaction ownership');
+
+        $pdo->failNextSqlRollback = true;
+        $beginCalls = $pdo->sqlBeginCalls;
+        try {
+            WriteTransaction::run($pdo, static function () use ($pdo): void {
+                $pdo->exec("UPDATE settings SET value = 'uncertain rollback' WHERE key = 'site_name'");
+                throw new RuntimeException('Forced transaction operation failure.');
+            });
+            throw new RuntimeException('Expected uncertain SQL rollback failure.');
+        } catch (DatabaseConnectionInvalidException $e) {
+            assert_same(WriteTransaction::ERROR_CLEANUP, $e->failureCode(), 'Rollback cleanup failure should invalidate the connection');
+        }
+        assert_same('after commit failure', $pdo->query("SELECT value FROM settings WHERE key = 'site_name'")->fetchColumn(), 'Uncertain SQL rollback fixture should be rolled back');
+        WriteTransaction::run($pdo, static function () use ($pdo): void {
+            $pdo->exec("UPDATE settings SET value = 'after rollback failure' WHERE key = 'site_name'");
+        });
+        assert_same($beginCalls + 2, $pdo->sqlBeginCalls, 'Rollback failure must not leave stale shared transaction ownership');
+
+        $caller = new PDO('sqlite:' . $path);
+        $caller->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        $caller->beginTransaction();
+        WriteTransaction::run($caller, static function () use ($caller): void {
+            $caller->exec("UPDATE settings SET value = 'caller owned' WHERE key = 'site_name'");
+        });
+        assert_true($caller->inTransaction(), 'Shared boundary must not commit a caller-owned PDO transaction');
+        $caller->rollBack();
+        assert_same('after rollback failure', $caller->query("SELECT value FROM settings WHERE key = 'site_name'")->fetchColumn(), 'Caller-owned PDO rollback should remain authoritative');
     } finally {
         unset($pdo);
         if (is_file($path)) {

@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Core\Install;
 
 use App\Core\Institution\InstitutionRepository;
+use App\Core\Persistence\WriteTransaction;
 use App\Core\Settings\SettingRepository;
 use PDO;
 
@@ -16,43 +17,14 @@ final class PortalKernelSynchronizer
             return;
         }
 
-        $ownsTransaction = !$pdo->inTransaction();
-        $sqliteImmediate = $ownsTransaction
-            && (string) $pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'sqlite';
-        $started = false;
-        if ($ownsTransaction) {
-            if ($sqliteImmediate) {
-                $pdo->exec('BEGIN IMMEDIATE');
-            } else {
-                $pdo->beginTransaction();
-            }
-            $started = true;
-        }
-        try {
+        WriteTransaction::run($pdo, function () use ($pdo, $institutionPublicId): void {
             $this->ensureInstitution($pdo, $institutionPublicId);
             $this->ensureCycle($pdo);
             (new InstitutionRepository($pdo))->synchronizeFromSettings();
             $this->synchronizeCycle($pdo);
             $this->synchronizeModules($pdo);
             $this->synchronizeRoles($pdo);
-            if ($ownsTransaction) {
-                if ($sqliteImmediate) {
-                    $pdo->exec('COMMIT');
-                } else {
-                    $pdo->commit();
-                }
-                $started = false;
-            }
-        } catch (\Throwable $e) {
-            if ($started) {
-                if ($sqliteImmediate) {
-                    $pdo->exec('ROLLBACK');
-                } elseif ($pdo->inTransaction()) {
-                    $pdo->rollBack();
-                }
-            }
-            throw $e;
-        }
+        });
     }
 
     private function ensureInstitution(PDO $pdo, ?string $institutionPublicId): void

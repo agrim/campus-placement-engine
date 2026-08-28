@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Core\Modules;
 
 use App\Core\Http\UserVisibleException;
+use App\Core\Persistence\WriteTransaction;
 use App\Core\Portal;
 use App\Hosted\HostedContext;
 use PDO;
@@ -222,38 +223,6 @@ final class ModuleLifecycleService
 
     private function transaction(callable $callback): mixed
     {
-        $ownsTransaction = !$this->pdo->inTransaction();
-        $sqliteImmediate = $ownsTransaction
-            && (string) $this->pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'sqlite';
-        $started = false;
-        if ($ownsTransaction) {
-            if ($sqliteImmediate) {
-                $this->pdo->exec('BEGIN IMMEDIATE');
-            } else {
-                $this->pdo->beginTransaction();
-            }
-            $started = true;
-        }
-        try {
-            $result = $callback();
-            if ($ownsTransaction) {
-                if ($sqliteImmediate) {
-                    $this->pdo->exec('COMMIT');
-                } else {
-                    $this->pdo->commit();
-                }
-                $started = false;
-            }
-            return $result;
-        } catch (\Throwable $e) {
-            if ($started) {
-                if ($sqliteImmediate) {
-                    $this->pdo->exec('ROLLBACK');
-                } elseif ($this->pdo->inTransaction()) {
-                    $this->pdo->rollBack();
-                }
-            }
-            throw $e;
-        }
+        return WriteTransaction::run($this->pdo, $callback);
     }
 }
