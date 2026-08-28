@@ -47,12 +47,13 @@ CI runs it against both SQLite and PostgreSQL.
 policy gate. It freezes the Cloud-compatible constructor and raw `fromUrl()`
 signatures while proving strict runtime TLS, pool-mode, timeout, redaction,
 duplicate/unknown-query, component-environment, and injection behavior.
-`tests/postgres_tls_contract.php` is a conditional live gate: it skips unless
-`CPE_POSTGRES_TLS_TEST_URL` names a disposable production-shaped endpoint with
+`tests/postgres_tls_contract.php` is a conditional local and pull-request gate:
+it skips unless `CPE_POSTGRES_TLS_TEST_URL` names a disposable production-shaped endpoint with
 `verify-full`, a readable root certificate, and a bounded timeout. When enabled,
-it requires post-connect `pg_stat_ssl` negotiated-TLS evidence. CI and release
-map the optional secret of the same name; fork pull requests without that secret
-record an explicit skip rather than claiming live TLS proof.
+it requires post-connect `pg_stat_ssl` negotiated-TLS evidence. Pull-request CI
+maps the optional secret of the same name, so forks without it record an explicit
+skip rather than claiming live TLS proof. The tag release workflow requires the
+secret and fails before testing or publication when it is absent.
 `tests/mutation_concurrency_contract.php` releases paired independent processes
 against one database. It proves same-key board retries return one stored result,
 different-key stale moves cannot both mutate the card, and repeated concurrent
@@ -219,8 +220,8 @@ and runs readiness plus HTTP smoke. See `disaster-recovery.md`.
 
 ```bash
 php placement package --target=dist --force
-php placement verify-package dist/campus-placement-engine-0.1.0-alpha.2.tar.gz
-php placement verify-package dist/campus-placement-engine-0.1.0-alpha.2.zip
+php placement verify-package dist/campus-placement-engine-0.1.0-alpha.3.tar.gz
+php placement verify-package dist/campus-placement-engine-0.1.0-alpha.3.zip
 ```
 
 Extract the package into a clean directory, run `php placement

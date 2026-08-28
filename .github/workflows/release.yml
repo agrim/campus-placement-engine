@@ -69,6 +69,10 @@ jobs:
       - name: Validate release tag and source branch
         shell: bash
         run: |
+          if [[ -z "${CPE_POSTGRES_TLS_TEST_URL:-}" ]]; then
+            echo 'CPE_POSTGRES_TLS_TEST_URL must be configured for a tag release.' >&2
+            exit 1
+          fi
           CPE_RELEASE_VERSION="$(php -r '$config = require "config/defaults.php"; echo $config["app"]["version"];')"
           test "v${CPE_RELEASE_VERSION}" = "${GITHUB_REF_NAME}"
           test -f "docs/releases/${GITHUB_REF_NAME}.md"

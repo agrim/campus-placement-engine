@@ -1442,7 +1442,7 @@ test_case('starter configuration templates validate for every workflow', functio
 
 test_case('open-source release governance files and ignore protections exist', function (): void {
     $root = dirname(__DIR__);
-    assert_same('0.1.0-alpha.2', cpe_config('app.version'), 'Release package version');
+    assert_same('0.1.0-alpha.3', cpe_config('app.version'), 'Release package version');
     foreach ([
         'README.md',
         'LICENSE',
@@ -1467,6 +1467,7 @@ test_case('open-source release governance files and ignore protections exist', f
         'docs/release-checklist.md',
         'docs/releases/v0.1.0-alpha.1.md',
         'docs/releases/v0.1.0-alpha.2.md',
+        'docs/releases/v0.1.0-alpha.3.md',
         'INSTALL.md',
         'examples/csv-templates/README.md',
         'examples/csv-templates/candidate_unavailability_windows.csv',
@@ -1672,7 +1673,7 @@ test_case('release package includes public source and excludes private runtime d
         assert_true(str_contains($joined, '/tests/hosted_install_contract.php'), 'Package should include the hosted identity immutability contract');
         assert_true(str_contains($joined, '/tests/managed_hosting_contract.php'), 'Package should include the managed-hosting probe contract');
         assert_true(str_contains($joined, '/docs/environment.md'), 'Package should include environment variable guide');
-        assert_true(str_contains($joined, '/docs/releases/v0.1.0-alpha.2.md'), 'Package should include current release notes');
+        assert_true(str_contains($joined, '/docs/releases/v0.1.0-alpha.3.md'), 'Package should include current release notes');
         assert_true(str_contains($joined, '/examples/env/local.env.example'), 'Package should include synthetic env template');
         assert_true(str_contains($joined, '/examples/deployment/apache-vhost.conf'), 'Package should include Apache deployment example');
         assert_true(str_contains($joined, '/examples/deployment/nginx-server.conf'), 'Package should include Nginx deployment example');
