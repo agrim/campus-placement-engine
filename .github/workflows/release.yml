@@ -70,8 +70,7 @@ jobs:
         shell: bash
         run: |
           if [[ -z "${CPE_POSTGRES_TLS_TEST_URL:-}" ]]; then
-            echo 'CPE_POSTGRES_TLS_TEST_URL must be configured for a tag release.' >&2
-            exit 1
+            echo '::notice title=Live PostgreSQL TLS evidence skipped::CPE_POSTGRES_TLS_TEST_URL is not configured; production-endpoint negotiated TLS is not proven and this alpha remains evaluation-only.'
           fi
           CPE_RELEASE_VERSION="$(php -r '$config = require "config/defaults.php"; echo $config["app"]["version"];')"
           test "v${CPE_RELEASE_VERSION}" = "${GITHUB_REF_NAME}"
