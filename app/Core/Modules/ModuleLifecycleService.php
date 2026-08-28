@@ -223,22 +223,35 @@ final class ModuleLifecycleService
     private function transaction(callable $callback): mixed
     {
         $ownsTransaction = !$this->pdo->inTransaction();
+        $sqliteImmediate = $ownsTransaction
+            && (string) $this->pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'sqlite';
+        $started = false;
         if ($ownsTransaction) {
-            if ((string) $this->pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'sqlite') {
+            if ($sqliteImmediate) {
                 $this->pdo->exec('BEGIN IMMEDIATE');
             } else {
                 $this->pdo->beginTransaction();
             }
+            $started = true;
         }
         try {
             $result = $callback();
             if ($ownsTransaction) {
-                $this->pdo->commit();
+                if ($sqliteImmediate) {
+                    $this->pdo->exec('COMMIT');
+                } else {
+                    $this->pdo->commit();
+                }
+                $started = false;
             }
             return $result;
         } catch (\Throwable $e) {
-            if ($ownsTransaction && $this->pdo->inTransaction()) {
-                $this->pdo->rollBack();
+            if ($started) {
+                if ($sqliteImmediate) {
+                    $this->pdo->exec('ROLLBACK');
+                } elseif ($this->pdo->inTransaction()) {
+                    $this->pdo->rollBack();
+                }
             }
             throw $e;
         }

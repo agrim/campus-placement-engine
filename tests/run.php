@@ -160,6 +160,38 @@ function render_view_for_test(string $template, array $vars): string
     return ob_get_clean() ?: '';
 }
 
+/**
+ * Raw SQL and PDO transaction boundaries are not interoperable across every
+ * supported pdo_sqlite runtime. Keep this regression double honest by
+ * rejecting PDO boundaries while still executing SQL boundaries.
+ */
+final class LegacySqliteManualTransactionPdo extends PDO
+{
+    public int $pdoCommitCalls = 0;
+    public int $pdoRollbackCalls = 0;
+
+    public function __construct(string $path)
+    {
+        parent::__construct('sqlite:' . $path);
+        $this->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        $this->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
+        $this->exec('PRAGMA foreign_keys = ON');
+        $this->exec('PRAGMA busy_timeout = 5000');
+    }
+
+    public function commit(): bool
+    {
+        $this->pdoCommitCalls++;
+        throw new RuntimeException('PDO commit cannot close a SQL-level SQLite transaction on this runtime.');
+    }
+
+    public function rollBack(): bool
+    {
+        $this->pdoRollbackCalls++;
+        throw new RuntimeException('PDO rollback cannot close a SQL-level SQLite transaction on this runtime.');
+    }
+}
+
 test_case('installer creates database, admin, settings, and demo data', function (): void {
     try {
         (new Installer())->install([
@@ -265,6 +297,62 @@ test_case('portal kernel establishes institution module and capability context',
     assert_true($context->capabilities()->allows(['role' => 'control', 'active' => 1], 'placement.records.manage'), 'Control records capability');
     assert_true(!$context->capabilities()->allows(['role' => 'auditor', 'active' => 1], 'placement.application.transition'), 'Auditor transition denied');
     assert_true($context->capabilities()->allows(['role' => 'admin', 'active' => 1], 'portal.settings.manage'), 'Administrator wildcard capability');
+});
+
+test_case('SQLite immediate transactions use SQL boundaries compatible with PHP 8.2 PDO state', function (): void {
+    $path = sys_get_temp_dir() . '/cpe-legacy-pdo-state-' . bin2hex(random_bytes(4)) . '.sqlite';
+    $source = Database::connection();
+    $source->exec('VACUUM INTO ' . $source->quote($path));
+    try {
+        $pdo = new LegacySqliteManualTransactionPdo($path);
+        $now = cpe_now();
+        $pdo->exec("UPDATE module_installations SET version = '0.0.1' WHERE module_key = 'advising'");
+        $pdo->exec("DELETE FROM role_capabilities WHERE role_key = 'control' AND capability = 'placement.board.view'");
+        $pdo->exec(
+            "CREATE TRIGGER fail_legacy_pdo_kernel_sync BEFORE INSERT ON role_capabilities
+             WHEN NEW.role_key = 'control' AND NEW.capability = 'portal.access'
+             BEGIN SELECT RAISE(ABORT, 'forced legacy PDO rollback'); END"
+        );
+        try {
+            (new PortalKernelSynchronizer())->synchronize($pdo);
+            throw new RuntimeException('Expected legacy PDO synchronization rollback.');
+        } catch (RuntimeException $e) {
+            assert_true(str_contains($e->getMessage(), 'forced legacy PDO rollback'), 'Expected forced legacy PDO synchronization failure');
+        } finally {
+            $pdo->exec('DROP TRIGGER fail_legacy_pdo_kernel_sync');
+        }
+        assert_same('0.0.1', $pdo->query("SELECT version FROM module_installations WHERE module_key = 'advising'")->fetchColumn(), 'SQL-level rollback should restore module synchronization state');
+        assert_same(0, (int) $pdo->query("SELECT COUNT(*) FROM role_capabilities WHERE role_key = 'control' AND capability = 'placement.board.view'")->fetchColumn(), 'SQL-level rollback should restore role capability state');
+
+        (new PortalKernelSynchronizer())->synchronize($pdo);
+        assert_same('0.1.0', $pdo->query("SELECT version FROM module_installations WHERE module_key = 'advising'")->fetchColumn(), 'SQL-level commit should persist kernel synchronization');
+
+        $lifecycle = new ModuleLifecycleService($pdo);
+        $lifecycle->disable('placement', 1);
+        $lifecycle->enable('placement', 1);
+        assert_same(1, (int) $pdo->query("SELECT enabled FROM module_installations WHERE module_key = 'placement'")->fetchColumn(), 'SQL-level module lifecycle commit should persist');
+
+        $applicationId = (int) $pdo->query("SELECT id FROM applications WHERE current_status = 'idle' ORDER BY id LIMIT 1")->fetchColumn();
+        assert_true($applicationId > 0, 'Compatibility fixture should contain an idle application');
+        $result = (new PlacementService($pdo))->applyBoardMove(
+            $applicationId,
+            1,
+            'admin',
+            'scheduled',
+            '',
+            'legacy PDO transaction compatibility',
+            'idle',
+            bin2hex(random_bytes(16)),
+        );
+        assert_same(['duplicate' => false, 'status' => 'scheduled'], $result, 'SQL-level board transaction commit should persist');
+        assert_same(0, $pdo->pdoCommitCalls, 'SQL-level SQLite transactions must not call PDO::commit()');
+        assert_same(0, $pdo->pdoRollbackCalls, 'SQL-level SQLite transactions must not call PDO::rollBack()');
+    } finally {
+        unset($pdo);
+        if (is_file($path)) {
+            unlink($path);
+        }
+    }
 });
 
 test_case('portal kernel synchronization is atomic and exactly reconciles system grants', function (): void {

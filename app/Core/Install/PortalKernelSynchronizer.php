@@ -17,12 +17,16 @@ final class PortalKernelSynchronizer
         }
 
         $ownsTransaction = !$pdo->inTransaction();
+        $sqliteImmediate = $ownsTransaction
+            && (string) $pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'sqlite';
+        $started = false;
         if ($ownsTransaction) {
-            if ((string) $pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'sqlite') {
+            if ($sqliteImmediate) {
                 $pdo->exec('BEGIN IMMEDIATE');
             } else {
                 $pdo->beginTransaction();
             }
+            $started = true;
         }
         try {
             $this->ensureInstitution($pdo, $institutionPublicId);
@@ -32,11 +36,20 @@ final class PortalKernelSynchronizer
             $this->synchronizeModules($pdo);
             $this->synchronizeRoles($pdo);
             if ($ownsTransaction) {
-                $pdo->commit();
+                if ($sqliteImmediate) {
+                    $pdo->exec('COMMIT');
+                } else {
+                    $pdo->commit();
+                }
+                $started = false;
             }
         } catch (\Throwable $e) {
-            if ($ownsTransaction && $pdo->inTransaction()) {
-                $pdo->rollBack();
+            if ($started) {
+                if ($sqliteImmediate) {
+                    $pdo->exec('ROLLBACK');
+                } elseif ($pdo->inTransaction()) {
+                    $pdo->rollBack();
+                }
             }
             throw $e;
         }
