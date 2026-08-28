@@ -7,11 +7,12 @@ require __DIR__ . '/../app/bootstrap.php';
 
 use App\Infrastructure\Persistence\PostgresConnectionPolicy;
 
-$url = (string) (getenv('CPE_POSTGRES_TLS_TEST_URL') ?: '');
-if ($url === '') {
+$configuredUrl = getenv('CPE_POSTGRES_TLS_TEST_URL');
+if ($configuredUrl === false || $configuredUrl === '') {
     echo "SKIP negotiated PostgreSQL TLS contract: CPE_POSTGRES_TLS_TEST_URL is not configured.\n";
     exit(0);
 }
+$url = (string) $configuredUrl;
 
 $poolMode = (string) (getenv('CPE_POSTGRES_TLS_TEST_POOL_MODE') ?: 'direct');
 $provider = PostgresConnectionPolicy::fromUrl($url, $poolMode, false, 'CPE_POSTGRES_TLS_TEST_URL');

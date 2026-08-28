@@ -1764,6 +1764,22 @@ test_case('open-source release governance files and ignore protections exist', f
         assert_true(str_contains($ci, $command), "Missing CI command: {$command}");
     }
     $releaseWorkflow = (string) file_get_contents($root . '/.github/workflows/release.yml');
+    $releaseWorkflowWithoutIndent = preg_replace('/^[ \t]+/m', '', $releaseWorkflow) ?? $releaseWorkflow;
+    $optionalReleaseTlsNotice = <<<'YAML'
+if [[ -z "${CPE_POSTGRES_TLS_TEST_URL:-}" ]]; then
+echo '::notice title=Live PostgreSQL TLS evidence skipped::CPE_POSTGRES_TLS_TEST_URL is not configured; production-endpoint negotiated TLS is not proven and this alpha remains evaluation-only.'
+fi
+YAML;
+    assert_true(
+            str_contains($releaseWorkflow, 'CPE_POSTGRES_TLS_TEST_URL: ${{ secrets.CPE_POSTGRES_TLS_TEST_URL }}')
+            && str_contains($releaseWorkflow, 'php tests/postgres_tls_contract.php')
+            && str_contains($releaseWorkflowWithoutIndent, $optionalReleaseTlsNotice),
+        'Tag releases must map the optional TLS endpoint, invoke its conditional contract, and disclose skipped live evidence.',
+    );
+    assert_true(
+        !str_contains($releaseWorkflow, 'CPE_POSTGRES_TLS_TEST_URL must be configured for a tag release.'),
+        'Tag releases must not silently restore the live PostgreSQL TLS secret as a hard prerequisite.',
+    );
     foreach ([$ci, $releaseWorkflow] as $workflow) {
         assert_true(
             str_contains($workflow, 'git archive --format=tar v0.1.0-alpha.1')
@@ -1829,6 +1845,46 @@ test_case('open-source release governance files and ignore protections exist', f
     foreach (['legacy_wide.csv', 'stat1', 'gd_round', 'Preview CSV', 'convert-legacy-backup', 'legacy_conversion_required', '.legacy-private/', 'Do not publish, commit, or attach historical raw data'] as $snippet) {
         assert_true(str_contains($migrationGuide, $snippet), "Missing migration-guide warning or mapping: {$snippet}");
     }
+});
+
+test_case('conditional PostgreSQL TLS contract skips only absent or empty endpoint', function (): void {
+    $runContract = static function (bool $present, string $value = ''): array {
+        $environment = getenv();
+        if (!is_array($environment)) {
+            $environment = [];
+        }
+        unset($environment['CPE_POSTGRES_TLS_TEST_URL']);
+        if ($present) {
+            $environment['CPE_POSTGRES_TLS_TEST_URL'] = $value;
+        }
+        $process = proc_open(
+            [PHP_BINARY, __DIR__ . '/postgres_tls_contract.php'],
+            [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+            $pipes,
+            dirname(__DIR__),
+            $environment,
+        );
+        if (!is_resource($process)) {
+            throw new RuntimeException('Could not start conditional PostgreSQL TLS contract.');
+        }
+        $stdout = stream_get_contents($pipes[1]) ?: '';
+        $stderr = stream_get_contents($pipes[2]) ?: '';
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        return [proc_close($process), $stdout, $stderr];
+    };
+
+    foreach ([[false, 'absent'], [true, 'empty']] as [$present, $label]) {
+        [$code, $stdout, $stderr] = $runContract($present);
+        assert_same(0, $code, "{$label} TLS endpoint should skip successfully");
+        assert_true(str_starts_with($stdout, 'SKIP negotiated PostgreSQL TLS contract:'), "{$label} TLS endpoint should report the conditional skip");
+        assert_same('', $stderr, "{$label} TLS endpoint skip should not emit an error");
+    }
+
+    [$zeroCode, $zeroStdout, $zeroStderr] = $runContract(true, '0');
+    assert_true($zeroCode !== 0, 'Literal zero TLS endpoint must enter strict validation and fail');
+    assert_true(!str_contains($zeroStdout, 'SKIP negotiated PostgreSQL TLS contract:'), 'Literal zero TLS endpoint must not silently skip');
+    assert_true(str_contains($zeroStderr, 'must be a postgresql:// URL'), 'Literal zero TLS endpoint should fail strict URL validation');
 });
 
 test_case('publication check rejects obvious committed secret patterns', function (): void {
