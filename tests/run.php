@@ -1767,19 +1767,29 @@ test_case('open-source release governance files and ignore protections exist', f
     $releaseWorkflowWithoutIndent = preg_replace('/^[ \t]+/m', '', $releaseWorkflow) ?? $releaseWorkflow;
     $optionalReleaseTlsNotice = <<<'YAML'
 if [[ -z "${CPE_POSTGRES_TLS_TEST_URL:-}" ]]; then
+if [[ "${GITHUB_REF_NAME}" =~ ^v[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+$ ]]; then
 echo '::notice title=Live PostgreSQL TLS evidence skipped::CPE_POSTGRES_TLS_TEST_URL is not configured; production-endpoint negotiated TLS is not proven and this alpha remains evaluation-only.'
+else
+echo '::error title=Live PostgreSQL TLS evidence required::CPE_POSTGRES_TLS_TEST_URL may be omitted only for evaluation alpha tags shaped v<major>.<minor>.<patch>-alpha.<number>; beta, RC, stable, malformed, and other tag releases require live negotiated-TLS evidence.' >&2
+exit 1
+fi
 fi
 YAML;
     assert_true(
             str_contains($releaseWorkflow, 'CPE_POSTGRES_TLS_TEST_URL: ${{ secrets.CPE_POSTGRES_TLS_TEST_URL }}')
             && str_contains($releaseWorkflow, 'php tests/postgres_tls_contract.php')
             && str_contains($releaseWorkflowWithoutIndent, $optionalReleaseTlsNotice),
-        'Tag releases must map the optional TLS endpoint, invoke its conditional contract, and disclose skipped live evidence.',
+        'Only evaluation alpha tag releases may omit the mapped TLS endpoint; other tag classes must fail before publication.',
     );
     assert_true(
         !str_contains($releaseWorkflow, 'CPE_POSTGRES_TLS_TEST_URL must be configured for a tag release.'),
         'Tag releases must not silently restore the live PostgreSQL TLS secret as a hard prerequisite.',
     );
+    $alphaTagPattern = '/\Av[0-9]+\.[0-9]+\.[0-9]+-alpha\.[0-9]+\z/D';
+    assert_true(preg_match($alphaTagPattern, 'v0.1.0-alpha.3') === 1, 'Established evaluation alpha tag should match the TLS exemption.');
+    foreach (['v1.0.0-beta.1-alpha.1', 'v1.0.0-not-alpha.2', 'v1.0.0-alpha.2-extra', '1.0.0-alpha.2'] as $nonAlphaTag) {
+        assert_true(preg_match($alphaTagPattern, $nonAlphaTag) !== 1, "Malformed or non-alpha tag must not match the TLS exemption: {$nonAlphaTag}");
+    }
     foreach ([$ci, $releaseWorkflow] as $workflow) {
         assert_true(
             str_contains($workflow, 'git archive --format=tar v0.1.0-alpha.1')
