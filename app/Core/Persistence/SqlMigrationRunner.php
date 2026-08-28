@@ -67,15 +67,16 @@ final class SqlMigrationRunner
                     return;
                 }
                 if ($driver === 'pgsql') {
-                    [$table, $applied] = $this->initializePostgresRegistry($lockBackendPid);
+                    [$table, $applied] = $this->initializePostgresRegistry($lockBackendPid, $files);
                 } else {
                     $table = $this->qualifiedSqliteRegistry();
                     $this->createAndVerifyRegistry($driver, $table);
-                    $applied = $this->appliedSet($table);
+                    $applied = $this->appliedSet($table, $files);
                 }
                 $this->runPendingMigrations($driver, $table, $files, $lockBackendPid, $applied);
                 $this->assertDiscoveredExactlyOnce($table, $files);
                 $this->runCallbackWithoutTransaction($afterMigrations);
+                $this->assertDiscoveredExactlyOnce($table, $files);
             },
             $this->timeoutMilliseconds,
         );
@@ -93,7 +94,7 @@ final class SqlMigrationRunner
             $this->pdo->beginTransaction();
             $started = true;
             $this->createAndVerifyRegistry('sqlite', $table);
-            $applied = $this->appliedSet($table);
+            $applied = $this->appliedSet($table, $files);
             foreach ($files as $file) {
                 $name = basename($file);
                 if (!isset($applied[$name])) {
@@ -121,6 +122,9 @@ final class SqlMigrationRunner
                         throw $this->cleanupFailure($primary, $cleanup, 'fileless callback savepoint');
                     }
                 }
+            }
+            if ($callbackFailure === null) {
+                $this->assertDiscoveredExactlyOnce($table, $files);
             }
             $this->pdo->commit();
             $started = false;
@@ -169,8 +173,11 @@ final class SqlMigrationRunner
         }
     }
 
-    /** @return array{0: string, 1: array<string, int>} */
-    private function initializePostgresRegistry(?string $lockBackendPid): array
+    /**
+     * @param array<int, string> $files
+     * @return array{0: string, 1: array<string, int>}
+     */
+    private function initializePostgresRegistry(?string $lockBackendPid, array $files): array
     {
         if ($lockBackendPid === null) {
             throw DatabaseLockException::sessionChanged();
@@ -181,7 +188,7 @@ final class SqlMigrationRunner
             $schema = $this->postgresSchema();
             $table = self::quoteIdentifier($schema) . '.' . self::quoteIdentifier($this->registry);
             $this->createAndVerifyRegistry('pgsql', $table, $schema);
-            $applied = $this->appliedSet($table);
+            $applied = $this->appliedSet($table, $files);
             DatabaseLock::assertPostgresSession($this->pdo, $lockBackendPid);
             $this->pdo->commit();
             return [$table, $applied];
@@ -556,11 +563,21 @@ final class SqlMigrationRunner
     /** @param array<int, string> $files */
     private function assertDiscoveredExactlyOnce(string $table, array $files): void
     {
+        $discovered = [];
+        foreach ($files as $file) {
+            $discovered[basename($file)] = true;
+        }
         $counts = [];
         foreach ($this->pdo->query(
             'SELECT migration, COUNT(*) AS row_count FROM ' . $table . ' GROUP BY migration',
         )->fetchAll(PDO::FETCH_ASSOC) as $row) {
-            $counts[(string) $row['migration']] = (int) $row['row_count'];
+            $name = (string) $row['migration'];
+            if (!isset($discovered[$name])) {
+                throw new RuntimeException(
+                    self::ERROR_REGISTRY . ': registry contains a migration absent from this release.',
+                );
+            }
+            $counts[$name] = (int) $row['row_count'];
         }
         foreach ($files as $file) {
             $name = basename($file);
@@ -570,14 +587,26 @@ final class SqlMigrationRunner
         }
     }
 
-    /** @return array<string, int> */
-    private function appliedSet(string $table): array
+    /**
+     * @param array<int, string> $files
+     * @return array<string, int>
+     */
+    private function appliedSet(string $table, array $files): array
     {
+        $discovered = [];
+        foreach ($files as $file) {
+            $discovered[basename($file)] = true;
+        }
         $applied = [];
         foreach ($this->pdo->query('SELECT migration FROM ' . $table)->fetchAll(PDO::FETCH_COLUMN) as $migration) {
             $name = (string) $migration;
             if (isset($applied[$name])) {
                 throw new RuntimeException(self::ERROR_REGISTRY . ': duplicate migration registry row.');
+            }
+            if (!isset($discovered[$name])) {
+                throw new RuntimeException(
+                    self::ERROR_REGISTRY . ': registry contains a migration absent from this release.',
+                );
             }
             $applied[$name] = 1;
         }

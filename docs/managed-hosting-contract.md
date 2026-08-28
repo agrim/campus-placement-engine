@@ -76,8 +76,12 @@ only readable, non-symlinked regular files named `NNN_lower_snake.sql`, with a
 unique nonzero sequence. Unexpected entries that claim the `.sql` suffix fail
 closed; dialect child directories and other non-SQL entries are ignored. The
 runner sorts those files lexically, acquires a caller-specific database lock,
-then re-reads applied filenames. Top-level transaction-control statements are
-forbidden because transaction ownership belongs to the runner; SQL comments,
+then re-reads applied filenames. Every applied filename must exist in the
+running release; an unknown or future registry row fails with
+`CPE_SQL_MIGRATION_REGISTRY_INVALID` before any pending product DDL. The same
+exact-set invariant is checked again before the lock is released. Top-level
+transaction-control statements are forbidden because transaction ownership
+belongs to the runner; SQL comments,
 literals, PostgreSQL dollar-quoted bodies, and SQLite trigger bodies are parsed
 without treating their contents as transaction control. Every pending file and
 registry insert is one
@@ -92,8 +96,18 @@ other or with a tenant mutation lock. `Database::migrate(false)` releases the
 migration lock before the installer starts its atomic installation transaction.
 Post-migration callbacks run without a runner-owned transaction on PostgreSQL
 and file-backed SQLite; an open transaction left by a callback is rolled back
-and rejected. Callback failure does not falsify committed migration history and
-a later run retries the callback while holding the lock.
+and rejected. After a callback returns, the runner repeats the exact registry
+proof before it can return success. Fileless SQLite performs that proof before
+its outer commit, so a callback's registry insertion or deletion is rejected
+and rolled back with the outer transaction. PostgreSQL and file-backed SQLite
+callbacks run in autocommit: the final proof rejects a registry mutation but
+does not claim to undo it. That committed mutation is incident evidence and
+must be recovered deliberately; callbacks must never write migration rows.
+Callback exceptions are propagated. Fileless SQLite rolls their callback
+savepoint back; PostgreSQL and file-backed SQLite may already have committed
+callback writes before an exception, so failure must never be described as
+rolling them back. A callback that honored the registry boundary can be retried
+while holding the lock.
 
 ## Management-plane responsibilities
 

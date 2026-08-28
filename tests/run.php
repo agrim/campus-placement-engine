@@ -1629,6 +1629,43 @@ test_case('release package includes public source and excludes private runtime d
         assert_true(is_file($packageRoot . '/placement'), 'Extracted package should include CLI entrypoint');
         assert_true(is_file($packageRoot . '/public/index.php'), 'Extracted package should include web entrypoint');
 
+        [$publicationCode, $publicationOut, $publicationErr] = run_cli_from($packageRoot, ['publication-check']);
+        assert_same(0, $publicationCode, 'Git-free extracted package publication check should pass: ' . $publicationErr);
+        assert_true(str_contains($publicationOut, 'OK: Required release files are present.'), 'Extracted package publication check should report success');
+
+        $packageRuntimeFixture = $packageRoot . '/data/restore-staging/package-contract.sqlite';
+        try {
+            if (!is_dir(dirname($packageRuntimeFixture)) && !mkdir(dirname($packageRuntimeFixture), 0700, true)) {
+                throw new RuntimeException('Could not create extracted-package runtime-data fixture directory.');
+            }
+            assert_true(file_put_contents($packageRuntimeFixture, 'runtime-only') !== false, 'Could not create extracted-package runtime-data fixture');
+            [$runtimePublicationCode, $runtimePublicationOut, $runtimePublicationErr] = run_cli_from($packageRoot, ['publication-check']);
+            assert_same(1, $runtimePublicationCode, 'Git-free extracted package publication check should reject runtime data');
+            assert_true(
+                str_contains($runtimePublicationOut . $runtimePublicationErr, 'data/restore-staging/package-contract.sqlite'),
+                'Git-free extracted package publication check should report the deterministic runtime-data path',
+            );
+        } finally {
+            remove_tree($packageRoot . '/data/restore-staging');
+        }
+        assert_true(!file_exists($packageRuntimeFixture), 'Extracted-package runtime-data fixture should be cleaned up');
+
+        $packageSymlinkFixture = $packageRoot . '/data/runtime-link';
+        try {
+            assert_true(symlink($packageRoot . '/README.md', $packageSymlinkFixture), 'Could not create extracted-package data symlink fixture');
+            [$symlinkPublicationCode, $symlinkPublicationOut, $symlinkPublicationErr] = run_cli_from($packageRoot, ['publication-check']);
+            assert_same(1, $symlinkPublicationCode, 'Git-free extracted package publication check should reject data symlinks');
+            assert_true(
+                str_contains($symlinkPublicationOut . $symlinkPublicationErr, 'data/runtime-link'),
+                'Git-free extracted package publication check should report the symlink path without following it',
+            );
+        } finally {
+            if (is_link($packageSymlinkFixture)) {
+                unlink($packageSymlinkFixture);
+            }
+        }
+        assert_true(!is_link($packageSymlinkFixture), 'Extracted-package data symlink fixture should be cleaned up');
+
         [$doctorCode, $doctorOut, $doctorErr] = run_cli_from($packageRoot, ['doctor'], ['CPE_DB_PATH' => $packageDb]);
         assert_same(0, $doctorCode, 'Extracted package doctor should run: ' . $doctorErr);
         assert_true(str_contains($doctorOut, 'pdo_sqlite: yes'), 'Extracted package doctor should detect SQLite extension');

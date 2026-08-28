@@ -2123,31 +2123,68 @@ function publication_forbidden_files(string $root): array
 /** @return array<int, string> */
 function publication_tracked_data_files(string $root): array
 {
-    if (!file_exists($root . '/.git')) {
+    if (file_exists($root . '/.git')) {
+        $process = proc_open(
+            ['git', '-C', $root, 'ls-files', '-z', '--', 'data'],
+            [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+            $pipes,
+        );
+        if (!is_resource($process)) {
+            return ['data/[tracking-inspection-failed]'];
+        }
+        $stdout = stream_get_contents($pipes[1]);
+        stream_get_contents($pipes[2]);
+        fclose($pipes[1]);
+        fclose($pipes[2]);
+        if (proc_close($process) !== 0 || !is_string($stdout)) {
+            return ['data/[tracking-inspection-failed]'];
+        }
+        $forbidden = [];
+        foreach (array_filter(explode("\0", $stdout), 'strlen') as $path) {
+            if (!in_array($path, ['data/.gitkeep', 'data/.htaccess'], true)) {
+                $forbidden[] = $path;
+            }
+        }
+        sort($forbidden, SORT_STRING);
+        return $forbidden;
+    }
+
+    $dataRoot = $root . '/data';
+    if (is_link($dataRoot) || (file_exists($dataRoot) && !is_dir($dataRoot))) {
+        return ['data'];
+    }
+    if (!is_dir($dataRoot)) {
         return [];
     }
-    $process = proc_open(
-        ['git', '-C', $root, 'ls-files', '-z', '--', 'data'],
-        [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
-        $pipes,
-    );
-    if (!is_resource($process)) {
-        return ['data/[tracking-inspection-failed]'];
-    }
-    $stdout = stream_get_contents($pipes[1]);
-    stream_get_contents($pipes[2]);
-    fclose($pipes[1]);
-    fclose($pipes[2]);
-    if (proc_close($process) !== 0 || !is_string($stdout)) {
-        return ['data/[tracking-inspection-failed]'];
-    }
+
     $forbidden = [];
-    foreach (array_filter(explode("\0", $stdout), 'strlen') as $path) {
-        if (!in_array($path, ['data/.gitkeep', 'data/.htaccess'], true)) {
-            $forbidden[] = $path;
+    try {
+        $iterator = new RecursiveIteratorIterator(
+            new RecursiveDirectoryIterator($dataRoot, FilesystemIterator::SKIP_DOTS),
+            RecursiveIteratorIterator::SELF_FIRST,
+        );
+        foreach ($iterator as $entry) {
+            if (!$entry instanceof SplFileInfo) {
+                return ['data/[filesystem-inspection-failed]'];
+            }
+            $relative = publication_relative_path($root, $entry->getPathname());
+            if ($entry->isLink()) {
+                $forbidden[] = $relative;
+                continue;
+            }
+            if ($entry->isDir()) {
+                continue;
+            }
+            if (!$entry->isFile()
+                || !in_array($relative, ['data/.gitkeep', 'data/.htaccess'], true)) {
+                $forbidden[] = $relative;
+            }
         }
+    } catch (Throwable) {
+        return ['data/[filesystem-inspection-failed]'];
     }
-    sort($forbidden);
+    $forbidden = array_values(array_unique($forbidden));
+    sort($forbidden, SORT_STRING);
     return $forbidden;
 }
 

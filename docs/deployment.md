@@ -320,10 +320,19 @@ contract version stops the upgrade. These conditions require operator review;
 there is intentionally no force/rebind flag.
 
 The upgrade then holds `cpe.engine-migrations` through the final migration
-registry check and post-migration synchronizers. A failed SQL file rolls back
-that file and its registry row. A failed synchronizer leaves already committed
-migration rows accurate; fix the synchronizer cause and rerun the upgrade. Never
-insert a registry row by hand to bypass a failed file.
+registry check and post-migration synchronizers. If the registry contains a
+filename absent from the running release, upgrade fails closed before pending
+product DDL; deploy the matching or a newer release instead of deleting the
+row. A failed SQL file rolls back
+that file and its registry row. A failed synchronizer that did not edit the
+registry leaves already committed migration rows accurate; fix the synchronizer
+cause and rerun the upgrade.
+Synchronizers must never insert or delete migration rows. The runner checks the
+registry again after a synchronizer returns and refuses success if it changed
+history. Fileless SQLite rolls such changes back with its outer transaction;
+PostgreSQL and file-backed SQLite callback writes are already committed and
+must be preserved as incident evidence and recovered deliberately. Never insert
+a registry row by hand to bypass a failed file.
 
 Candidate anonymization writes safety copies under `data/privacy/` and redacts
 candidate identity while preserving aggregate placement history. See
@@ -407,8 +416,9 @@ The package command writes both `campus-placement-engine-<version>.zip` and
 `campus-placement-engine-<version>.tar.gz`. The ZIP is the simplest download
 for most evaluators and shared-hosting users; the tarball is convenient for
 server operators. Both contain the same allowlisted public app, config,
-migration, doc, example, test, and CI files. The package
-includes `data/.gitkeep` but excludes runtime SQLite files, backups, exports,
+migration, doc, example, test, and CI files. The package includes only
+`data/.gitkeep` and `data/.htaccess` under `data/` and excludes runtime SQLite
+files, backups, exports,
 `.legacy-private/`, `config/local.php`, symbolic links, and local browser-QA
 scratch directories. Packaging runs the publication check first. Verification
 also rejects unsafe paths, multiple archive roots, duplicate entries, and
@@ -428,6 +438,7 @@ Before publishing a package, extract it into a clean temp directory and run:
 ```bash
 export CPE_DB_PATH="$(mktemp -t cpe-package-smoke).sqlite"
 php placement doctor
+php placement publication-check
 CPE_ADMIN_PASSWORD='password123' php placement install \
   --college='Package Smoke College' \
   --admin-name='Package Admin' \
@@ -436,8 +447,10 @@ php placement readiness
 php placement export /tmp/cpe-package-export
 ```
 
-The automated test suite performs this extracted-package smoke with isolated
-temporary paths.
+In an extracted Git-free tree, `publication-check` recursively enforces the
+same two-file `data/` allowlist and rejects regular files, symbolic links, or
+other unsafe entries. The automated test suite performs this extracted-package
+smoke with isolated temporary paths.
 
 For legacy spreadsheets, SQL dumps, or old placement apps, follow
 `docs/migration-from-legacy.md` before importing real institutional data into a

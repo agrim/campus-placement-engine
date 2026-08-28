@@ -24,7 +24,13 @@ php tests/managed_hosting_contract.php
 php placement publication-check
 ```
 
-`tests/run.php` is the broad SQLite integration suite. The installation
+`tests/run.php` is the broad SQLite integration suite.
+`tests/migration_lock_contract.php` proves unknown pre-existing registry rows
+stop pending DDL and that callback insertions and deletions cannot let a run
+return success. Its fileless SQLite cases prove the outer transaction restores
+the exact registry, while file-backed SQLite and conditional PostgreSQL cases
+prove callback mutations remain committed evidence rather than claiming a
+rollback that did not occur.
 `tests/incident_boundary_contract.php` is the mandatory sentinel gate for
 browser, CLI, protected-log, audit, recovery, and persisted-error boundaries.
 It must pass before release; its synthetic secrets must be absent from every
@@ -189,6 +195,9 @@ php placement verify-package dist/campus-placement-engine-0.1.0-alpha.2.tar.gz
 php placement verify-package dist/campus-placement-engine-0.1.0-alpha.2.zip
 ```
 
-Extract the package into a clean directory, install a throwaway database, and
-repeat doctor, readiness, export, HTTP smoke, and restore. Do not use the
+Extract the package into a clean directory, run `php placement
+publication-check`, install a throwaway database, and repeat doctor, readiness,
+export, HTTP smoke, and restore. The broad suite also injects a runtime file
+under the extracted package's `data/` tree and proves the Git-free publication
+check rejects its deterministic relative path. Do not use the
 historical private archive or real institutional records as fixtures.
