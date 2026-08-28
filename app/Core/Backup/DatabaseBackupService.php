@@ -5,6 +5,9 @@ declare(strict_types=1);
 namespace App\Core\Backup;
 
 use App\Core\Http\UserVisibleException;
+use App\Infrastructure\Persistence\PostgresCommandConnectionSpec;
+use App\Infrastructure\Persistence\PostgresConnectionPolicy;
+use App\Infrastructure\Persistence\PostgresConnectionProvider;
 use App\Support\Database;
 use PDO;
 use RuntimeException;
@@ -122,20 +125,16 @@ final class DatabaseBackupService
 
     private function createPostgresBackup(string $prefix, string $directory): BackupArtifact
     {
-        $url = trim((string) ($this->postgresUrl ?? getenv('CPE_DATABASE_URL') ?: ''));
-        if ($url === '') {
-            throw new RuntimeException('PostgreSQL backups require CPE_DATABASE_URL.');
-        }
+        $connection = $this->postgresCommandConnection();
         $binary = $this->pgDumpBinary();
         $target = rtrim($directory, '/') . '/' . $prefix . '-' . gmdate('Ymd-His') . '-' . bin2hex(random_bytes(3)) . '.pgdump';
-        [$safeUrl, $password] = $this->safePostgresUrl($url);
         $environment = getenv();
         if (!is_array($environment)) {
             $environment = [];
         }
-        $environment['PGPASSWORD'] = $password;
+        $environment = $connection->childEnvironment($environment);
         $process = proc_open(
-            [$binary, '--format=custom', '--no-owner', '--no-privileges', '--file=' . $target, '--dbname=' . $safeUrl],
+            [$binary, '--format=custom', '--no-owner', '--no-privileges', '--file=' . $target, '--dbname=' . $connection->safeUri()],
             [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
             $pipes,
             null,
@@ -254,26 +253,18 @@ final class DatabaseBackupService
         throw new RuntimeException('PostgreSQL backups require pg_dump. Set CPE_PG_DUMP_BINARY to its absolute path.');
     }
 
-    private function safePostgresUrl(string $url): array
+    private function postgresCommandConnection(): PostgresCommandConnectionSpec
     {
-        $parts = parse_url($url);
-        if (!is_array($parts) || !in_array(strtolower((string) ($parts['scheme'] ?? '')), ['postgres', 'postgresql'], true)) {
-            throw new RuntimeException('CPE_DATABASE_URL must be a postgresql:// URL for backups.');
+        if ($this->postgresUrl !== null) {
+            $url = trim($this->postgresUrl);
+            if ($url === '') {
+                throw new RuntimeException('PostgreSQL backups require CPE_DATABASE_URL.');
+            }
+            return PostgresConnectionProvider::fromUrl($url, 'PostgreSQL backup URL')->commandConnectionSpec();
         }
-        $user = rawurldecode((string) ($parts['user'] ?? ''));
-        $password = rawurldecode((string) ($parts['pass'] ?? ''));
-        $host = (string) ($parts['host'] ?? '127.0.0.1');
-        $port = (int) ($parts['port'] ?? 5432);
-        $database = rawurldecode(ltrim((string) ($parts['path'] ?? ''), '/'));
-        $query = isset($parts['query']) && $parts['query'] !== '' ? '?' . $parts['query'] : '';
-        $safe = sprintf(
-            'postgresql://%s@%s:%d/%s%s',
-            rawurlencode($user),
-            $host,
-            $port,
-            rawurlencode($database),
-            $query,
-        );
-        return [$safe, $password];
+        if (trim((string) (getenv('CPE_DATABASE_URL') ?: '')) === '') {
+            throw new RuntimeException('PostgreSQL backups require CPE_DATABASE_URL.');
+        }
+        return PostgresConnectionPolicy::commandConnectionFromEnvironment();
     }
 }

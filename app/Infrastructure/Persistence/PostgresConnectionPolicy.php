@@ -63,6 +63,11 @@ final class PostgresConnectionPolicy
         ], $poolMode, $allowInsecureLoopback, 'PostgreSQL component environment');
     }
 
+    public static function commandConnectionFromEnvironment(): PostgresCommandConnectionSpec
+    {
+        return self::fromEnvironment()->commandConnectionSpec();
+    }
+
     public static function fromUrl(
         string $url,
         string $poolMode,

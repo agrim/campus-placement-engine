@@ -17,6 +17,8 @@ final class PostgresConnectionProvider implements ConnectionProvider
     private bool $strictPolicy = false;
     private bool $verifyNegotiatedTls = false;
     private ?bool $negotiatedTlsVerified = null;
+    /** @var array<string, string> */
+    private array $commandUriOptions = [];
 
     public function __construct(
         private readonly string $host,
@@ -39,7 +41,7 @@ final class PostgresConnectionProvider implements ConnectionProvider
         if (!is_array($parts) || !in_array(strtolower((string) ($parts['scheme'] ?? '')), ['postgres', 'postgresql'], true)) {
             throw new RuntimeException($label . ' must be a postgresql:// URL.');
         }
-        parse_str((string) ($parts['query'] ?? ''), $query);
+        [$query, $commandUriOptions] = self::legacyQuery((string) ($parts['query'] ?? ''), $label);
         $database = rawurldecode(ltrim((string) ($parts['path'] ?? ''), '/'));
         $username = rawurldecode((string) ($parts['user'] ?? ''));
         if ($database === '' || $username === '') {
@@ -64,6 +66,7 @@ final class PostgresConnectionProvider implements ConnectionProvider
             }
             $provider->connectTimeout = (int) $query['connect_timeout'];
         }
+        $provider->commandUriOptions = $commandUriOptions;
         return $provider;
     }
 
@@ -208,6 +211,22 @@ final class PostgresConnectionProvider implements ConnectionProvider
         ];
     }
 
+    /** @internal Command tools must consume the provider's already-resolved fields. */
+    public function commandConnectionSpec(): PostgresCommandConnectionSpec
+    {
+        return new PostgresCommandConnectionSpec(
+            $this->host,
+            $this->port,
+            $this->database,
+            $this->username,
+            $this->password,
+            $this->sslMode,
+            $this->sslRootCert,
+            $this->connectTimeout,
+            $this->commandUriOptions,
+        );
+    }
+
     public function disconnect(): void
     {
         $this->connection = null;
@@ -230,6 +249,38 @@ final class PostgresConnectionProvider implements ConnectionProvider
             throw new RuntimeException('Unsupported PostgreSQL ' . $name . '.');
         }
         return $value;
+    }
+
+    /** @return array{array<string, string>, array<string, string>} */
+    private static function legacyQuery(string $query, string $label): array
+    {
+        $resolved = [];
+        $commandOptions = [];
+        if ($query === '') {
+            return [$resolved, $commandOptions];
+        }
+        foreach (explode('&', $query) as $pair) {
+            [$encodedName, $encodedValue] = array_pad(explode('=', $pair, 2), 2, '');
+            if ($encodedName === ''
+                || preg_match('/%(?![0-9A-Fa-f]{2})/', $encodedName . $encodedValue) === 1) {
+                throw new RuntimeException($label . ' contains an invalid query option.');
+            }
+            $name = rawurldecode($encodedName);
+            $value = rawurldecode($encodedValue);
+            if (preg_match('/[\x00-\x1F\x7F]/', $name . $value) === 1) {
+                throw new RuntimeException($label . ' contains an invalid query option.');
+            }
+            $normalized = strtolower($name);
+            if (in_array($normalized, ['password', 'sslpassword'], true)) {
+                throw new RuntimeException($label . ' must not contain a password-bearing query option.');
+            }
+            if (in_array($normalized, ['sslmode', 'sslrootcert', 'connect_timeout'], true)) {
+                $resolved[$normalized] = $value;
+            } else {
+                $commandOptions[$name] = $value;
+            }
+        }
+        return [$resolved, $commandOptions];
     }
 
     private static function isLoopbackHost(string $host): bool

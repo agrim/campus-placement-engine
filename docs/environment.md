@@ -72,11 +72,15 @@ export CPE_POSTGRES_ALLOW_INSECURE_LOOPBACK=1
 export CPE_DATABASE_URL='postgresql://USER:PASSWORD@127.0.0.1/EMPTY_TEST_DATABASE?sslmode=disable'
 ```
 
-Do not use the local-test opt-in with a remote endpoint. `pg_dump` and
-`pg_restore` receive the same validated runtime URL during ordinary Engine
-operations, but their legacy explicit constructor URL remains compatible and
-does not independently enforce the new runtime policy; never supply a different
-weaker URL to that compatibility seam.
+Do not use the local-test opt-in with a remote endpoint. During ordinary Engine
+operations, `pg_dump` and `pg_restore` receive a password-free URI plus the same
+policy-resolved TLS mode, trusted root, and bounded timeout as PDO. Their child
+environment removes ambient `PG*` connection settings before installing those
+validated values, and carries the password only in `PGPASSWORD`, never in argv.
+The legacy explicit constructor URL remains compatible and does not independently
+enforce the new runtime policy. Its non-secret libpq query options are retained
+with canonical encoding, while password-bearing query options are rejected;
+never supply a different weaker URL to that compatibility seam.
 
 ## Web Security And Sessions
 

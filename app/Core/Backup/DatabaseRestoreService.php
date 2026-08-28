@@ -5,6 +5,9 @@ declare(strict_types=1);
 namespace App\Core\Backup;
 
 use App\Core\Http\UserVisibleException;
+use App\Infrastructure\Persistence\PostgresCommandConnectionSpec;
+use App\Infrastructure\Persistence\PostgresConnectionPolicy;
+use App\Infrastructure\Persistence\PostgresConnectionProvider;
 use App\Support\Database;
 use App\Support\IncidentReporter;
 use PDO;
@@ -375,17 +378,13 @@ final class DatabaseRestoreService
 
     private function restorePostgres(string $backupPath): void
     {
-        $url = trim((string) ($this->postgresUrl ?? getenv('CPE_DATABASE_URL') ?: ''));
-        if ($url === '') {
-            throw new UserVisibleException('DATABASE_RESTORE_CONFIGURATION_REQUIRED', 'PostgreSQL restore configuration is incomplete.');
-        }
-        [$safeUrl, $password] = $this->safePostgresUrl($url);
+        $connection = $this->postgresCommandConnection();
         $binary = $this->pgRestoreBinary();
         $environment = getenv();
         if (!is_array($environment)) {
             $environment = [];
         }
-        $environment['PGPASSWORD'] = $password;
+        $environment = $connection->childEnvironment($environment);
         Database::reset();
         $process = proc_open(
             [
@@ -395,7 +394,7 @@ final class DatabaseRestoreService
                 '--no-owner',
                 '--no-privileges',
                 '--single-transaction',
-                '--dbname=' . $safeUrl,
+                '--dbname=' . $connection->safeUri(),
                 $backupPath,
             ],
             [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
@@ -524,24 +523,24 @@ final class DatabaseRestoreService
         );
     }
 
-    private function safePostgresUrl(string $url): array
+    private function postgresCommandConnection(): PostgresCommandConnectionSpec
     {
-        $parts = parse_url($url);
-        if (!is_array($parts) || !in_array(strtolower((string) ($parts['scheme'] ?? '')), ['postgres', 'postgresql'], true)) {
-            throw new UserVisibleException('DATABASE_RESTORE_CONFIGURATION_INVALID', 'PostgreSQL restore configuration is invalid.');
+        $url = $this->postgresUrl !== null
+            ? trim($this->postgresUrl)
+            : trim((string) (getenv('CPE_DATABASE_URL') ?: ''));
+        if ($url === '') {
+            throw new UserVisibleException('DATABASE_RESTORE_CONFIGURATION_REQUIRED', 'PostgreSQL restore configuration is incomplete.');
         }
-        $user = rawurldecode((string) ($parts['user'] ?? ''));
-        $password = rawurldecode((string) ($parts['pass'] ?? ''));
-        $host = (string) ($parts['host'] ?? '127.0.0.1');
-        $port = (int) ($parts['port'] ?? 5432);
-        $database = rawurldecode(ltrim((string) ($parts['path'] ?? ''), '/'));
-        if ($user === '' || $database === '') {
-            throw new UserVisibleException('DATABASE_RESTORE_CONFIGURATION_INVALID', 'PostgreSQL restore configuration is invalid.');
+        try {
+            return $this->postgresUrl !== null
+                ? PostgresConnectionProvider::fromUrl($url, 'PostgreSQL restore URL')->commandConnectionSpec()
+                : PostgresConnectionPolicy::commandConnectionFromEnvironment();
+        } catch (\Throwable $e) {
+            throw new UserVisibleException(
+                'DATABASE_RESTORE_CONFIGURATION_INVALID',
+                'PostgreSQL restore configuration is invalid.',
+                $e,
+            );
         }
-        $query = isset($parts['query']) && $parts['query'] !== '' ? '?' . $parts['query'] : '';
-        return [
-            sprintf('postgresql://%s@%s:%d/%s%s', rawurlencode($user), $host, $port, rawurlencode($database), $query),
-            $password,
-        ];
     }
 }

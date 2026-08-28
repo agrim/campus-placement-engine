@@ -80,6 +80,10 @@ the database file; all old PHP/PDO processes must be stopped because they retain
 handles to the old file. PostgreSQL uses
 `pg_restore --clean --if-exists --single-transaction` and requires
 `CPE_DATABASE_URL` plus `pg_restore`.
+Both PostgreSQL tools use the runtime policy's resolved TLS mode, trusted root,
+and connection timeout. The password is excluded from argv, while inherited
+`PG*` connection settings are scrubbed before the validated child environment
+is installed. This keeps backup and restore transport policy aligned with PDO.
 
 After restore:
 
