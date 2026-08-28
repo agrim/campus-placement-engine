@@ -6,6 +6,7 @@ define('CPE_SKIP_HTTP_BOOTSTRAP', true);
 require __DIR__ . '/../app/bootstrap.php';
 
 use App\Core\Persistence\DatabaseLock;
+use App\Infrastructure\Persistence\PostgresConnectionPolicy;
 use App\Infrastructure\Persistence\PostgresConnectionProvider;
 use App\Infrastructure\Persistence\SqliteConnectionProvider;
 use App\Install\Installer;
@@ -377,8 +378,22 @@ function install_contract_run(string $driver, ?string $sqlitePath, ?string $data
     }
 
     $provider = $databaseUrl !== null
-        ? PostgresConnectionProvider::fromUrl($databaseUrl, 'install concurrency database URL')
+        ? PostgresConnectionPolicy::fromUrl(
+            $databaseUrl,
+            'direct',
+            true,
+            'install concurrency database URL',
+        )
         : new SqliteConnectionProvider((string) $sqlitePath);
+    if ($databaseUrl !== null) {
+        $diagnostics = $provider->diagnostics();
+        install_contract_assert(
+            ($diagnostics['strict_policy'] ?? null) === true
+                && ($diagnostics['pool_mode'] ?? null) === 'direct'
+                && ($diagnostics['persistent'] ?? null) === false,
+            'Later direct installHosted check must use the strict direct PostgreSQL runtime policy.',
+        );
+    }
     Database::useProvider($provider);
     try {
         (new Installer())->installHosted([
