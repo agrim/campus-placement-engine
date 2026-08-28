@@ -4,12 +4,15 @@ declare(strict_types=1);
 
 namespace App\Core\Security;
 
+use App\Core\Modules\ModuleRegistry;
 use PDO;
 
 final class CapabilityService
 {
-    public function __construct(private readonly array $roleCapabilities)
-    {
+    public function __construct(
+        private readonly array $roleCapabilities,
+        private readonly ?ModuleRegistry $modules = null,
+    ) {
     }
 
     public function allows(?array $user, string $capability): bool
@@ -19,6 +22,10 @@ final class CapabilityService
         }
         $role = (string) ($user['role'] ?? '');
         $capabilities = $this->roleCapabilities[$role] ?? [];
+        $owner = $this->moduleOwner($capability);
+        if ($owner !== null && $this->modules !== null && !$this->modules->isEnabled($owner)) {
+            return false;
+        }
         return in_array('*', $capabilities, true) || in_array($capability, $capabilities, true);
     }
 
@@ -27,16 +34,29 @@ final class CapabilityService
         return array_values(array_unique($this->roleCapabilities[$role] ?? []));
     }
 
-    public static function fromDatabase(PDO $pdo, array $fallback): self
+    public static function fromDatabase(PDO $pdo, array $fallback, ?ModuleRegistry $modules = null): self
     {
         try {
             $roleCapabilities = [];
             foreach ($pdo->query('SELECT role_key, capability FROM role_capabilities ORDER BY role_key, capability')->fetchAll() as $row) {
                 $roleCapabilities[(string) $row['role_key']][] = (string) $row['capability'];
             }
-            return new self($roleCapabilities !== [] ? $roleCapabilities : $fallback);
+            return new self($roleCapabilities !== [] ? $roleCapabilities : $fallback, $modules);
         } catch (\Throwable) {
-            return new self($fallback);
+            return new self($fallback, $modules);
         }
+    }
+
+    private function moduleOwner(string $capability): ?string
+    {
+        if ($this->modules === null) {
+            return null;
+        }
+        foreach ($this->modules->all() as $moduleKey => $definition) {
+            if (in_array($capability, (array) ($definition['capabilities'] ?? []), true)) {
+                return (string) $moduleKey;
+            }
+        }
+        return null;
     }
 }

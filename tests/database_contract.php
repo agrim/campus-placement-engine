@@ -14,6 +14,8 @@ require __DIR__ . '/../app/bootstrap.php';
 use App\Core\Modules\ModuleLifecycleService;
 use App\Core\Events\DomainEvent;
 use App\Core\Events\DomainEventOutboxWorker;
+use App\Core\Http\UserVisibleException;
+use App\Core\Portal;
 use App\Domain\ReadinessService;
 use App\Install\Installer;
 use App\Install\SystemRequirements;
@@ -69,6 +71,22 @@ try {
     );
     contract_assert(count($placement->dashboard(['id' => 1, 'role' => 'admin', 'active' => 1])) > 0, 'Board aggregation returned no groups.');
 
+    $now = cpe_now();
+    $pdo->prepare(
+        'INSERT INTO roles (role_key, label, system_role, created_at, updated_at)
+         VALUES (?, ?, 0, ?, ?) ON CONFLICT(role_key) DO NOTHING'
+    )->execute(['database_contract_custom', 'Database Contract Custom', $now, $now]);
+    $pdo->exec("INSERT INTO role_capabilities (role_key, capability) VALUES ('database_contract_custom', 'placement.board.view') ON CONFLICT(role_key, capability) DO NOTHING");
+    $pdo->exec("INSERT INTO role_capabilities (role_key, capability) VALUES ('control', 'placement.retired.manage') ON CONFLICT(role_key, capability) DO NOTHING");
+    $pdo->exec("DELETE FROM role_capabilities WHERE role_key = 'control' AND capability = 'placement.board.view'");
+    $pdo->exec("UPDATE module_installations SET version = '0.0.1' WHERE module_key = 'advising'");
+    Database::migrate();
+    contract_assert((string) $pdo->query("SELECT version FROM module_installations WHERE module_key = 'advising'")->fetchColumn() === '0.1.0', 'Module version did not converge during migration callback.');
+    contract_assert((int) $pdo->query("SELECT COUNT(*) FROM role_capabilities WHERE role_key = 'control' AND capability = 'placement.board.view'")->fetchColumn() === 1, 'Configured system grant was not restored.');
+    contract_assert((int) $pdo->query("SELECT COUNT(*) FROM role_capabilities WHERE role_key = 'control' AND capability = 'placement.retired.manage'")->fetchColumn() === 0, 'Obsolete system grant was not revoked.');
+    contract_assert((int) $pdo->query("SELECT COUNT(*) FROM role_capabilities WHERE role_key = 'database_contract_custom' AND capability = 'placement.board.view'")->fetchColumn() === 1, 'Custom-role grant should survive synchronization.');
+    Portal::reset();
+
     $applicationId = (int) $pdo->query("SELECT id FROM applications WHERE current_status = 'idle' ORDER BY id LIMIT 1")->fetchColumn();
     contract_assert($applicationId > 0, 'Demo data needs an idle application for transition testing.');
     $placement->moveNext($applicationId, 1, 'admin');
@@ -81,6 +99,28 @@ try {
         'Workflow transition event was not persisted.'
     );
     contract_assert((int) $pdo->query('SELECT COUNT(*) FROM domain_event_outbox')->fetchColumn() >= 1, 'Domain event outbox was not written.');
+
+    $atomicApplicationId = $applicationId;
+    $atomicKey = bin2hex(random_bytes(16));
+    $atomic = $placement->applyBoardMove($atomicApplicationId, 1, 'admin', '', '', 'database contract atomic', 'scheduled', $atomicKey);
+    $atomicDuplicate = $placement->applyBoardMove($atomicApplicationId, 1, 'admin', '', '', 'database contract atomic', 'scheduled', $atomicKey);
+    contract_assert($atomic === ['duplicate' => false, 'status' => 'intransit'], 'Atomic board request did not apply.');
+    contract_assert($atomicDuplicate === ['duplicate' => true, 'status' => 'intransit'], 'Atomic duplicate did not return its durable result.');
+    contract_assert((int) $pdo->query("SELECT COUNT(*) FROM events WHERE application_id = {$atomicApplicationId} AND from_status = 'scheduled' AND to_status = 'intransit'")->fetchColumn() === 1, 'Atomic duplicate repeated transition evidence.');
+    try {
+        $placement->applyBoardMove($atomicApplicationId, 1, 'admin', '', '', 'different database contract request', 'scheduled', $atomicKey);
+        throw new RuntimeException('Expected database contract idempotency conflict.');
+    } catch (UserVisibleException $e) {
+        contract_assert($e->publicCode() === 'FORM_SUBMISSION_KEY_CONFLICT', 'Same key with different request did not conflict.');
+    }
+    $rollbackKey = bin2hex(random_bytes(16));
+    try {
+        $placement->applyBoardMove($atomicApplicationId, 1, 'admin', '', '', 'stale database contract request', 'scheduled', $rollbackKey);
+        throw new RuntimeException('Expected stale atomic request failure.');
+    } catch (UserVisibleException $e) {
+        contract_assert($e->publicCode() === 'PLACEMENT_BOARD_STALE', 'Expected stale atomic request code.');
+    }
+    contract_assert((int) $pdo->query("SELECT COUNT(*) FROM idempotency_keys WHERE key = " . $pdo->quote($rollbackKey))->fetchColumn() === 0, 'Failed atomic request retained its key.');
     putenv('CPE_DOMAIN_EVENT_OUTBOX_PATH=' . $outboxPath);
     $outboxResult = (new DomainEventOutboxWorker($pdo))->work(100);
     contract_assert($outboxResult['delivered'] >= 1 && is_file($outboxPath), 'Domain event outbox delivery differs by database driver.');
@@ -142,7 +182,15 @@ try {
 
     $applicationCount = (int) $pdo->query('SELECT COUNT(*) FROM applications')->fetchColumn();
     $lifecycle->disable('placement', 1);
+    contract_assert(!cpe_context()->capabilities()->allows(['role' => 'admin', 'active' => 1], 'placement.board.view'), 'Disabled module capability remained effective for wildcard administrator.');
+    contract_assert(cpe_context()->capabilities()->allows(['role' => 'admin', 'active' => 1], 'portal.modules.manage'), 'Disabled module removed a core portal capability.');
+    $disabledEvents = (int) $pdo->query("SELECT COUNT(*) FROM module_lifecycle_events WHERE module_key = 'placement' AND event_type = 'disabled'")->fetchColumn();
+    $lifecycle->disable('placement', 1);
+    contract_assert((int) $pdo->query("SELECT COUNT(*) FROM module_lifecycle_events WHERE module_key = 'placement' AND event_type = 'disabled'")->fetchColumn() === $disabledEvents, 'Repeated disable duplicated lifecycle event.');
     $lifecycle->enable('placement', 1);
+    $enabledEvents = (int) $pdo->query("SELECT COUNT(*) FROM module_lifecycle_events WHERE module_key = 'placement' AND event_type = 'enabled'")->fetchColumn();
+    $lifecycle->enable('placement', 1);
+    contract_assert((int) $pdo->query("SELECT COUNT(*) FROM module_lifecycle_events WHERE module_key = 'placement' AND event_type = 'enabled'")->fetchColumn() === $enabledEvents, 'Repeated enable duplicated lifecycle event.');
     contract_assert((int) $pdo->query('SELECT COUNT(*) FROM applications')->fetchColumn() === $applicationCount, 'Module lifecycle deleted data.');
 
     $legacyError = 'Legacy sentinel.admin@example.test postgresql://root:password@db/private/sentinel SQLSTATE[23505] DETAIL: person=Ada_Lovelace';

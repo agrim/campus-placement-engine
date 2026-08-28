@@ -16,12 +16,30 @@ final class PortalKernelSynchronizer
             return;
         }
 
-        $this->ensureInstitution($pdo, $institutionPublicId);
-        $this->ensureCycle($pdo);
-        (new InstitutionRepository($pdo))->synchronizeFromSettings();
-        $this->synchronizeCycle($pdo);
-        $this->synchronizeModules($pdo);
-        $this->synchronizeRoles($pdo);
+        $ownsTransaction = !$pdo->inTransaction();
+        if ($ownsTransaction) {
+            if ((string) $pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'sqlite') {
+                $pdo->exec('BEGIN IMMEDIATE');
+            } else {
+                $pdo->beginTransaction();
+            }
+        }
+        try {
+            $this->ensureInstitution($pdo, $institutionPublicId);
+            $this->ensureCycle($pdo);
+            (new InstitutionRepository($pdo))->synchronizeFromSettings();
+            $this->synchronizeCycle($pdo);
+            $this->synchronizeModules($pdo);
+            $this->synchronizeRoles($pdo);
+            if ($ownsTransaction) {
+                $pdo->commit();
+            }
+        } catch (\Throwable $e) {
+            if ($ownsTransaction && $pdo->inTransaction()) {
+                $pdo->rollBack();
+            }
+            throw $e;
+        }
     }
 
     private function ensureInstitution(PDO $pdo, ?string $institutionPublicId): void
@@ -116,16 +134,38 @@ final class PortalKernelSynchronizer
         $roleStmt = $pdo->prepare(
             'INSERT INTO roles (role_key, label, system_role, created_at, updated_at)
              VALUES (?, ?, 1, ?, ?)
-             ON CONFLICT(role_key) DO UPDATE SET label = excluded.label, updated_at = excluded.updated_at'
+             ON CONFLICT(role_key) DO UPDATE SET
+                label = excluded.label,
+                system_role = 1,
+                updated_at = excluded.updated_at'
         );
         $capabilityStmt = $pdo->prepare(
             'INSERT INTO role_capabilities (role_key, capability) VALUES (?, ?)
              ON CONFLICT(role_key, capability) DO NOTHING'
         );
+        $configuredRoles = array_keys($capabilityMap);
+        if ($configuredRoles === []) {
+            $pdo->exec(
+                'DELETE FROM role_capabilities
+                 WHERE role_key IN (SELECT role_key FROM roles WHERE system_role = 1)'
+            );
+        } else {
+            $placeholders = implode(',', array_fill(0, count($configuredRoles), '?'));
+            $revokeRetired = $pdo->prepare(
+                "DELETE FROM role_capabilities
+                 WHERE role_key IN (
+                    SELECT role_key FROM roles
+                    WHERE system_role = 1 AND role_key NOT IN ({$placeholders})
+                 )"
+            );
+            $revokeRetired->execute($configuredRoles);
+        }
+        $clearRoleCapabilities = $pdo->prepare('DELETE FROM role_capabilities WHERE role_key = ?');
         foreach ($capabilityMap as $role => $capabilities) {
             $now = cpe_now();
             $roleStmt->execute([$role, (string) ($labels[$role] ?? ucfirst($role)), $now, $now]);
-            foreach ($capabilities as $capability) {
+            $clearRoleCapabilities->execute([$role]);
+            foreach (array_values(array_unique(array_map('strval', $capabilities))) as $capability) {
                 $capabilityStmt->execute([$role, $capability]);
             }
         }

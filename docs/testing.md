@@ -13,7 +13,10 @@ php tests/database_connection_cleanup_contract.php
 php tests/incident_boundary_contract.php
 php tests/legacy_backup_compatibility_contract.php
 php tests/worker_delivery_contract.php
+php tests/postgres_connection_policy_contract.php
+php tests/postgres_tls_contract.php
 php tests/database_contract.php
+php tests/mutation_concurrency_contract.php
 php tests/database_lock_release_contract.php
 php tests/install_concurrency_contract.php
 php tests/hosted_install_atomicity_contract.php
@@ -40,6 +43,21 @@ It runs two independent workers against one queue, verifies token-fenced
 acknowledgement and failure mutations, stale-claim recovery, stable idempotency
 keys, dead-letter thresholds, dry-run immutability, and destination concealment.
 CI runs it against both SQLite and PostgreSQL.
+`tests/postgres_connection_policy_contract.php` is a no-network parser and
+policy gate. It freezes the Cloud-compatible constructor and raw `fromUrl()`
+signatures while proving strict runtime TLS, pool-mode, timeout, redaction,
+duplicate/unknown-query, component-environment, and injection behavior.
+`tests/postgres_tls_contract.php` is a conditional live gate: it skips unless
+`CPE_POSTGRES_TLS_TEST_URL` names a disposable production-shaped endpoint with
+`verify-full`, a readable root certificate, and a bounded timeout. When enabled,
+it requires post-connect `pg_stat_ssl` negotiated-TLS evidence. CI and release
+map the optional secret of the same name; fork pull requests without that secret
+record an explicit skip rather than claiming live TLS proof.
+`tests/mutation_concurrency_contract.php` releases paired independent processes
+against one database. It proves same-key board retries return one stored result,
+different-key stale moves cannot both mutate the card, and repeated concurrent
+module toggles emit one lifecycle event. CI and release run it against SQLite
+and a fresh dedicated PostgreSQL database.
 The installation
 concurrency contract releases two independent processes together against one
 fresh database. Each performs a hosted install with a distinct tenant identity
@@ -114,8 +132,18 @@ package independently of GitHub Actions.
 Point an empty disposable database at the contract:
 
 ```bash
-export CPE_DATABASE_URL='postgresql://USER:PASSWORD@127.0.0.1:5432/EMPTY_DATABASE'
+export CPE_POSTGRES_POOL_MODE=direct
+export CPE_POSTGRES_ALLOW_INSECURE_LOOPBACK=1
+export CPE_DATABASE_URL='postgresql://USER:PASSWORD@127.0.0.1:5432/EMPTY_DATABASE?sslmode=disable'
 php tests/database_contract.php
+```
+
+Run the mutation concurrency contract against a separate fresh database because
+it installs and mutates its own fixture:
+
+```bash
+export CPE_DATABASE_URL='postgresql://USER:PASSWORD@127.0.0.1:5432/EMPTY_CONCURRENCY_DATABASE?sslmode=disable'
+php tests/mutation_concurrency_contract.php
 ```
 
 CI runs this against PostgreSQL 17. Locally, Apple Container is a good optional

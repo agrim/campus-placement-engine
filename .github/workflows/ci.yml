@@ -12,6 +12,10 @@ jobs:
   php:
     name: PHP 8.2
     runs-on: ubuntu-latest
+    env:
+      CPE_POSTGRES_POOL_MODE: direct
+      CPE_POSTGRES_ALLOW_INSECURE_LOOPBACK: "1"
+      CPE_POSTGRES_TLS_TEST_URL: ${{ secrets.CPE_POSTGRES_TLS_TEST_URL }}
     services:
       postgres:
         image: postgres:17-alpine
@@ -91,7 +95,10 @@ jobs:
           php tests/incident_boundary_contract.php
           php tests/legacy_backup_compatibility_contract.php
           php tests/worker_delivery_contract.php
+          php tests/postgres_connection_policy_contract.php
+          php tests/postgres_tls_contract.php
           php tests/database_contract.php
+          php tests/mutation_concurrency_contract.php
           php tests/database_ownership_contract.php
           php tests/migration_lock_contract.php
           php tests/database_lock_release_contract.php
@@ -107,6 +114,15 @@ jobs:
           CPE_DB_DRIVER: pgsql
           CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_contract?sslmode=disable
         run: php tests/database_contract.php
+
+      - name: Run PostgreSQL mutation concurrency contract
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_mutation_concurrency_contract?sslmode=disable
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_mutation_concurrency_contract'
+          php tests/mutation_concurrency_contract.php
 
       - name: Run PostgreSQL worker delivery contract
         env:

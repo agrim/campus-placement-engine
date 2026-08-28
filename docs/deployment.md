@@ -102,7 +102,8 @@ Use PostgreSQL when operating the hosted edition or when an institution has
 already chosen to operate a database server:
 
 ```bash
-export CPE_DATABASE_URL='postgresql://USER:PASSWORD@DB_HOST/CAREER_SERVICES'
+export CPE_POSTGRES_POOL_MODE=direct
+export CPE_DATABASE_URL='postgresql://USER:PASSWORD@DB_HOST/CAREER_SERVICES?sslmode=verify-full&sslrootcert=%2Fetc%2Fssl%2Fcerts%2Finstitution-ca.pem&connect_timeout=10'
 php placement doctor
 php placement install --college='Example College' --admin-name='Admin' --admin-email=admin@example.edu
 ```
@@ -123,7 +124,11 @@ database identity.
 
 PostgreSQL ownership locking requires a direct or session-affine connection for
 the duration of the claim. Transaction-pooling endpoints that can change the
-backend session are unsupported. The claim is scoped to the physical PostgreSQL
+backend session are unsupported; set `CPE_POSTGRES_POOL_MODE` to `direct` or
+`session` so any other value fails closed. Production also requires
+`sslmode=verify-full`, an explicit readable `sslrootcert`, and a 1–30 second
+`connect_timeout`. Engine disables persistent PDO connections and verifies
+negotiated TLS through `pg_stat_ssl` after connecting. The claim is scoped to the physical PostgreSQL
 database, not merely the current `search_path`; use one dedicated application
 schema and never place Engine and Cloud markers in different schemas of the same
 database. SQLite keeps a persistent lock file adjacent to the canonical database

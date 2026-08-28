@@ -32,7 +32,13 @@ profile, proxy, or container definition.
 | Variable | Purpose |
 |---|---|
 | `CPE_DB_DRIVER` | Optional `sqlite` or `pgsql` selector. A database URL also selects PostgreSQL. |
-| `CPE_DATABASE_URL` | PostgreSQL data-plane URL. Keep it in a secret manager. |
+| `CPE_DATABASE_URL` | PostgreSQL data-plane URL. Keep it in a secret manager. Production requires `sslmode=verify-full`, `sslrootcert`, and `connect_timeout`. |
+| `CPE_POSTGRES_POOL_MODE` | PostgreSQL endpoint mode: `direct` or session-affine `session`. Transaction pooling is unsupported. Defaults to `direct`. |
+| `CPE_POSTGRES_ALLOW_INSECURE_LOOPBACK` | Local/test-only opt-in. Set exactly `1` to allow `sslmode=disable` for `localhost`, `127.0.0.0/8`, or `::1`; never set it in production. |
+| `CPE_PG_HOST`, `CPE_PG_PORT`, `CPE_PG_DATABASE`, `CPE_PG_USER`, `CPE_PG_PASSWORD` | Component-style PostgreSQL configuration when `CPE_DATABASE_URL` is absent. |
+| `CPE_PG_SSLMODE` | Component-style TLS mode. Production accepts only `verify-full`. |
+| `CPE_PG_SSLROOTCERT` | Explicit absolute trusted CA/root-certificate path. The PHP service account must be able to read it. |
+| `CPE_PG_CONNECT_TIMEOUT` | PostgreSQL connection timeout in seconds, bounded from 1 to 30 and required in production. |
 | `CPE_BACKUP_DIR` | Backup and restore-safety destination. Defaults to `data/backups`. |
 | `CPE_PG_DUMP_BINARY` | Absolute `pg_dump` override when it is not in a known Homebrew/system location. |
 | `CPE_PG_RESTORE_BINARY` | Absolute `pg_restore` override. |
@@ -43,6 +49,34 @@ profile, proxy, or container definition.
 All supported modes require `mbstring`. PostgreSQL requires `pdo_pgsql`; backup
 and restore additionally require `pg_dump` and `pg_restore`. SQLite requires
 `pdo_sqlite`, `sqlite3`, and writable data/database directories.
+
+The strict Engine runtime parser accepts only `sslmode`, `sslrootcert`, and
+`connect_timeout` URL query parameters. Unknown or duplicate parameters,
+fragments, invalid percent encodings, and DSN/control-character injection are
+rejected. Credentials and root-certificate paths are omitted from diagnostics;
+PDO persistence is disabled. After a production connection succeeds, Engine
+also verifies the current backend row in `pg_stat_ssl` reports negotiated TLS.
+
+Production example:
+
+```bash
+export CPE_POSTGRES_POOL_MODE=direct
+export CPE_DATABASE_URL='postgresql://USER:PASSWORD@db.example.edu/CAREER_SERVICES?sslmode=verify-full&sslrootcert=%2Fetc%2Fssl%2Fcerts%2Finstitution-ca.pem&connect_timeout=10'
+```
+
+For a disposable loopback-only PostgreSQL test service:
+
+```bash
+export CPE_POSTGRES_POOL_MODE=direct
+export CPE_POSTGRES_ALLOW_INSECURE_LOOPBACK=1
+export CPE_DATABASE_URL='postgresql://USER:PASSWORD@127.0.0.1/EMPTY_TEST_DATABASE?sslmode=disable'
+```
+
+Do not use the local-test opt-in with a remote endpoint. `pg_dump` and
+`pg_restore` receive the same validated runtime URL during ordinary Engine
+operations, but their legacy explicit constructor URL remains compatible and
+does not independently enforce the new runtime policy; never supply a different
+weaker URL to that compatibility seam.
 
 ## Web Security And Sessions
 

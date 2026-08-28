@@ -52,30 +52,22 @@ final class BoardController
             }
             $service = new PlacementService();
             $applicationId = (int) ($_POST['application_id'] ?? 0);
-            $service->assertCanActOnApplication($applicationId, $user);
-            if (!$service->consumeIdempotencyKey((string) ($_POST['idempotency_key'] ?? ''), (int) $user['id'], 'board.move', $applicationId)) {
+            $outcome = $service->applyBoardMove(
+                $applicationId,
+                (int) $user['id'],
+                (string) $user['role'],
+                trim((string) ($_POST['to_status'] ?? '')),
+                trim((string) ($_POST['transition_key'] ?? '')),
+                trim((string) ($_POST['note'] ?? '')),
+                trim((string) ($_POST['expected_status'] ?? '')),
+                (string) ($_POST['idempotency_key'] ?? ''),
+                $user
+            );
+            if ($outcome['duplicate']) {
                 Flash::add('success', 'Duplicate move ignored.');
                 redirect('/');
             }
-            $toStatus = trim((string) ($_POST['to_status'] ?? ''));
-            $next = $toStatus !== ''
-                ? $service->moveTo(
-                    $applicationId,
-                    $toStatus,
-                    trim((string) ($_POST['transition_key'] ?? '')),
-                    (int) $user['id'],
-                    (string) $user['role'],
-                    trim((string) ($_POST['note'] ?? '')),
-                    trim((string) ($_POST['expected_status'] ?? ''))
-                )
-                : $service->moveNext(
-                    $applicationId,
-                    (int) $user['id'],
-                    (string) $user['role'],
-                    trim((string) ($_POST['note'] ?? '')),
-                    trim((string) ($_POST['expected_status'] ?? ''))
-                );
-            Flash::add('success', 'Moved to ' . (new Workflow())->statusLabel($next) . '.');
+            Flash::add('success', 'Moved to ' . (new Workflow())->statusLabel($outcome['status']) . '.');
         } catch (\Throwable $e) {
             ControllerFailure::flash($e, 'CPE_BOARD_MOVE_FAILURE', 'board.move');
         }
@@ -92,19 +84,20 @@ final class BoardController
             }
             $service = new PlacementService();
             $applicationId = (int) ($_POST['application_id'] ?? 0);
-            $service->assertCanActOnApplication($applicationId, $user);
-            if (!$service->consumeIdempotencyKey((string) ($_POST['idempotency_key'] ?? ''), (int) $user['id'], 'board.return_to_idle', $applicationId)) {
-                Flash::add('success', 'Duplicate return ignored.');
-                redirect('/');
-            }
-            $service->returnToIdle(
+            $outcome = $service->applyBoardReturnToIdle(
                 $applicationId,
                 (int) $user['id'],
                 (string) $user['role'],
                 trim((string) ($_POST['reason'] ?? 'operator_return')),
                 trim((string) ($_POST['note'] ?? '')),
-                trim((string) ($_POST['expected_status'] ?? ''))
+                trim((string) ($_POST['expected_status'] ?? '')),
+                (string) ($_POST['idempotency_key'] ?? ''),
+                $user
             );
+            if ($outcome['duplicate']) {
+                Flash::add('success', 'Duplicate return ignored.');
+                redirect('/');
+            }
             Flash::add('success', 'Returned application to idle.');
         } catch (\Throwable $e) {
             ControllerFailure::flash($e, 'CPE_BOARD_CORRECTION_FAILURE', 'board.return_to_idle');

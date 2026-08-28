@@ -62,11 +62,27 @@ final class SystemRequirements
     private function postgresChecks(): array
     {
         $connectionOk = false;
+        $policyOk = false;
+        $policyValue = 'unavailable (connection initialization failed)';
         if (extension_loaded('pdo_pgsql')) {
             try {
                 $connectionOk = (int) Database::connection()->query('SELECT 1')->fetchColumn() === 1;
             } catch (\Throwable) {
                 $connectionOk = false;
+            }
+            if ($connectionOk) {
+                try {
+                    $provider = Database::provider();
+                    if (method_exists($provider, 'diagnostics')) {
+                        $diagnostics = (array) $provider->diagnostics();
+                        $policyValue = self::formatPostgresPolicyDiagnostics($diagnostics);
+                        $policyOk = self::postgresPolicyDiagnosticsAreAcceptable($diagnostics);
+                    } else {
+                        $policyValue = 'unavailable (provider diagnostics unsupported)';
+                    }
+                } catch (\Throwable) {
+                    $policyValue = 'unavailable (provider diagnostics failed)';
+                }
             }
         }
         return [
@@ -83,7 +99,75 @@ final class SystemRequirements
                 'ok' => $connectionOk,
                 'value' => $connectionOk ? 'reachable' : 'unavailable',
             ],
+            [
+                'key' => 'postgres_policy',
+                'label' => 'postgres_policy',
+                'ok' => $policyOk,
+                'value' => $policyValue,
+            ],
         ];
+    }
+
+    /** @param array<string, mixed> $diagnostics */
+    public static function postgresPolicyDiagnosticsAreAcceptable(array $diagnostics): bool
+    {
+        if (($diagnostics['strict_policy'] ?? null) !== true
+            || !in_array(($diagnostics['pool_mode'] ?? null), ['direct', 'session'], true)
+            || ($diagnostics['persistent'] ?? null) !== false) {
+            return false;
+        }
+        $timeout = $diagnostics['connect_timeout_seconds'] ?? null;
+        if (!is_int($timeout) || $timeout < 1 || $timeout > 30) {
+            return false;
+        }
+
+        $tlsMode = $diagnostics['ssl_mode'] ?? null;
+        if ($tlsMode === 'verify-full') {
+            return ($diagnostics['trusted_root_configured'] ?? null) === true
+                && ($diagnostics['negotiated_tls_verified'] ?? null) === true;
+        }
+        if ($tlsMode === 'disable') {
+            return ($diagnostics['trusted_root_configured'] ?? null) === false
+                && in_array(($diagnostics['negotiated_tls_verified'] ?? null), [false, null], true);
+        }
+        return false;
+    }
+
+    /** @param array<string, mixed> $diagnostics */
+    public static function formatPostgresPolicyDiagnostics(array $diagnostics): string
+    {
+        $strict = ($diagnostics['strict_policy'] ?? null) === true;
+        $poolMode = in_array(($diagnostics['pool_mode'] ?? null), ['direct', 'session'], true)
+            ? (string) $diagnostics['pool_mode']
+            : 'unknown';
+        $tlsMode = in_array(
+            ($diagnostics['ssl_mode'] ?? null),
+            ['disable', 'allow', 'prefer', 'require', 'verify-ca', 'verify-full'],
+            true,
+        ) ? (string) $diagnostics['ssl_mode'] : 'unknown';
+        $trustedRoot = ($diagnostics['trusted_root_configured'] ?? null) === true ? 'yes' : 'no';
+        $timeout = $diagnostics['connect_timeout_seconds'] ?? null;
+        $timeoutValue = is_int($timeout) && $timeout >= 1 && $timeout <= 30
+            ? $timeout . 's'
+            : 'unbounded-or-unset';
+        $persistent = ($diagnostics['persistent'] ?? null) === false ? 'no' : 'yes-or-unknown';
+        $negotiatedTls = $tlsMode === 'disable'
+            ? 'not-applicable'
+            : (($diagnostics['negotiated_tls_verified'] ?? null) === true ? 'yes' : 'no');
+        $policyState = $strict
+            ? ($tlsMode === 'disable' ? 'test-loopback-insecure' : 'production-strict')
+            : 'legacy-compatibility';
+
+        return implode('; ', [
+            'state=' . $policyState,
+            'strict=' . ($strict ? 'yes' : 'no'),
+            'pool=' . $poolMode,
+            'tls=' . $tlsMode,
+            'trusted_root=' . $trustedRoot,
+            'connect_timeout=' . $timeoutValue,
+            'persistent=' . $persistent,
+            'negotiated_tls=' . $negotiatedTls,
+        ]);
     }
 
     /**

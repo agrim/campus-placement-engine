@@ -65,6 +65,8 @@ function incident_start_server(array $environment, string $phpLogPath, array $in
         'CPE_DB_PATH',
         'CPE_DATABASE_URL',
         'CPE_DB_DRIVER',
+        'CPE_POSTGRES_POOL_MODE',
+        'CPE_POSTGRES_ALLOW_INSECURE_LOOPBACK',
         'CPE_SETUP_TOKEN',
         SetupHttp::INTERNAL_CAPABILITY_ENV,
         SetupHttp::INTERNAL_ADDRESS_ENV,
@@ -329,7 +331,7 @@ $suffix = bin2hex(random_bytes(6));
 $safeTmp = realpath(sys_get_temp_dir()) ?: sys_get_temp_dir();
 $sentinels = [
     'password' => 'incident-password-' . $suffix,
-    'dsn' => 'postgresql://incident-user:incident-db-' . $suffix . '@127.0.0.1:1/placement',
+    'dsn' => 'postgresql://incident-user:incident-db-' . $suffix . '@127.0.0.1:1/placement?sslmode=disable',
     'email' => 'sentinel.' . $suffix . '@example.test',
     'url' => 'https://gateway.example.test/callback?access_token=' . $suffix,
     'person' => 'Sentinel Person ' . $suffix,
@@ -367,12 +369,21 @@ try {
 
     putenv('CPE_DB_DRIVER=pgsql');
     putenv('CPE_DATABASE_URL=' . $sentinels['dsn']);
+    putenv('CPE_POSTGRES_POOL_MODE=direct');
+    putenv('CPE_POSTGRES_ALLOW_INSECURE_LOOPBACK=1');
     Database::reset();
     $postgresChecks = json_encode((new SystemRequirements())->checks(), JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
     incident_assert_absent($postgresChecks, $sentinels, 'PostgreSQL requirement diagnostics');
     incident_true(str_contains($postgresChecks, 'postgres_connection'), 'PostgreSQL requirement code was not fixed.');
+    incident_true(str_contains($postgresChecks, 'postgres_policy'), 'PostgreSQL policy diagnostic was missing.');
+    incident_true(
+        str_contains($postgresChecks, 'unavailable (connection initialization failed)'),
+        'PostgreSQL policy failure diagnostic was not fixed and sanitized.',
+    );
     putenv('CPE_DB_DRIVER');
     putenv('CPE_DATABASE_URL');
+    putenv('CPE_POSTGRES_POOL_MODE');
+    putenv('CPE_POSTGRES_ALLOW_INSECURE_LOOPBACK');
     Database::reset();
 
     foreach ([

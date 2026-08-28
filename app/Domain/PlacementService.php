@@ -353,6 +353,85 @@ final class PlacementService
         return max(15, min(600, $seconds));
     }
 
+    /**
+     * @return array{duplicate: bool, status: string}
+     */
+    public function applyBoardMove(
+        int $applicationId,
+        ?int $actorId,
+        string $actorRole,
+        string $toStatus,
+        string $transitionKey,
+        string $note,
+        string $expectedFromStatus,
+        string $idempotencyKey,
+        array $actorContext = [],
+    ): array {
+        $payload = [
+            'actor_role' => $actorRole,
+            'expected_status' => $expectedFromStatus,
+            'note' => $note,
+            'to_status' => $toStatus,
+            'transition_key' => $transitionKey,
+        ];
+        $this->addActorScopeToPayload($payload, $actorContext);
+        return $this->executeBoardRequest(
+            $idempotencyKey,
+            $actorId,
+            'board.move',
+            $applicationId,
+            $payload,
+            $actorContext,
+            function () use ($applicationId, $actorId, $actorRole, $toStatus, $transitionKey, $note, $expectedFromStatus): array {
+                $status = $toStatus !== ''
+                    ? $this->moveTo($applicationId, $toStatus, $transitionKey, $actorId, $actorRole, $note, $expectedFromStatus)
+                    : $this->moveNext($applicationId, $actorId, $actorRole, $note, $expectedFromStatus);
+                return ['status' => $status];
+            }
+        );
+    }
+
+    /**
+     * @return array{duplicate: bool, status: string}
+     */
+    public function applyBoardReturnToIdle(
+        int $applicationId,
+        ?int $actorId,
+        string $actorRole,
+        string $reason,
+        string $note,
+        string $expectedFromStatus,
+        string $idempotencyKey,
+        array $actorContext = [],
+    ): array {
+        $reason = trim($reason) !== '' ? trim($reason) : 'operator_return';
+        $payload = [
+            'actor_role' => $actorRole,
+            'expected_status' => $expectedFromStatus,
+            'note' => $note,
+            'reason' => $reason,
+        ];
+        $this->addActorScopeToPayload($payload, $actorContext);
+        return $this->executeBoardRequest(
+            $idempotencyKey,
+            $actorId,
+            'board.return_to_idle',
+            $applicationId,
+            $payload,
+            $actorContext,
+            function () use ($applicationId, $actorId, $actorRole, $reason, $note, $expectedFromStatus): array {
+                $this->returnToIdle($applicationId, $actorId, $actorRole, $reason, $note, $expectedFromStatus);
+                $stmt = $this->pdo->prepare('SELECT current_status FROM applications WHERE id = ?');
+                $stmt->execute([$applicationId]);
+                return ['status' => (string) $stmt->fetchColumn()];
+            }
+        );
+    }
+
+    /**
+     * Compatibility helper for non-board callers. Board mutations must use the
+     * atomic applyBoardMove/applyBoardReturnToIdle boundary instead.
+     */
     public function consumeIdempotencyKey(string $key, ?int $actorUserId, string $action, ?int $applicationId = null): bool
     {
         $key = trim($key);
@@ -365,19 +444,12 @@ final class PlacementService
         $cutoff = gmdate('Y-m-d H:i:s', time() - 172800);
         $cleanup = $this->pdo->prepare('DELETE FROM idempotency_keys WHERE created_at < ?');
         $cleanup->execute([$cutoff]);
-        try {
-            $stmt = $this->pdo->prepare(
-                'INSERT INTO idempotency_keys (key, actor_user_id, action, application_id, created_at)
-                 VALUES (?, ?, ?, ?, ?)'
-            );
-            $stmt->execute([$key, $actorUserId, $action, $applicationId, cpe_now()]);
-            return true;
-        } catch (\PDOException $e) {
-            if ($e->getCode() === '23000') {
-                return false;
-            }
-            throw $e;
-        }
+        $stmt = $this->pdo->prepare(
+            'INSERT INTO idempotency_keys (key, actor_user_id, action, application_id, created_at)
+             VALUES (?, ?, ?, ?, ?) ON CONFLICT(key) DO NOTHING'
+        );
+        $stmt->execute([$key, $actorUserId, $action, $applicationId, cpe_now()]);
+        return $stmt->rowCount() === 1;
     }
 
     public function boardPreferenceForUser(int $userId): array
@@ -534,14 +606,22 @@ final class PlacementService
 
     public function assertCanActOnApplication(int $applicationId, array $user): void
     {
+        $this->assertCanActOnApplicationContext($applicationId, $user, false);
+    }
+
+    private function assertCanActOnApplicationContext(int $applicationId, array $user, bool $lock): void
+    {
         if (!$this->isCompanyScopedUser($user)) {
             return;
         }
+        $lockClause = $lock && (string) $this->pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'pgsql'
+            ? ' FOR UPDATE OF a, co'
+            : '';
         $stmt = $this->pdo->prepare(
             'SELECT co.code
              FROM applications a
              JOIN companies co ON co.id = a.company_id
-             WHERE a.id = ?'
+             WHERE a.id = ?' . $lockClause
         );
         $stmt->execute([$applicationId]);
         $companyCode = $stmt->fetchColumn();
@@ -704,8 +784,9 @@ final class PlacementService
 
     public function transition(int $applicationId, string $toStatus, ?int $actorId, string $actorRole, string $note = '', string $expectedFromStatus = '', string $transitionKey = ''): void
     {
+        $this->transactional(function () use ($applicationId, $toStatus, $actorId, $actorRole, $note, $expectedFromStatus, $transitionKey): void {
         $stmt = $this->pdo->prepare(
-            'SELECT a.*, c.external_id, c.opted_out, c.placed_company_id, co.code AS company_code
+            'SELECT a.*, c.external_id, c.opted_out, c.placed_company_id, c.current_location, co.code AS company_code
              FROM applications a
              JOIN candidates c ON c.id = a.candidate_id
              JOIN companies co ON co.id = a.company_id
@@ -749,8 +830,6 @@ final class PlacementService
             }
         }
 
-        $this->pdo->beginTransaction();
-        try {
             $now = cpe_now();
             $effects = $versionedTransition['effects'] ?? [];
             $acceptOffer = $versionedTransition !== null
@@ -762,22 +841,24 @@ final class PlacementService
             $returnToControl = $versionedTransition !== null
                 ? in_array('presence.return_to_control', $effects, true)
                 : $toStatus === 'sent';
-            $update = $this->pdo->prepare('UPDATE applications SET current_status = ?, updated_at = ? WHERE id = ?');
-            $update->execute([$toStatus, $now, $applicationId]);
+            $update = $this->pdo->prepare(
+                'UPDATE applications SET current_status = ?, updated_at = ? WHERE id = ? AND current_status = ?'
+            );
+            $update->execute([$toStatus, $now, $applicationId, $fromStatus]);
+            if ($update->rowCount() !== 1) {
+                throw new UserVisibleException('PLACEMENT_BOARD_STALE', 'This board card is stale. Reload the board before moving it.');
+            }
 
             if ($acceptOffer) {
-                $placed = $this->pdo->prepare('UPDATE candidates SET placed_company_id = ?, current_location = ?, updated_at = ? WHERE id = ?');
-                $placed->execute([(int) $app['company_id'], $app['company_code'], $now, (int) $app['candidate_id']]);
+                $this->acceptCandidateOffer($app, $now);
                 if (($versionedTransition === null || in_array('placement.clear_competing_applications', $effects, true))
                     && $this->setting('allow_offer_upgrade', '0') !== '1') {
                     $this->clearCompetingActiveApplications($app, $actorId, $actorRole, $now);
                 }
             } elseif ($moveToOpportunity) {
-                $loc = $this->pdo->prepare('UPDATE candidates SET current_location = ?, updated_at = ? WHERE id = ?');
-                $loc->execute([$app['company_code'], $now, (int) $app['candidate_id']]);
+                $this->updateCandidateLocation($app, (string) $app['company_code'], $now);
             } elseif ($returnToControl) {
-                $loc = $this->pdo->prepare('UPDATE candidates SET current_location = ?, updated_at = ? WHERE id = ?');
-                $loc->execute(['CP', $now, (int) $app['candidate_id']]);
+                $this->updateCandidateLocation($app, 'CP', $now);
                 if ($versionedTransition === null || in_array('placement.start_next_scheduled', $effects, true)) {
                     $this->handoffToNextScheduledApplication($app, $applicationId, $actorId, $actorRole, $now);
                 }
@@ -831,30 +912,28 @@ final class PlacementService
             }
             Auth::audit($actorId, 'transition', 'application', $applicationId, "{$fromStatus} -> {$toStatus}");
             $this->synchronizeDurableDomain();
-            $this->pdo->commit();
-        } catch (\Throwable $e) {
-            $this->pdo->rollBack();
-            throw $e;
-        }
+        });
     }
 
     public function moveNext(int $applicationId, ?int $actorId, string $actorRole, string $note = '', string $expectedFromStatus = ''): string
     {
-        $stmt = $this->pdo->prepare('SELECT current_status FROM applications WHERE id = ?');
-        $stmt->execute([$applicationId]);
-        $from = $stmt->fetchColumn();
-        if (!$from) {
-            throw new UserVisibleException('PLACEMENT_APPLICATION_NOT_FOUND', 'Application not found.');
-        }
-        $preferredTransition = $this->workflowEngine?->preferredTransition($applicationId);
-        $next = $preferredTransition !== null
-            ? (string) $preferredTransition['to']
-            : $this->workflow->nextStatus((string) $from);
-        if (!$next) {
-            throw new UserVisibleException('PLACEMENT_APPLICATION_FINAL', 'This application is already at the final status.');
-        }
-        $this->transition($applicationId, $next, $actorId, $actorRole, $note, $expectedFromStatus);
-        return $next;
+        return $this->transactional(function () use ($applicationId, $actorId, $actorRole, $note, $expectedFromStatus): string {
+            $stmt = $this->pdo->prepare('SELECT current_status FROM applications WHERE id = ?');
+            $stmt->execute([$applicationId]);
+            $from = $stmt->fetchColumn();
+            if (!$from) {
+                throw new UserVisibleException('PLACEMENT_APPLICATION_NOT_FOUND', 'Application not found.');
+            }
+            $preferredTransition = $this->workflowEngine?->preferredTransition($applicationId);
+            $next = $preferredTransition !== null
+                ? (string) $preferredTransition['to']
+                : $this->workflow->nextStatus((string) $from);
+            if (!$next) {
+                throw new UserVisibleException('PLACEMENT_APPLICATION_FINAL', 'This application is already at the final status.');
+            }
+            $this->transition($applicationId, $next, $actorId, $actorRole, $note, $expectedFromStatus);
+            return $next;
+        });
     }
 
     public function moveTo(
@@ -875,9 +954,10 @@ final class PlacementService
 
     public function returnToIdle(int $applicationId, ?int $actorId, string $actorRole, string $reason, string $note = '', string $expectedFromStatus = ''): void
     {
+        $this->transactional(function () use ($applicationId, $actorId, $actorRole, $reason, $note, $expectedFromStatus): void {
         $reason = trim($reason) !== '' ? trim($reason) : 'operator_return';
         $stmt = $this->pdo->prepare(
-            'SELECT a.*, c.external_id, co.code AS company_code
+            'SELECT a.*, c.external_id, c.current_location, co.code AS company_code
              FROM applications a
              JOIN candidates c ON c.id = a.candidate_id
              JOIN companies co ON co.id = a.company_id
@@ -908,13 +988,15 @@ final class PlacementService
             throw new UserVisibleException('PLACEMENT_CORRECTION_INVALID', 'Completed applications cannot be returned from the board.');
         }
 
-        $this->pdo->beginTransaction();
-        try {
             $now = cpe_now();
-            $update = $this->pdo->prepare('UPDATE applications SET current_status = ?, waitlist_rank = NULL, updated_at = ? WHERE id = ?');
-            $update->execute([$returnState, $now, $applicationId]);
-            $loc = $this->pdo->prepare('UPDATE candidates SET current_location = ?, updated_at = ? WHERE id = ?');
-            $loc->execute(['CP', $now, (int) $app['candidate_id']]);
+            $update = $this->pdo->prepare(
+                'UPDATE applications SET current_status = ?, waitlist_rank = NULL, updated_at = ? WHERE id = ? AND current_status = ?'
+            );
+            $update->execute([$returnState, $now, $applicationId, $fromStatus]);
+            if ($update->rowCount() !== 1) {
+                throw new UserVisibleException('PLACEMENT_BOARD_STALE', 'This board card is stale. Reload the board before moving it.');
+            }
+            $this->updateCandidateLocation($app, 'CP', $now);
             $slots = $this->pdo->prepare("UPDATE application_slot_assignments SET assignment_status = ?, updated_at = ? WHERE application_id = ? AND assignment_status != 'cancelled'");
             $slots->execute(['cancelled', $now, $applicationId]);
 
@@ -937,11 +1019,7 @@ final class PlacementService
             }
             Auth::audit($actorId, 'application.return_to_idle', 'application', $applicationId, $eventNote);
             $this->synchronizeDurableDomain();
-            $this->pdo->commit();
-        } catch (\Throwable $e) {
-            $this->pdo->rollBack();
-            throw $e;
-        }
+        });
     }
 
     public function candidate(int $candidateId, ?array $user = null): ?array
@@ -3797,12 +3875,193 @@ final class PlacementService
         return (int) ($stmt->fetchColumn() ?: 0);
     }
 
+    /**
+     * @param array<string, scalar|null> $payload
+     * @param array<string, mixed> $actorContext
+     * @return array{duplicate: bool, status: string}
+     */
+    private function executeBoardRequest(
+        string $key,
+        ?int $actorUserId,
+        string $action,
+        int $applicationId,
+        array $payload,
+        array $actorContext,
+        callable $operation
+    ): array {
+        $key = trim($key);
+        if ($key !== '' && preg_match('/^[A-Fa-f0-9]{32,64}$/', $key) !== 1) {
+            throw new UserVisibleException('FORM_SUBMISSION_KEY_INVALID', 'Invalid form submission key.');
+        }
+        ksort($payload);
+        $requestHash = hash('sha256', "cpe.board-request.v1\0" . json_encode([
+            'action' => $action,
+            'actor_user_id' => $actorUserId,
+            'application_id' => $applicationId,
+            'payload' => $payload,
+        ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES));
+
+        return $this->transactional(function () use ($key, $actorUserId, $action, $applicationId, $requestHash, $actorContext, $operation): array {
+            if ($actorContext !== []) {
+                $this->assertCanActOnApplicationContext($applicationId, $actorContext, true);
+            }
+            if ($key !== '') {
+                $cutoff = gmdate('Y-m-d H:i:s', time() - 172800);
+                $cleanup = $this->pdo->prepare('DELETE FROM idempotency_keys WHERE created_at < ?');
+                $cleanup->execute([$cutoff]);
+
+                $insert = $this->pdo->prepare(
+                    'INSERT INTO idempotency_keys
+                     (key, actor_user_id, action, application_id, created_at, request_hash, result_json)
+                     VALUES (?, ?, ?, ?, ?, ?, NULL) ON CONFLICT(key) DO NOTHING'
+                );
+                $insert->execute([$key, $actorUserId, $action, $applicationId, cpe_now(), $requestHash]);
+                if ($insert->rowCount() === 0) {
+                    $existing = $this->pdo->prepare(
+                        'SELECT actor_user_id, action, application_id, request_hash, result_json
+                         FROM idempotency_keys WHERE key = ?'
+                    );
+                    $existing->execute([$key]);
+                    $row = $existing->fetch();
+                    $storedActorId = $row && $row['actor_user_id'] !== null ? (int) $row['actor_user_id'] : null;
+                    $storedApplicationId = $row && $row['application_id'] !== null ? (int) $row['application_id'] : null;
+                    if (!$row
+                        || $storedActorId !== $actorUserId
+                        || (string) $row['action'] !== $action
+                        || $storedApplicationId !== $applicationId
+                        || !is_string($row['request_hash'])
+                        || !hash_equals($row['request_hash'], $requestHash)) {
+                        throw new UserVisibleException(
+                            'FORM_SUBMISSION_KEY_CONFLICT',
+                            'This form submission key was already used for a different request. Reload the board and retry.'
+                        );
+                    }
+                    $resultJson = (string) ($row['result_json'] ?? '');
+                    if ($resultJson === '') {
+                        throw new UserVisibleException(
+                            'FORM_SUBMISSION_RESULT_UNAVAILABLE',
+                            'The previous form submission result is unavailable. Reload the board before retrying.'
+                        );
+                    }
+                    $result = json_decode($resultJson, true, 512, JSON_THROW_ON_ERROR);
+                    if (!is_array($result) || !is_string($result['status'] ?? null)) {
+                        throw new RuntimeException('Stored form submission result is invalid.');
+                    }
+                    return ['duplicate' => true, 'status' => $result['status']];
+                }
+            }
+
+            $result = $operation();
+            if (!is_array($result) || !is_string($result['status'] ?? null)) {
+                throw new RuntimeException('Board mutation returned an invalid result.');
+            }
+            if ($key !== '') {
+                $resultJson = json_encode($result, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
+                $complete = $this->pdo->prepare(
+                    'UPDATE idempotency_keys SET result_json = ? WHERE key = ? AND request_hash = ?'
+                );
+                $complete->execute([$resultJson, $key, $requestHash]);
+                if ($complete->rowCount() !== 1) {
+                    throw new RuntimeException('Could not finalize form submission result.');
+                }
+            }
+            return ['duplicate' => false, 'status' => $result['status']];
+        });
+    }
+
+    /** @param array<string, scalar|null> $payload @param array<string, mixed> $actorContext */
+    private function addActorScopeToPayload(array &$payload, array $actorContext): void
+    {
+        if ($actorContext === []) {
+            return;
+        }
+        $payload['actor_scope_type'] = trim((string) ($actorContext['scope_type'] ?? ''));
+        $payload['actor_scope_value'] = strtoupper(trim((string) ($actorContext['scope_value'] ?? '')));
+    }
+
+    private function transactional(callable $operation): mixed
+    {
+        $ownsTransaction = !$this->pdo->inTransaction();
+        if ($ownsTransaction) {
+            if ((string) $this->pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'sqlite') {
+                $this->pdo->exec('BEGIN IMMEDIATE');
+            } else {
+                $this->pdo->beginTransaction();
+            }
+        }
+        try {
+            $result = $operation();
+            if ($ownsTransaction) {
+                $this->pdo->commit();
+            }
+            return $result;
+        } catch (\Throwable $e) {
+            if ($ownsTransaction && $this->pdo->inTransaction()) {
+                $this->pdo->rollBack();
+            }
+            throw $e;
+        }
+    }
+
     private function setting(string $key, string $default = ''): string
     {
         $stmt = $this->pdo->prepare('SELECT value FROM settings WHERE key = ?');
         $stmt->execute([$key]);
         $value = $stmt->fetchColumn();
         return $value === false ? $default : (string) $value;
+    }
+
+    private function acceptCandidateOffer(array $application, string $now): void
+    {
+        $expectedPlacedCompanyId = $application['placed_company_id'] !== null
+            ? (int) $application['placed_company_id']
+            : null;
+        $expectedLocation = $application['current_location'] !== null
+            ? (string) $application['current_location']
+            : null;
+        $placed = $this->pdo->prepare(
+            'UPDATE candidates
+             SET placed_company_id = ?, current_location = ?, updated_at = ?
+             WHERE id = ?
+               AND ((placed_company_id IS NULL AND CAST(? AS BIGINT) IS NULL) OR placed_company_id = ?)
+               AND ((current_location IS NULL AND CAST(? AS TEXT) IS NULL) OR current_location = ?)'
+        );
+        $placed->execute([
+            (int) $application['company_id'],
+            (string) $application['company_code'],
+            $now,
+            (int) $application['candidate_id'],
+            $expectedPlacedCompanyId,
+            $expectedPlacedCompanyId,
+            $expectedLocation,
+            $expectedLocation,
+        ]);
+        if ($placed->rowCount() !== 1) {
+            throw new UserVisibleException('PLACEMENT_BOARD_STALE', 'The candidate changed while the offer was being recorded. Reload the board and retry.');
+        }
+    }
+
+    private function updateCandidateLocation(array $application, string $location, string $now): void
+    {
+        $expectedLocation = $application['current_location'] !== null
+            ? (string) $application['current_location']
+            : null;
+        $update = $this->pdo->prepare(
+            'UPDATE candidates
+             SET current_location = ?, updated_at = ?
+             WHERE id = ?
+               AND ((current_location IS NULL AND CAST(? AS TEXT) IS NULL) OR current_location = ?)'
+        );
+        $update->execute([
+            $location,
+            $now,
+            (int) $application['candidate_id'],
+            $expectedLocation,
+            $expectedLocation,
+        ]);
+        if ($update->rowCount() !== 1) {
+            throw new UserVisibleException('PLACEMENT_BOARD_STALE', 'The candidate location changed while the board was being updated. Reload the board and retry.');
+        }
     }
 
     private function clearCompetingActiveApplications(array $placedApp, ?int $actorId, string $actorRole, string $now): void
@@ -3825,7 +4084,9 @@ final class PlacementService
             return;
         }
 
-        $update = $this->pdo->prepare('UPDATE applications SET current_status = ?, updated_at = ? WHERE id = ?');
+        $update = $this->pdo->prepare(
+            'UPDATE applications SET current_status = ?, updated_at = ? WHERE id = ? AND current_status = ?'
+        );
         $event = $this->pdo->prepare(
             'INSERT INTO events (application_id, candidate_id, company_id, from_status, to_status, actor_user_id, actor_role, note, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
@@ -3839,7 +4100,10 @@ final class PlacementService
                 'idle',
                 true
             );
-            $update->execute(['idle', $now, (int) $row['id']]);
+            $update->execute(['idle', $now, (int) $row['id'], $fromStatus]);
+            if ($update->rowCount() !== 1) {
+                throw new UserVisibleException('PLACEMENT_BOARD_STALE', 'A competing application changed while the placement was being recorded. Reload the board and retry.');
+            }
             $event->execute([
                 (int) $row['id'],
                 (int) $row['candidate_id'],
@@ -3881,8 +4145,13 @@ final class PlacementService
         $stmt->execute([(int) $sentApp['candidate_id'], $applicationId]);
         $next = $stmt->fetch();
         $nextCompanyId = $next ? (int) $next['company_id'] : null;
-        $markNext = $this->pdo->prepare('UPDATE applications SET next_company_id = ?, updated_at = ? WHERE id = ?');
+        $markNext = $this->pdo->prepare(
+            "UPDATE applications SET next_company_id = ?, updated_at = ? WHERE id = ? AND current_status = 'sent'"
+        );
         $markNext->execute([$nextCompanyId, $now, $applicationId]);
+        if ($markNext->rowCount() !== 1) {
+            throw new UserVisibleException('PLACEMENT_BOARD_STALE', 'The application changed while its next handoff was being recorded. Reload the board and retry.');
+        }
         if (!$next) {
             return;
         }
@@ -3892,11 +4161,17 @@ final class PlacementService
             'scheduled',
             'intransit'
         );
-        $update = $this->pdo->prepare('UPDATE applications SET current_status = ?, previous_company_id = ?, updated_at = ? WHERE id = ?');
+        $update = $this->pdo->prepare(
+            "UPDATE applications SET current_status = ?, previous_company_id = ?, updated_at = ? WHERE id = ? AND current_status = 'scheduled'"
+        );
         $update->execute(['intransit', (int) $sentApp['company_id'], $now, (int) $next['id']]);
+        if ($update->rowCount() !== 1) {
+            throw new UserVisibleException('PLACEMENT_BOARD_STALE', 'The next scheduled application changed during handoff. Reload the board and retry.');
+        }
 
-        $loc = $this->pdo->prepare('UPDATE candidates SET current_location = ?, updated_at = ? WHERE id = ?');
-        $loc->execute([(string) $next['company_code'], $now, (int) $sentApp['candidate_id']]);
+        $candidate = $sentApp;
+        $candidate['current_location'] = 'CP';
+        $this->updateCandidateLocation($candidate, (string) $next['company_code'], $now);
 
         $event = $this->pdo->prepare(
             'INSERT INTO events (application_id, candidate_id, company_id, from_status, to_status, actor_user_id, actor_role, note, created_at)

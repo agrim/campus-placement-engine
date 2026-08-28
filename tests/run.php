@@ -46,6 +46,7 @@ use App\Modules\Placement\Workflow\WorkflowSimulationService;
 use App\Operations\MetricsService;
 use App\Import\CsvImporter;
 use App\Import\ImportRollbackService;
+use App\Core\Install\PortalKernelSynchronizer;
 use App\Install\Installer;
 use App\Install\SystemRequirements;
 use App\Security\DatabaseSessionHandler;
@@ -266,6 +267,49 @@ test_case('portal kernel establishes institution module and capability context',
     assert_true($context->capabilities()->allows(['role' => 'admin', 'active' => 1], 'portal.settings.manage'), 'Administrator wildcard capability');
 });
 
+test_case('portal kernel synchronization is atomic and exactly reconciles system grants', function (): void {
+    $pdo = Database::connection();
+    $now = cpe_now();
+    $pdo->exec("UPDATE module_installations SET version = '0.0.1' WHERE module_key = 'advising'");
+    $pdo->prepare(
+        'INSERT INTO roles (role_key, label, system_role, created_at, updated_at)
+         VALUES (?, ?, 0, ?, ?) ON CONFLICT(role_key) DO NOTHING'
+    )->execute(['local_test_role', 'Local Test Role', $now, $now]);
+    $pdo->exec("INSERT INTO role_capabilities (role_key, capability) VALUES ('local_test_role', 'placement.board.view')");
+    $pdo->exec("INSERT INTO role_capabilities (role_key, capability) VALUES ('control', 'placement.retired.manage')");
+    $pdo->exec("DELETE FROM role_capabilities WHERE role_key = 'control' AND capability = 'placement.board.view'");
+    $pdo->prepare(
+        'INSERT INTO roles (role_key, label, system_role, created_at, updated_at) VALUES (?, ?, 1, ?, ?)'
+    )->execute(['retired_system_role', 'Retired System Role', $now, $now]);
+    $pdo->exec("INSERT INTO role_capabilities (role_key, capability) VALUES ('retired_system_role', 'placement.board.view')");
+
+    $pdo->exec(
+        "CREATE TRIGGER fail_kernel_capability_sync BEFORE INSERT ON role_capabilities
+         WHEN NEW.role_key = 'control' AND NEW.capability = 'portal.access'
+         BEGIN SELECT RAISE(ABORT, 'forced kernel synchronization rollback'); END"
+    );
+    try {
+        (new PortalKernelSynchronizer())->synchronize($pdo);
+        throw new RuntimeException('Expected kernel synchronization rollback.');
+    } catch (RuntimeException $e) {
+        assert_true(str_contains($e->getMessage(), 'forced kernel synchronization rollback'), 'Expected forced synchronizer failure');
+    } finally {
+        $pdo->exec('DROP TRIGGER fail_kernel_capability_sync');
+    }
+    assert_same('0.0.1', $pdo->query("SELECT version FROM module_installations WHERE module_key = 'advising'")->fetchColumn(), 'Failed synchronization should roll back module version');
+    assert_same(1, (int) $pdo->query("SELECT COUNT(*) FROM role_capabilities WHERE role_key = 'control' AND capability = 'placement.retired.manage'")->fetchColumn(), 'Failed synchronization should roll back system grant deletion');
+    assert_same(0, (int) $pdo->query("SELECT COUNT(*) FROM role_capabilities WHERE role_key = 'control' AND capability = 'placement.board.view'")->fetchColumn(), 'Failed synchronization should roll back system grant insertion');
+
+    (new PortalKernelSynchronizer())->synchronize($pdo);
+    assert_same('0.1.0', $pdo->query("SELECT version FROM module_installations WHERE module_key = 'advising'")->fetchColumn(), 'Synchronization should converge module version');
+    assert_same(0, (int) $pdo->query("SELECT enabled FROM module_installations WHERE module_key = 'advising'")->fetchColumn(), 'Version synchronization should preserve configured enablement');
+    assert_same(1, (int) $pdo->query("SELECT COUNT(*) FROM role_capabilities WHERE role_key = 'control' AND capability = 'placement.board.view'")->fetchColumn(), 'Synchronization should restore configured system grant');
+    assert_same(0, (int) $pdo->query("SELECT COUNT(*) FROM role_capabilities WHERE role_key = 'control' AND capability = 'placement.retired.manage'")->fetchColumn(), 'Synchronization should revoke obsolete system grant');
+    assert_same(0, (int) $pdo->query("SELECT COUNT(*) FROM role_capabilities WHERE role_key = 'retired_system_role'")->fetchColumn(), 'Synchronization should revoke grants for retired system roles');
+    assert_same(1, (int) $pdo->query("SELECT COUNT(*) FROM role_capabilities WHERE role_key = 'local_test_role' AND capability = 'placement.board.view'")->fetchColumn(), 'Synchronization should preserve custom-role grants');
+    Portal::reset();
+});
+
 test_case('placement module owns its routes and capability-filtered navigation', function (): void {
     Portal::reset();
     $manager = cpe_context()->moduleManager();
@@ -280,6 +324,23 @@ test_case('placement module owns its routes and capability-filtered navigation',
     ))), 'Module routes should be unique by method and name');
     foreach ($routes as $route) {
         assert_same('placement', $route['module'], 'Current operational routes should belong to Placement Operations');
+    }
+
+    $moduleDefinitions = cpe_config('modules', []);
+    foreach (cpe_config('capabilities.roles', []) as $capabilities) {
+        foreach ($capabilities as $capability) {
+            if ($capability === '*' || !str_contains($capability, '.')) {
+                continue;
+            }
+            [$owner] = explode('.', $capability, 2);
+            if (!isset($moduleDefinitions[$owner])) {
+                continue;
+            }
+            assert_true(
+                in_array($capability, $moduleDefinitions[$owner]['capabilities'] ?? [], true),
+                'Module manifest should own configured capability ' . $capability
+            );
+        }
     }
 
     $companyItems = $manager->navigation(['role' => 'company', 'active' => 1]);
@@ -308,8 +369,13 @@ test_case('module lifecycle disables routes without deleting placement data', fu
     $service->disable('placement', 1);
     assert_true(!cpe_context()->modules()->isEnabled('placement'), 'Placement should be disabled in the request context');
     assert_same([], cpe_context()->moduleManager()->routes(), 'Disabled module should contribute no routes');
+    assert_true(!cpe_context()->capabilities()->allows(['role' => 'control', 'active' => 1], 'placement.board.view'), 'Disabled module should deny its granted capability');
+    assert_true(!cpe_context()->capabilities()->allows(['role' => 'admin', 'active' => 1], 'placement.board.view'), 'Disabled module should deny wildcard administrators');
+    assert_true(cpe_context()->capabilities()->allows(['role' => 'admin', 'active' => 1], 'portal.modules.manage'), 'Disabling a module should preserve core portal capability');
     assert_same($candidateCount, (int) $pdo->query('SELECT COUNT(*) FROM candidates')->fetchColumn(), 'Disabling should preserve candidates');
     assert_same($applicationCount, (int) $pdo->query('SELECT COUNT(*) FROM applications')->fetchColumn(), 'Disabling should preserve applications');
+    $service->disable('placement', 1);
+    assert_same(1, (int) $pdo->query("SELECT COUNT(*) FROM module_lifecycle_events WHERE module_key = 'placement' AND event_type = 'disabled'")->fetchColumn(), 'Repeated disable should not duplicate lifecycle event');
     try {
         $service->uninstall('placement', false, false, 1);
         throw new RuntimeException('Expected guarded uninstall failure.');
@@ -319,6 +385,8 @@ test_case('module lifecycle disables routes without deleting placement data', fu
     $service->enable('placement', 1);
     assert_true(cpe_context()->modules()->isEnabled('placement'), 'Placement should be re-enabled');
     assert_true(count(cpe_context()->moduleManager()->routes()) > 0, 'Re-enabled module should restore routes');
+    assert_true(cpe_context()->capabilities()->allows(['role' => 'admin', 'active' => 1], 'placement.board.view'), 'Re-enabled module should reactivate preserved grant');
+    $service->enable('placement', 1);
     assert_same(2, (int) $pdo->query("SELECT COUNT(*) FROM module_lifecycle_events WHERE module_key = 'placement' AND event_type IN ('disabled', 'enabled')")->fetchColumn(), 'Lifecycle changes should be recorded');
 });
 
@@ -1040,9 +1108,11 @@ test_case('custom fields migration adds candidate and company extension columns'
 test_case('idempotency key migration creates live action table', function (): void {
     $pdo = Database::connection();
     $pdo->exec('DROP TABLE IF EXISTS idempotency_keys');
-    $pdo->exec("DELETE FROM migrations WHERE migration = '023_idempotency_keys.sql'");
+    $pdo->exec("DELETE FROM migrations WHERE migration IN ('023_idempotency_keys.sql', '046_idempotency_results.sql')");
     Database::migrate();
     assert_same(1, (int) $pdo->query("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'idempotency_keys'")->fetchColumn(), 'Idempotency migration should create table');
+    assert_same(1, (int) $pdo->query("SELECT COUNT(*) FROM pragma_table_info('idempotency_keys') WHERE name = 'request_hash'")->fetchColumn(), 'Idempotency migration should add request hashes');
+    assert_same(1, (int) $pdo->query("SELECT COUNT(*) FROM pragma_table_info('idempotency_keys') WHERE name = 'result_json'")->fetchColumn(), 'Idempotency migration should add durable results');
 });
 
 test_case('configuration freeze migration defaults upgraded installs to mutable', function (): void {
@@ -2118,6 +2188,60 @@ test_case('idempotency keys prevent repeated live board submissions', function (
     }
 });
 
+test_case('atomic board requests couple idempotency state results and transition evidence', function (): void {
+    $pdo = Database::connection();
+    $service = new PlacementService($pdo);
+    $candidateId = $service->saveCandidate(['external_id' => 'ATM001', 'name' => 'Atomic Candidate'], 1);
+    $companyId = $service->saveCompany(['code' => 'ATM', 'name' => 'Atomic Company'], 1);
+    $service->saveApplication($candidateId, $companyId, 'idle', null, 1);
+    $appId = (int) $pdo->query("SELECT id FROM applications WHERE candidate_id = {$candidateId} AND company_id = {$companyId}")->fetchColumn();
+    $key = bin2hex(random_bytes(16));
+
+    $pdo->exec(
+        "CREATE TRIGGER fail_atomic_board_completion BEFORE UPDATE OF result_json ON idempotency_keys
+         WHEN NEW.key = '{$key}'
+         BEGIN SELECT RAISE(ABORT, 'forced atomic board rollback'); END"
+    );
+    try {
+        $service->applyBoardMove($appId, 1, 'admin', 'scheduled', '', 'atomic move', 'idle', $key);
+        throw new RuntimeException('Expected forced atomic board rollback.');
+    } catch (RuntimeException $e) {
+        assert_true(str_contains($e->getMessage(), 'forced atomic board rollback'), 'Expected forced completion failure');
+    } finally {
+        $pdo->exec('DROP TRIGGER fail_atomic_board_completion');
+    }
+    assert_same('idle', $pdo->query("SELECT current_status FROM applications WHERE id = {$appId}")->fetchColumn(), 'Failed board mutation should roll back application state');
+    assert_same(0, (int) $pdo->query("SELECT COUNT(*) FROM idempotency_keys WHERE key = " . $pdo->quote($key))->fetchColumn(), 'Failed board mutation should roll back key reservation');
+    assert_same(0, (int) $pdo->query("SELECT COUNT(*) FROM events WHERE application_id = {$appId}")->fetchColumn(), 'Failed board mutation should roll back event evidence');
+    assert_same(0, (int) $pdo->query("SELECT COUNT(*) FROM domain_event_outbox WHERE payload_json LIKE '%\"application_id\":{$appId}%'")->fetchColumn(), 'Failed board mutation should roll back outbox evidence');
+    assert_same(0, (int) $pdo->query("SELECT COUNT(*) FROM audit_logs WHERE action = 'transition' AND subject_type = 'application' AND subject_id = {$appId}")->fetchColumn(), 'Failed board mutation should roll back audit evidence');
+
+    $first = $service->applyBoardMove($appId, 1, 'admin', 'scheduled', '', 'atomic move', 'idle', $key);
+    $duplicate = $service->applyBoardMove($appId, 1, 'admin', 'scheduled', '', 'atomic move', 'idle', $key);
+    assert_same(['duplicate' => false, 'status' => 'scheduled'], $first, 'First atomic board request should apply');
+    assert_same(['duplicate' => true, 'status' => 'scheduled'], $duplicate, 'Duplicate atomic board request should return its durable result');
+    assert_same(1, (int) $pdo->query("SELECT COUNT(*) FROM events WHERE application_id = {$appId} AND from_status = 'idle' AND to_status = 'scheduled'")->fetchColumn(), 'Duplicate should not repeat transition event');
+    assert_same(1, (int) $pdo->query("SELECT COUNT(*) FROM workflow_transition_events WHERE application_id = {$appId} AND from_state_key = 'idle' AND to_state_key = 'scheduled'")->fetchColumn(), 'Duplicate should not repeat workflow event');
+    assert_same(1, (int) $pdo->query("SELECT COUNT(*) FROM domain_event_outbox WHERE payload_json LIKE '%\"application_id\":{$appId}%'")->fetchColumn(), 'Duplicate should not repeat outbox event');
+    $stored = $pdo->query("SELECT request_hash, result_json FROM idempotency_keys WHERE key = " . $pdo->quote($key))->fetch();
+    assert_true(preg_match('/^[a-f0-9]{64}$/', (string) $stored['request_hash']) === 1, 'Atomic request should store a request hash');
+    assert_same(['status' => 'scheduled'], json_decode((string) $stored['result_json'], true, 512, JSON_THROW_ON_ERROR), 'Atomic request should store its result');
+
+    try {
+        $service->applyBoardMove($appId, 1, 'admin', 'scheduled', '', 'different request', 'idle', $key);
+        throw new RuntimeException('Expected form submission key conflict.');
+    } catch (UserVisibleException $e) {
+        assert_same('FORM_SUBMISSION_KEY_CONFLICT', $e->publicCode(), 'Same key with a different request should conflict');
+    }
+
+    $returnKey = bin2hex(random_bytes(16));
+    $returned = $service->applyBoardReturnToIdle($appId, 1, 'admin', 'operator_return', 'atomic correction', 'scheduled', $returnKey);
+    $returnDuplicate = $service->applyBoardReturnToIdle($appId, 1, 'admin', 'operator_return', 'atomic correction', 'scheduled', $returnKey);
+    assert_same(['duplicate' => false, 'status' => 'idle'], $returned, 'Atomic return should apply');
+    assert_same(['duplicate' => true, 'status' => 'idle'], $returnDuplicate, 'Atomic return duplicate should reuse the durable result');
+    assert_same(1, (int) $pdo->query("SELECT COUNT(*) FROM events WHERE application_id = {$appId} AND from_status = 'scheduled' AND to_status = 'idle'")->fetchColumn(), 'Return duplicate should not repeat event evidence');
+});
+
 test_case('company users cannot act outside their assigned company scope', function (): void {
     $pdo = Database::connection();
     $service = new PlacementService($pdo);
@@ -2130,6 +2254,27 @@ test_case('company users cannot act outside their assigned company scope', funct
     } catch (RuntimeException $e) {
         assert_true(str_contains($e->getMessage(), 'outside their assigned company scope'), 'Expected scope message');
     }
+
+    $beforeStatus = (string) $pdo->query("SELECT current_status FROM applications WHERE id = {$riverAppId}")->fetchColumn();
+    $key = bin2hex(random_bytes(16));
+    try {
+        $service->applyBoardMove(
+            $riverAppId,
+            1,
+            'company',
+            '',
+            '',
+            'out-of-scope atomic attempt',
+            $beforeStatus,
+            $key,
+            ['id' => 1, 'role' => 'company', 'scope_type' => 'company', 'scope_value' => 'ATLAS'],
+        );
+        throw new RuntimeException('Expected atomic company scope failure');
+    } catch (UserVisibleException $e) {
+        assert_same('PLACEMENT_COMPANY_SCOPE_FORBIDDEN', $e->publicCode(), 'Atomic scope check should fail with the fixed code');
+    }
+    assert_same($beforeStatus, $pdo->query("SELECT current_status FROM applications WHERE id = {$riverAppId}")->fetchColumn(), 'Atomic scope denial should not mutate application state');
+    assert_same(0, (int) $pdo->query("SELECT COUNT(*) FROM idempotency_keys WHERE key = " . $pdo->quote($key))->fetchColumn(), 'Atomic scope denial should not retain an idempotency reservation');
 });
 
 test_case('candidate detail access follows the requesting role visibility', function (): void {
