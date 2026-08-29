@@ -477,11 +477,13 @@ try {
         $service->rotateSecret($expiryLow, 1);
         $service->rotateSecret($expiryHigh, 1);
         $expiredAt = '2000-01-01 00:00:00';
+        $circuitOpenUntil = '2999-12-31 23:59:59';
         $expireFixture = $pdo->prepare(
-            'UPDATE webhook_subscriptions SET previous_secret_expires_at = ?, updated_at = ?
+            'UPDATE webhook_subscriptions
+             SET previous_secret_expires_at = ?, circuit_open_until = ?, updated_at = ?
              WHERE public_id IN (?, ?)',
         );
-        $expireFixture->execute([$expiredAt, cpe_now(), $expiryLow, $expiryHigh]);
+        $expireFixture->execute([$expiredAt, $circuitOpenUntil, cpe_now(), $expiryLow, $expiryHigh]);
         webhook_capture_assert(
             $expireFixture->rowCount() === 2,
             'PostgreSQL capture/expiry fixture did not expire exactly two subscriptions.',
