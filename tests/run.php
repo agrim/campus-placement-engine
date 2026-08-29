@@ -2201,10 +2201,10 @@ YAML;
     }
     $suiteSource = (string) file_get_contents(__FILE__);
     assert_true(
-        preg_match(
-            "/foreach \(\['CPE_DB_PATH', 'CPE_DB_DRIVER', 'CPE_DATABASE_URL', 'CPE_TEST_SCHEMA_PYTHON'\] as \\$key\)/",
+        str_contains(
             $suiteSource,
-        ) === 1,
+            "foreach (['CPE_DB_PATH', 'CPE_DB_DRIVER', 'CPE_DATABASE_URL', 'CPE_TEST_SCHEMA_PYTHON'] as \$key)",
+        ),
         'Extracted-package PHP subprocesses must explicitly forward CPE_TEST_SCHEMA_PYTHON from GITHUB_ENV.',
     );
     $deployment = (string) file_get_contents($root . '/docs/deployment.md');
