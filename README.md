@@ -115,6 +115,7 @@ testing.
 php placement setup --check
 php placement doctor
 php tests/run.php
+php tests/public_event_contract.php
 php tests/install_concurrency_contract.php
 php tests/setup_authorization_contract.php
 ```
@@ -157,6 +158,7 @@ php placement package --target=dist --force
 php placement verify-package /path/to/campus-placement-engine-version.zip
 php placement deliver-notifications [--channel=file|webhook|email|sms|whatsapp] [--dry-run]
 php placement work-outbox [--limit=100]
+php placement replay-public-event --event=event_ID --actor-user-id=USER_ID
 php placement replay-internal-delivery --event=event_ID --subscription=internal.module.name.v1 --actor-user-id=USER_ID
 php placement replay-internal-fanout --event=event_ID --module=MODULE_KEY --actor-user-id=USER_ID
 php placement certify-notifications --channel=sms|whatsapp [--require-live]
@@ -205,6 +207,7 @@ decisions.
 - `app/Hosted/` - managed-hosting integration contract and tenant-bound runtime context.
 - `app/` - controllers, domain logic, installer, imports, and security helpers.
 - `config/` - default app and workflow configuration.
+- `contracts/` - governed institution-facing integration declarations, schemas, examples, and consumer fixtures.
 - `database/` - SQLite/PostgreSQL institution data-plane migrations.
 - `examples/config-templates/` - portable starter configuration JSON files.
 - `data/` - local runtime database files, ignored by Git.
@@ -226,6 +229,10 @@ restore procedures, see [docs/disaster-recovery.md](docs/disaster-recovery.md).
 For module boundaries and extension rules, see
 [docs/architecture/extensions.md](docs/architecture/extensions.md) and the
 Engine-contributor-only [docs/module-development.md](docs/module-development.md).
+For the event-only public integration contract, delivery semantics, and schema
+compatibility rules, see [docs/integrations/events.md](docs/integrations/events.md)
+and [docs/compatibility.md](docs/compatibility.md). `DomainEvent` and bundled
+module PHP interfaces remain private Engine implementation details.
 For health, metrics,
 SSO, sessions, logs, and outbox operations, see
 [docs/security-operations.md](docs/security-operations.md).

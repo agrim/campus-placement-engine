@@ -82,6 +82,11 @@ logging personal payloads.
 then processes source-bundled observer deliveries and the external event outbox.
 These paths are independent: a declaration or observer cannot block its
 neighbors or the external sink.
+The external worker claims only rows with a complete governed public projection
+and serializes only public columns through the public envelope. It never selects
+or decodes the private `DomainEvent` payload, and it never promotes legacy rows
+by inference. The current catalog contains only
+`application.status_changed` schema 1.
 Without an external sink, the external outbox records `delivered_to=internal` to
 mean that no out-of-process destination was configured; it does not represent
 observer completion. Configure one optional external sink:
@@ -105,16 +110,30 @@ failures become dead letters after `CPE_DOMAIN_EVENT_MAX_ATTEMPTS` (default 10).
 Monitor pending and dead-lettered work. Internal observers and external
 consumers must be idempotent because a crash between a side effect and its
 token-fenced acknowledgement can produce at-least-once delivery.
+Later versions for one application wait for its unresolved earlier version;
+unrelated applications can progress, and there is no global-order promise. A
+database or portability restore breaks stream continuity and requires connector
+resynchronization before delivery resumes. See `integrations/events.md` and
+`security/integration-threat-model.md`.
 
 Replay only an investigated dead letter, by exact stable identity:
 
 ```text
+php placement replay-public-event --event=event_ID --actor-user-id=USER_ID
 php placement replay-internal-fanout --event=event_ID --module=MODULE_KEY --actor-user-id=USER_ID
 php placement replay-internal-delivery --event=event_ID --subscription=internal.module.name.v1 --actor-user-id=USER_ID
 ```
 
-Replay clears leases and opaque errors in one transaction and writes a fixed,
-payload-free audit event. Repeating an unchanged replay is idempotent.
+Public replay accepts only an explicit unresolved public dead letter and refuses
+retained lease state. The row lock and status-guarded update reset delivery
+state in one transaction without changing the envelope; later versions of that
+application remain blocked until the replay succeeds. Internal replay follows
+the corresponding queue status guards. Every replay requires the supplied actor
+to be an active local administrator and writes a fixed, payload-free audit event
+with that administrator as actor. Missing, inactive, nonexistent, and non-admin
+actors are rejected with redacted failures; possession of a local shell is not
+authorization to attribute an action to another user. Repeating an unchanged
+replay is idempotent.
 
 ## Incident First Steps
 

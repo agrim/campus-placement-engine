@@ -43,6 +43,14 @@ jobs:
           extensions: mbstring, pdo_sqlite, sqlite3, pdo_pgsql, curl
           coverage: none
 
+      - name: Validate public schemas with pinned Draft 2020-12 tooling
+        shell: bash
+        run: |
+          python3 -m venv "$RUNNER_TEMP/cpe-public-schema-validator"
+          "$RUNNER_TEMP/cpe-public-schema-validator/bin/python" -m pip install --disable-pip-version-check --requirement tests/requirements-public-event-schema.txt
+          "$RUNNER_TEMP/cpe-public-schema-validator/bin/python" tests/validate_public_event_schemas.py
+          echo "$RUNNER_TEMP/cpe-public-schema-validator/bin" >> "$GITHUB_PATH"
+
       - name: Install PostgreSQL 17 client
         shell: bash
         run: |
@@ -100,6 +108,7 @@ jobs:
           php tests/incident_boundary_contract.php
           php tests/legacy_backup_compatibility_contract.php
           php tests/worker_delivery_contract.php
+          php tests/public_event_contract.php
           php tests/postgres_connection_policy_contract.php
           php tests/postgres_tls_contract.php
           php tests/database_contract.php
@@ -119,6 +128,15 @@ jobs:
           CPE_DB_DRIVER: pgsql
           CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_contract?sslmode=disable
         run: php tests/database_contract.php
+
+      - name: Run PostgreSQL public event contract
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_public_event_contract?sslmode=disable
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_public_event_contract'
+          php tests/public_event_contract.php
 
       - name: Run PostgreSQL authorization and internal observer contracts
         env:

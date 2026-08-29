@@ -27,23 +27,13 @@ final class InternalEventFanoutReplayService
                 'Use the exact event public ID and bundled module key.',
             );
         }
-        if ($actorUserId < 1) {
-            throw new UserVisibleException(
-                'INTERNAL_EVENT_FANOUT_REPLAY_ACTOR_INVALID',
-                'An active operator user ID is required.',
-            );
-        }
-
         $pdo = $this->connection ?? Database::connection();
         return WriteTransaction::run($pdo, function () use ($pdo, $eventPublicId, $moduleKey, $actorUserId): array {
-            $actor = $pdo->prepare('SELECT id FROM users WHERE id = ? AND active = 1');
-            $actor->execute([$actorUserId]);
-            if ($actor->fetchColumn() === false) {
-                throw new UserVisibleException(
-                    'INTERNAL_EVENT_FANOUT_REPLAY_ACTOR_INVALID',
-                    'An active operator user ID is required.',
-                );
-            }
+            ReplayOperatorAuthorization::requireActiveAdministrator(
+                $pdo,
+                $actorUserId,
+                ReplayOperatorAuthorization::INTERNAL_FANOUT,
+            );
 
             $locking = (string) $pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'pgsql'
                 ? ' FOR UPDATE'

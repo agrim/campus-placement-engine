@@ -166,6 +166,47 @@ try {
     $sourceChecksumHash = hash_file('sha256', $legacySource . '.sha256');
     Database::reset();
 
+    $partialUpgradeDatabase = $legacyRoot . '/partial-upgrade-target.sqlite';
+    $partialUpgradeBackups = $legacyRoot . '/partial-upgrade-backups';
+    if (!mkdir($partialUpgradeBackups, 0700)) {
+        throw new RuntimeException('Could not create partial-upgrade backup storage.');
+    }
+    $partialUpgrade = new PDO(
+        'sqlite:' . $partialUpgradeDatabase,
+        null,
+        null,
+        [PDO::ATTR_ERRMODE => PDO::ERRMODE_EXCEPTION],
+    );
+    $partialUpgrade->exec('CREATE TABLE migrations (id INTEGER PRIMARY KEY)');
+    $partialUpgrade->exec('CREATE TABLE settings (key TEXT, value TEXT)');
+    $partialUpgrade->exec('CREATE TABLE institutions (public_id TEXT, slug TEXT)');
+    $partialUpgrade->exec("INSERT INTO settings VALUES ('installed_at', '2026-01-01 00:00:00')");
+    $partialUpgrade->exec(
+        "INSERT INTO institutions VALUES ('inst_11111111111111111111111111111111', 'default')",
+    );
+    $partialUpgrade = null;
+    [$partialUpgradeCode, $partialUpgradeOut] = legacy_cli(['upgrade'], [
+        'CPE_DB_DRIVER' => 'sqlite',
+        'CPE_DB_PATH' => $partialUpgradeDatabase,
+        'CPE_BACKUP_DIR' => $partialUpgradeBackups,
+    ]);
+    legacy_assert(
+        $partialUpgradeCode === 1 && $partialUpgradeOut === '',
+        'Partial legacy Engine schema was accepted for upgrade.',
+    );
+    $partialUpgrade = new PDO('sqlite:' . $partialUpgradeDatabase);
+    legacy_assert(
+        (int) $partialUpgrade->query(
+            "SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'cpe_database_ownership'",
+        )->fetchColumn() === 0,
+        'Rejected partial legacy Engine schema retained an ownership claim.',
+    );
+    legacy_assert(
+        (glob($partialUpgradeBackups . '/*') ?: []) === [],
+        'Rejected partial legacy Engine schema created a backup.',
+    );
+    $partialUpgrade = null;
+
     [$upgradeCode, $upgradeOut, $upgradeErr] = legacy_cli(['upgrade'], [
         'CPE_DB_DRIVER' => 'sqlite',
         'CPE_DB_PATH' => $legacyDatabase,

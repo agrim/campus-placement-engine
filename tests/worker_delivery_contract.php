@@ -100,23 +100,37 @@ function worker_event(PDO $pdo, string $name): array
     static $sequence = 0;
     $sequence++;
     $publicId = 'event_' . bin2hex(random_bytes(16));
-    $institutionId = (int) $pdo->query("SELECT id FROM institutions WHERE slug = 'default'")->fetchColumn();
+    $institution = $pdo->query(
+        "SELECT id, public_id FROM institutions WHERE slug = 'default'",
+    )->fetch();
+    worker_assert(is_array($institution), 'Worker event requires an institution identity.');
+    $aggregateId = 'application_' . bin2hex(random_bytes(16));
     $stmt = $pdo->prepare(
         'INSERT INTO domain_event_outbox
          (public_id, event_name, aggregate_type, aggregate_public_id, institution_id, module_key,
-          payload_json, occurred_at, available_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+          payload_json, occurred_at, available_at,
+          public_event_type, public_schema_version, public_instance_id, public_aggregate_type,
+          public_aggregate_id, public_aggregate_version, public_payload_json, public_correlation_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
     );
     $stmt->execute([
         $publicId,
         $name,
         'worker_contract',
-        'worker_' . $sequence,
-        $institutionId,
+        $aggregateId,
+        (int) $institution['id'],
         'placement',
         '{"contract":true}',
         cpe_now(),
         cpe_now(),
+        'application.status_changed',
+        1,
+        (string) $institution['public_id'],
+        'application',
+        $aggregateId,
+        2,
+        '{"from_status":"idle","to_status":"scheduled"}',
+        'req_' . bin2hex(random_bytes(12)),
     ]);
     return ['id' => Database::lastInsertId($pdo), 'public_id' => $publicId];
 }
@@ -350,7 +364,7 @@ try {
     $domainLines = file($domainOutbox, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [];
     worker_same(1, count($domainLines), 'Independent domain-event workers emitted duplicate side effects.');
     $domainEnvelope = json_decode($domainLines[0], true);
-    worker_same($domainRow['public_id'], $domainEnvelope['idempotency_key'] ?? '', 'Domain-event idempotency key changed.');
+    worker_same($domainRow['public_id'], $domainEnvelope['event_id'] ?? '', 'Domain-event idempotency key changed.');
     worker_same('file', $pdo->query('SELECT delivered_to FROM domain_event_outbox WHERE id = ' . (int) $domainRow['id'])->fetchColumn(), 'Domain event persisted a non-fixed destination.');
 
     // Notification failure mutation, claim loss, acknowledgement loss, stale reclaim, and dead letters.
@@ -450,7 +464,7 @@ try {
     $retriedEvent = (new DomainEventOutboxWorker($pdo))->work(1);
     worker_same(1, $retriedEvent['delivered'], 'Stale domain-event claim was not reclaimed.');
     $secondEventEnvelope = json_decode(trim(WorkerDeliveryStream::$writes[1]), true);
-    worker_same($firstEventEnvelope['idempotency_key'] ?? '', $secondEventEnvelope['idempotency_key'] ?? '', 'Domain-event idempotency key changed across crash retry.');
+    worker_same($firstEventEnvelope['event_id'] ?? '', $secondEventEnvelope['event_id'] ?? '', 'Domain-event idempotency key changed across crash retry.');
 
     $pdo->exec('DELETE FROM domain_event_outbox');
     putenv('CPE_DOMAIN_EVENT_MAX_ATTEMPTS=1');

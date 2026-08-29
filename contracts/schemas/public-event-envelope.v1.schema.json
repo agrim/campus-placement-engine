@@ -1,0 +1,67 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cpe:public-event-envelope:v1",
+  "title": "Campus Placement Engine public event envelope v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "event_id",
+    "event_type",
+    "schema_version",
+    "occurred_at",
+    "instance_id",
+    "aggregate",
+    "data",
+    "trace"
+  ],
+  "properties": {
+    "event_id": {
+      "type": "string",
+      "pattern": "^event_[a-f0-9]{32}$"
+    },
+    "event_type": {
+      "const": "application.status_changed"
+    },
+    "schema_version": {
+      "const": 1
+    },
+    "occurred_at": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+    },
+    "instance_id": {
+      "type": "string",
+      "pattern": "^(inst|tenant)_[a-f0-9]{32}$"
+    },
+    "aggregate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["type", "id", "version"],
+      "properties": {
+        "type": { "const": "application" },
+        "id": {
+          "type": "string",
+          "pattern": "^application_[a-f0-9]{32}$"
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 2
+        }
+      }
+    },
+    "data": {
+      "$ref": "urn:cpe:event:application.status_changed:v1#/$defs/data"
+    },
+    "trace": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["correlation_id"],
+      "properties": {
+        "correlation_id": {
+          "type": "string",
+          "pattern": "^req_[a-f0-9]{24}$"
+        }
+      }
+    }
+  }
+}

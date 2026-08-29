@@ -8,6 +8,7 @@ use App\Core\Http\UserVisibleException;
 use App\Core\Events\DomainEvent;
 use App\Core\Persistence\WriteTransaction;
 use App\Modules\Placement\Install\LegacyDomainSynchronizer;
+use App\Modules\Placement\Application\ApplicationStatusWriter;
 use App\Modules\Placement\Workflow\WorkflowEngine;
 use App\Modules\Placement\Workflow\WorkflowPublisher;
 use App\Modules\Placement\Workflow\WorkflowRepository;
@@ -19,6 +20,7 @@ use RuntimeException;
 final class PlacementService
 {
     private ?WorkflowEngine $workflowEngine = null;
+    private ApplicationStatusWriter $statusWriter;
     private const DEFAULT_EXACT_SLOT_OPTIMIZER_LIMIT = 10;
     private const DEFAULT_BOARD_CARD_FIELDS = [
         'candidate_id',
@@ -58,6 +60,7 @@ final class PlacementService
     public function __construct(private ?PDO $pdo = null, private ?Workflow $workflow = null)
     {
         $this->pdo ??= Database::connection();
+        $this->statusWriter = new ApplicationStatusWriter($this->pdo);
         (new WorkflowPublisher($this->pdo))->synchronizeLegacyMirrorIfChanged();
         $this->workflow ??= new Workflow();
         $repository = new WorkflowRepository($this->pdo);
@@ -842,13 +845,17 @@ final class PlacementService
             $returnToControl = $versionedTransition !== null
                 ? in_array('presence.return_to_control', $effects, true)
                 : $toStatus === 'sent';
-            $update = $this->pdo->prepare(
-                'UPDATE applications SET current_status = ?, updated_at = ? WHERE id = ? AND current_status = ?'
+            $this->statusWriter->changeStatus(
+                $applicationId,
+                (string) $fromStatus,
+                (int) $app['aggregate_version'],
+                $toStatus,
+                $actorId,
+                $actorRole,
+                $note,
+                $now,
+                ['transition_key' => (string) ($versionedTransition['key'] ?? '')],
             );
-            $update->execute([$toStatus, $now, $applicationId, $fromStatus]);
-            if ($update->rowCount() !== 1) {
-                throw new UserVisibleException('PLACEMENT_BOARD_STALE', 'This board card is stale. Reload the board before moving it.');
-            }
 
             if ($acceptOffer) {
                 $this->acceptCandidateOffer($app, $now);
@@ -865,11 +872,6 @@ final class PlacementService
                 }
             }
 
-            $event = $this->pdo->prepare(
-                'INSERT INTO events (application_id, candidate_id, company_id, from_status, to_status, actor_user_id, actor_role, note, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
-            );
-            $event->execute([$applicationId, (int) $app['candidate_id'], (int) $app['company_id'], $fromStatus, $toStatus, $actorId, $actorRole, $note, $now]);
             if ($versionedTransition !== null) {
                 $this->workflowEngine?->recordAppliedTransition(
                     $applicationId,
@@ -881,22 +883,6 @@ final class PlacementService
                     ['source' => 'placement.transition']
                 );
             }
-            cpe_context()->events()->dispatch(new DomainEvent(
-                'placement.application.transitioned',
-                'placement_application',
-                (string) ($app['public_id'] ?? '') ?: 'application_' . $applicationId,
-                'placement',
-                [
-                    'application_id' => $applicationId,
-                    'candidate_public_id' => $this->publicIdFor('candidates', (int) $app['candidate_id']),
-                    'company_public_id' => $this->publicIdFor('companies', (int) $app['company_id']),
-                    'from_state' => (string) $fromStatus,
-                    'to_state' => $toStatus,
-                    'transition_key' => (string) ($versionedTransition['key'] ?? ''),
-                    'actor_role' => $actorRole,
-                ],
-                $now
-            ));
             if ($acceptOffer) {
                 cpe_context()->events()->dispatch(new DomainEvent(
                     'placement.offer.accepted',
@@ -990,23 +976,29 @@ final class PlacementService
         }
 
             $now = cpe_now();
-            $update = $this->pdo->prepare(
-                'UPDATE applications SET current_status = ?, waitlist_rank = NULL, updated_at = ? WHERE id = ? AND current_status = ?'
+            $eventNote = 'Returned to ' . $returnState . ': ' . $reason . (trim($note) !== '' ? '. ' . trim($note) : '');
+            $changed = $this->statusWriter->changeStatus(
+                $applicationId,
+                $fromStatus,
+                (int) $app['aggregate_version'],
+                $returnState,
+                $actorId,
+                $actorRole,
+                $eventNote,
+                $now,
+                ['source' => 'placement.return_to_idle'],
             );
-            $update->execute([$returnState, $now, $applicationId, $fromStatus]);
-            if ($update->rowCount() !== 1) {
-                throw new UserVisibleException('PLACEMENT_BOARD_STALE', 'This board card is stale. Reload the board before moving it.');
+            $clearWaitlist = $this->pdo->prepare(
+                'UPDATE applications SET waitlist_rank = NULL WHERE id = ? AND aggregate_version = ?',
+            );
+            $clearWaitlist->execute([$applicationId, (int) $changed['aggregate_version']]);
+            if ($clearWaitlist->rowCount() !== 1) {
+                throw new RuntimeException('Application changed while return-to-idle metadata was applied.');
             }
             $this->updateCandidateLocation($app, 'CP', $now);
             $slots = $this->pdo->prepare("UPDATE application_slot_assignments SET assignment_status = ?, updated_at = ? WHERE application_id = ? AND assignment_status != 'cancelled'");
             $slots->execute(['cancelled', $now, $applicationId]);
 
-            $eventNote = 'Returned to ' . $returnState . ': ' . $reason . (trim($note) !== '' ? '. ' . trim($note) : '');
-            $event = $this->pdo->prepare(
-                'INSERT INTO events (application_id, candidate_id, company_id, from_status, to_status, actor_user_id, actor_role, note, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
-            );
-            $event->execute([$applicationId, (int) $app['candidate_id'], (int) $app['company_id'], $fromStatus, $returnState, $actorId, $actorRole, $eventNote, $now]);
             if ($correctionTransition !== null) {
                 $this->workflowEngine?->recordAppliedTransition(
                     $applicationId,
@@ -3062,23 +3054,24 @@ final class PlacementService
         if (!isset($this->workflow->statuses()[$status])) {
             throw new UserVisibleException('PLACEMENT_STATUS_INVALID', 'Unknown workflow status.');
         }
-        $now = cpe_now();
-        $stmt = $this->pdo->prepare(
-            'INSERT INTO applications (candidate_id, company_id, current_status, waitlist_rank, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?)
-             ON CONFLICT(candidate_id, company_id) DO UPDATE SET current_status = excluded.current_status, waitlist_rank = excluded.waitlist_rank, updated_at = excluded.updated_at'
-        );
-        $stmt->execute([$candidateId, $companyId, $status, $waitlistRank, $now, $now]);
-        Auth::audit($actorId, 'application.save', 'application', null, "candidate {$candidateId} company {$companyId} status {$status}");
-        $this->synchronizeDurableDomain();
-        if ($this->workflowEngine !== null) {
-            $idStmt = $this->pdo->prepare('SELECT id FROM applications WHERE candidate_id = ? AND company_id = ?');
-            $idStmt->execute([$candidateId, $companyId]);
-            $applicationId = (int) $idStmt->fetchColumn();
-            if ($applicationId > 0) {
-                $this->workflowEngine->ensureApplication($applicationId);
+        $this->transactional(function () use ($candidateId, $companyId, $status, $waitlistRank, $actorId): void {
+            $now = cpe_now();
+            $result = $this->statusWriter->saveStatus(
+                $candidateId,
+                $companyId,
+                $status,
+                $waitlistRank,
+                $actorId,
+                'operator',
+                'Application status changed through record maintenance.',
+                $now,
+            );
+            Auth::audit($actorId, 'application.save', 'application', (int) $result['id'], "candidate {$candidateId} company {$companyId} status {$status}");
+            $this->synchronizeDurableDomain();
+            if ($this->workflowEngine !== null) {
+                $this->workflowEngine->ensureApplication((int) $result['id']);
             }
-        }
+        });
     }
 
     public function publicPlacements(): array
@@ -4054,7 +4047,7 @@ final class PlacementService
         }
         $placeholders = implode(',', array_fill(0, count($activeStatuses), '?'));
         $stmt = $this->pdo->prepare(
-            "SELECT id, candidate_id, company_id, current_status
+            "SELECT id, candidate_id, company_id, current_status, aggregate_version
              FROM applications
              WHERE candidate_id = ?
                AND id != ?
@@ -4066,13 +4059,6 @@ final class PlacementService
             return;
         }
 
-        $update = $this->pdo->prepare(
-            'UPDATE applications SET current_status = ?, updated_at = ? WHERE id = ? AND current_status = ?'
-        );
-        $event = $this->pdo->prepare(
-            'INSERT INTO events (application_id, candidate_id, company_id, from_status, to_status, actor_user_id, actor_role, note, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
-        );
         $note = 'Auto-cleared after placement at ' . (string) $placedApp['company_code'] . '.';
         foreach ($rows as $row) {
             $fromStatus = (string) $row['current_status'];
@@ -4082,21 +4068,17 @@ final class PlacementService
                 'idle',
                 true
             );
-            $update->execute(['idle', $now, (int) $row['id'], $fromStatus]);
-            if ($update->rowCount() !== 1) {
-                throw new UserVisibleException('PLACEMENT_BOARD_STALE', 'A competing application changed while the placement was being recorded. Reload the board and retry.');
-            }
-            $event->execute([
+            $this->statusWriter->changeStatus(
                 (int) $row['id'],
-                (int) $row['candidate_id'],
-                (int) $row['company_id'],
                 $fromStatus,
+                (int) $row['aggregate_version'],
                 'idle',
                 $actorId,
                 $actorRole,
                 $note,
                 $now,
-            ]);
+                ['source' => 'placement.clear_competing_applications'],
+            );
             if ($correctionTransition !== null) {
                 $this->workflowEngine?->recordAppliedTransition(
                     (int) $row['id'],
@@ -4115,7 +4097,8 @@ final class PlacementService
     private function handoffToNextScheduledApplication(array $sentApp, int $applicationId, ?int $actorId, string $actorRole, string $now): void
     {
         $stmt = $this->pdo->prepare(
-            "SELECT a.id, a.candidate_id, a.company_id, a.current_status, co.code AS company_code
+            "SELECT a.id, a.candidate_id, a.company_id, a.current_status, a.aggregate_version,
+                    co.code AS company_code
              FROM applications a
              JOIN companies co ON co.id = a.company_id
              WHERE a.candidate_id = ?
@@ -4143,33 +4126,31 @@ final class PlacementService
             'scheduled',
             'intransit'
         );
-        $update = $this->pdo->prepare(
-            "UPDATE applications SET current_status = ?, previous_company_id = ?, updated_at = ? WHERE id = ? AND current_status = 'scheduled'"
+        $handoffNote = 'Auto-started after send-away from ' . (string) $sentApp['company_code'] . '.';
+        $changed = $this->statusWriter->changeStatus(
+            (int) $next['id'],
+            'scheduled',
+            (int) $next['aggregate_version'],
+            'intransit',
+            $actorId,
+            $actorRole,
+            $handoffNote,
+            $now,
+            ['source' => 'placement.start_next_scheduled'],
         );
-        $update->execute(['intransit', (int) $sentApp['company_id'], $now, (int) $next['id']]);
+        $update = $this->pdo->prepare(
+            "UPDATE applications SET previous_company_id = ?
+             WHERE id = ? AND current_status = 'intransit' AND aggregate_version = ?",
+        );
+        $update->execute([(int) $sentApp['company_id'], (int) $next['id'], (int) $changed['aggregate_version']]);
         if ($update->rowCount() !== 1) {
-            throw new UserVisibleException('PLACEMENT_BOARD_STALE', 'The next scheduled application changed during handoff. Reload the board and retry.');
+            throw new RuntimeException('The next application changed while handoff metadata was applied.');
         }
 
         $candidate = $sentApp;
         $candidate['current_location'] = 'CP';
         $this->updateCandidateLocation($candidate, (string) $next['company_code'], $now);
 
-        $event = $this->pdo->prepare(
-            'INSERT INTO events (application_id, candidate_id, company_id, from_status, to_status, actor_user_id, actor_role, note, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
-        );
-        $event->execute([
-            (int) $next['id'],
-            (int) $sentApp['candidate_id'],
-            (int) $next['company_id'],
-            'scheduled',
-            'intransit',
-            $actorId,
-            $actorRole,
-            'Auto-started after send-away from ' . (string) $sentApp['company_code'] . '.',
-            $now,
-        ]);
         if ($handoffTransition !== null) {
             $this->workflowEngine?->recordAppliedTransition(
                 (int) $next['id'],
@@ -4177,7 +4158,7 @@ final class PlacementService
                 $actorId,
                 $actorRole,
                 '',
-                'Auto-started after send-away from ' . (string) $sentApp['company_code'] . '.',
+                $handoffNote,
                 ['source' => 'placement.start_next_scheduled']
             );
         }

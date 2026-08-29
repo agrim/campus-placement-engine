@@ -13,6 +13,7 @@ php tests/database_connection_cleanup_contract.php
 php tests/incident_boundary_contract.php
 php tests/legacy_backup_compatibility_contract.php
 php tests/worker_delivery_contract.php
+php tests/public_event_contract.php
 php tests/postgres_connection_policy_contract.php
 php tests/postgres_tls_contract.php
 php tests/database_contract.php
@@ -43,6 +44,17 @@ It runs two independent workers against one queue, verifies token-fenced
 acknowledgement and failure mutations, stale-claim recovery, stable idempotency
 keys, dead-letter thresholds, dry-run immutability, and destination concealment.
 CI runs it against both SQLite and PostgreSQL.
+`tests/public_event_contract.php` is the portable governed-integration gate. It
+runs against SQLite and a fresh dedicated PostgreSQL database, proves the public
+catalog/schema and exact envelope, all application status writers, aggregate
+CAS/rollback behavior, private-row exclusion, per-aggregate ordering, retry
+identity, audited exact-event dead-letter replay and ordered resume, portability
+behavior, and frozen-consumer tolerance. It invokes
+`tests/validate_public_event_schemas.py`, which uses the pinned CI-only
+dependencies in `tests/requirements-public-event-schema.txt` to register both
+URN resources and validate with a real Draft 2020-12 implementation. Missing
+tooling is a hard failure; the runtime and release application have no schema
+validator dependency.
 `tests/postgres_connection_policy_contract.php` is a no-network parser and
 policy gate. It freezes the Cloud-compatible constructor and raw `fromUrl()`
 signatures while proving strict runtime TLS, pool-mode, timeout, redaction,

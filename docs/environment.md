@@ -139,8 +139,8 @@ Configure at most one sink:
 
 | Variable | Purpose |
 |---|---|
-| `CPE_DOMAIN_EVENT_OUTBOX_PATH` | Local JSONL event sink. |
-| `CPE_DOMAIN_EVENT_WEBHOOK_URL` | HTTPS event webhook. |
+| `CPE_DOMAIN_EVENT_OUTBOX_PATH` | Local JSONL sink for explicit governed public events. |
+| `CPE_DOMAIN_EVENT_WEBHOOK_URL` | HTTPS sink for explicit governed public events. |
 | `CPE_DOMAIN_EVENT_WEBHOOK_SECRET` | Optional 32+ character HMAC signing secret. |
 | `CPE_DOMAIN_EVENT_ALLOW_HTTP` | Allows HTTP only for localhost webhook testing. |
 | `CPE_OUTBOUND_ALLOW_PRIVATE_NETWORK` | Allows reviewed notification/domain-event delivery to private networks. Off by default; expands the SSRF trust boundary. |
@@ -151,9 +151,13 @@ Configure at most one sink:
 
 Run `php placement work-outbox` from cron or the hosted scheduler. The command
 processes durable module declaration fanout, internal observer deliveries, and
-the existing external event outbox independently. With no external sink, `delivered_to=internal` means only
+the external public-event projection independently. Private `DomainEvent`
+payloads and legacy/pre-projection rows are never sent externally. With no
+external sink, `delivered_to=internal` means only
 that no out-of-process destination was configured; internal observer completion
-is tracked per stable subscription in its own delivery state.
+is tracked per stable subscription in its own delivery state. Delivery is at
+least once and ordered only within one application aggregate; see
+`integrations/events.md` for deduplication and restore limits.
 
 ## Managed-hosting adapter
 

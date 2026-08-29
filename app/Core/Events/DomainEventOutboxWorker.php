@@ -145,10 +145,23 @@ final class DomainEventOutboxWorker
             $started = true;
             $locking = $driver === 'pgsql' ? ' FOR UPDATE SKIP LOCKED' : '';
             $select = $this->pdo->prepare(
-                "SELECT id FROM domain_event_outbox
-                 WHERE processed_at IS NULL AND failed_at IS NULL AND available_at <= ?
-                   AND (locked_at IS NULL OR locked_at < ?)
-                 ORDER BY id LIMIT {$limit}{$locking}"
+                "SELECT candidate.id
+                 FROM domain_event_outbox candidate
+                 WHERE candidate.public_event_type IS NOT NULL
+                   AND candidate.processed_at IS NULL
+                   AND candidate.failed_at IS NULL
+                   AND candidate.available_at <= ?
+                   AND (candidate.locked_at IS NULL OR candidate.locked_at < ?)
+                   AND NOT EXISTS (
+                       SELECT 1
+                       FROM domain_event_outbox earlier
+                       WHERE earlier.public_event_type IS NOT NULL
+                         AND earlier.public_aggregate_type = candidate.public_aggregate_type
+                         AND earlier.public_aggregate_id = candidate.public_aggregate_id
+                         AND earlier.public_aggregate_version < candidate.public_aggregate_version
+                         AND earlier.processed_at IS NULL
+                   )
+                 ORDER BY candidate.id LIMIT {$limit}{$locking}"
             );
             $select->execute([$now, $stale]);
             $ids = array_map('intval', $select->fetchAll(PDO::FETCH_COLUMN));
@@ -157,7 +170,8 @@ final class DomainEventOutboxWorker
                 $update = $this->pdo->prepare(
                     "UPDATE domain_event_outbox
                      SET locked_at = ?, lock_token = ?, attempts = attempts + 1
-                     WHERE id IN ({$placeholders}) AND processed_at IS NULL AND failed_at IS NULL
+                     WHERE id IN ({$placeholders}) AND public_event_type IS NOT NULL
+                       AND processed_at IS NULL AND failed_at IS NULL
                        AND (locked_at IS NULL OR locked_at < ?)"
                 );
                 $update->execute([$now, $token, ...$ids, $stale]);
@@ -185,7 +199,15 @@ final class DomainEventOutboxWorker
         if ($ids === []) {
             return [];
         }
-        $claimed = $this->pdo->prepare('SELECT * FROM domain_event_outbox WHERE lock_token = ? ORDER BY id');
+        $claimed = $this->pdo->prepare(
+            'SELECT id, public_id, public_event_type, public_schema_version, occurred_at,
+                    public_instance_id, public_aggregate_type, public_aggregate_id,
+                    public_aggregate_version, public_payload_json, public_correlation_id,
+                    attempts, lock_token
+             FROM domain_event_outbox
+             WHERE lock_token = ? AND public_event_type IS NOT NULL
+             ORDER BY id',
+        );
         $claimed->execute([$token]);
         return $claimed->fetchAll();
     }
@@ -197,40 +219,21 @@ final class DomainEventOutboxWorker
         if ($path !== '' && $url !== '') {
             throw new RuntimeException('Configure one domain-event sink, not both file and webhook delivery.');
         }
-        $envelope = $this->envelope($row);
+        $envelope = PublicEventEnvelope::fromOutboxRow($row);
         if ($path !== '') {
             $directory = dirname($path);
             if (!is_dir($directory) && (file_exists($directory) || !mkdir($directory, 0775, true))) {
                 throw new RuntimeException('Could not create the domain-event outbox directory.');
             }
-            if (file_put_contents($path, json_encode($envelope, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n", FILE_APPEND | LOCK_EX) === false) {
+            if (file_put_contents($path, $envelope->toJson() . "\n", FILE_APPEND | LOCK_EX) === false) {
                 throw new RuntimeException('Could not append to the domain-event outbox file.');
             }
             return 'file';
         }
         if ($url !== '') {
-            return $this->deliverWebhook($url, $envelope);
+            return $this->deliverWebhook($url, $envelope->toArray());
         }
         return 'internal';
-    }
-
-    private function envelope(array $row): array
-    {
-        try {
-            $payload = json_decode((string) $row['payload_json'], true, 512, JSON_THROW_ON_ERROR);
-        } catch (\JsonException $e) {
-            throw new RuntimeException('Domain-event payload is invalid JSON.', 0, $e);
-        }
-        return [
-            'schema' => 'career_services.domain_event.v1',
-            'id' => (string) $row['public_id'],
-            'idempotency_key' => (string) $row['public_id'],
-            'name' => (string) $row['event_name'],
-            'aggregate' => ['type' => (string) $row['aggregate_type'], 'id' => (string) $row['aggregate_public_id']],
-            'module' => (string) $row['module_key'],
-            'occurred_at' => (string) $row['occurred_at'],
-            'payload' => is_array($payload) ? $payload : [],
-        ];
     }
 
     private function deliverWebhook(string $url, array $envelope): string
@@ -239,8 +242,8 @@ final class DomainEventOutboxWorker
         $headers = [
             'Content-Type: application/json',
             'User-Agent: CareerServicesPortal/' . (string) cpe_config('app.version', '0.0.0'),
-            'X-CPE-Event-ID: ' . $envelope['id'],
-            'X-CPE-Idempotency-Key: ' . $envelope['idempotency_key'],
+            'X-CPE-Event-ID: ' . $envelope['event_id'],
+            'X-CPE-Idempotency-Key: ' . $envelope['event_id'],
         ];
         $secret = (string) (getenv('CPE_DOMAIN_EVENT_WEBHOOK_SECRET') ?: '');
         if ($secret !== '') {

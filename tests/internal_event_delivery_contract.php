@@ -31,10 +31,13 @@ require $projectRoot . '/app/bootstrap.php';
 
 use App\Core\Events\DomainEvent;
 use App\Core\Events\EventDispatcher;
+use App\Core\Events\InternalEventDeliveryReplayService;
 use App\Core\Events\InternalEventDeliveryWorker;
+use App\Core\Events\InternalEventFanoutReplayService;
 use App\Core\Events\InternalEventFanoutWorker;
 use App\Core\Events\InternalEventSubscriberRegistry;
 use App\Core\Events\InternalEventSubscription;
+use App\Core\Http\UserVisibleException;
 use App\Core\Modules\Module;
 use App\Core\Modules\ModuleManager;
 use App\Core\Modules\ModuleManifest;
@@ -63,6 +66,16 @@ function observer_same(mixed $expected, mixed $actual, string $message): void
             $message . ' (expected ' . var_export($expected, true) . ', got ' . var_export($actual, true) . ')',
         );
     }
+}
+
+function observer_rejects(callable $operation, string $message): Throwable
+{
+    try {
+        $operation();
+    } catch (Throwable $failure) {
+        return $failure;
+    }
+    throw new RuntimeException($message);
 }
 
 function observer_event(string $name, string $aggregatePublicId, array $payload = ['contract' => true]): DomainEvent
@@ -242,6 +255,10 @@ try {
 
     $pdo = Database::connection();
     $driver = (string) $pdo->getAttribute(PDO::ATTR_DRIVER_NAME);
+    $restrictedActorId = (int) $pdo->query(
+        "SELECT id FROM users WHERE active = 1 AND role <> 'admin' ORDER BY id LIMIT 1",
+    )->fetchColumn();
+    observer_true($restrictedActorId > 0, 'Internal replay fixture has no real active restricted user.');
     $staleContext = cpe_context();
     $outboxBeforeVersionDrift = (int) $pdo->query('SELECT COUNT(*) FROM domain_event_outbox')->fetchColumn();
     $fanoutBeforeVersionDrift = (int) $pdo->query('SELECT COUNT(*) FROM domain_event_module_fanout')->fetchColumn();
@@ -513,6 +530,47 @@ try {
     observer_true(!str_contains((string) $poisonRow['last_error'], $poisonSentinel), 'Dead letter exposed callback details.');
 
     $poisonEnabled = false;
+    $restrictedDeliveryReplay = observer_rejects(
+        static fn (): array => (new InternalEventDeliveryReplayService($pdo))->replay(
+            $publicId,
+            'internal.contract.poison.v1',
+            $restrictedActorId,
+        ),
+        'Active restricted user was accepted for internal delivery replay.',
+    );
+    observer_true(
+        $restrictedDeliveryReplay instanceof UserVisibleException
+            && $restrictedDeliveryReplay->publicCode() === 'INTERNAL_EVENT_REPLAY_ACTOR_INVALID'
+            && $restrictedDeliveryReplay->publicMessage() === 'An active administrator user ID is required.',
+        'Internal delivery replay did not use the stable redacted administrator failure.',
+    );
+    [$restrictedDeliveryExit, $restrictedDeliveryOutput, $restrictedDeliveryError] = observer_cli($projectRoot, [
+        'replay-internal-delivery',
+        '--event=' . $publicId,
+        '--subscription=internal.contract.poison.v1',
+        '--actor-user-id=' . $restrictedActorId,
+    ]);
+    observer_same(1, $restrictedDeliveryExit, 'Restricted internal delivery replay CLI should fail.');
+    observer_same('', $restrictedDeliveryOutput, 'Restricted internal delivery replay CLI reported a transition.');
+    observer_same(
+        'Error: An active administrator user ID is required.' . "\n",
+        $restrictedDeliveryError,
+        'Restricted internal delivery replay CLI did not use the redacted actor failure.',
+    );
+    [$missingDeliveryExit, $missingDeliveryOutput, $missingDeliveryError] = observer_cli($projectRoot, [
+        'replay-internal-delivery',
+        '--event=' . $publicId,
+        '--subscription=internal.contract.poison.v1',
+    ]);
+    observer_same(1, $missingDeliveryExit, 'Missing internal delivery replay actor should fail.');
+    observer_same('', $missingDeliveryOutput, 'Missing internal delivery replay actor reported a transition.');
+    observer_same(
+        'Error: An active administrator user ID is required.' . "\n",
+        $missingDeliveryError,
+        'Missing internal delivery replay actor did not use the redacted failure.',
+    );
+    observer_same('dead_lettered', (string) observer_delivery($pdo, 'internal.contract.poison.v1')['status'], 'Denied delivery replay changed queue state.');
+    observer_same(0, (int) $pdo->query("SELECT COUNT(*) FROM audit_logs WHERE action = 'internal_event_delivery.replay'")->fetchColumn(), 'Denied delivery replay wrote false audit attribution.');
     [$replayExit, $replayOutput, $replayError] = observer_cli($projectRoot, [
         'replay-internal-delivery',
         '--event=' . $publicId,
@@ -535,9 +593,12 @@ try {
         'Idempotent replay wrote duplicate audit entries.',
     );
     $deliveryAudit = $pdo->query(
-        "SELECT detail FROM audit_logs WHERE action = 'internal_event_delivery.replay' ORDER BY id DESC LIMIT 1",
-    )->fetchColumn();
-    observer_same('Dead-lettered internal observer delivery replayed.', $deliveryAudit, 'Replay audit detail was not fixed and payload-free.');
+        "SELECT actor_user_id, detail FROM audit_logs
+         WHERE action = 'internal_event_delivery.replay' ORDER BY id DESC LIMIT 1",
+    )->fetch(PDO::FETCH_ASSOC);
+    observer_true(is_array($deliveryAudit), 'Delivery replay audit is missing.');
+    observer_same($adminId, (int) $deliveryAudit['actor_user_id'], 'Delivery replay audit did not attribute the administrator.');
+    observer_same('Dead-lettered internal observer delivery replayed.', $deliveryAudit['detail'], 'Replay audit detail was not fixed and payload-free.');
     observer_same(1, (new InternalEventDeliveryWorker($pdo, $registry))->work(10)['delivered'], 'Replayed delivery did not return to normal leasing.');
 
     $beforeOutbox = (int) $pdo->query('SELECT COUNT(*) FROM domain_event_outbox')->fetchColumn();
@@ -646,6 +707,43 @@ try {
     observer_true(!str_contains(json_encode($declarationResult, JSON_THROW_ON_ERROR), $declarationSentinel), 'Declaration worker result exposed failure detail.');
 
     $declarationBroken = false;
+    $restrictedFanoutReplay = observer_rejects(
+        static fn (): array => (new InternalEventFanoutReplayService($pdo))->replay(
+            $declarationPublicId,
+            'poisonmod',
+            $restrictedActorId,
+        ),
+        'Active restricted user was accepted for internal fanout replay.',
+    );
+    observer_true(
+        $restrictedFanoutReplay instanceof UserVisibleException
+            && $restrictedFanoutReplay->publicCode() === 'INTERNAL_EVENT_FANOUT_REPLAY_ACTOR_INVALID'
+            && $restrictedFanoutReplay->publicMessage() === 'An active administrator user ID is required.',
+        'Internal fanout replay did not use the stable redacted administrator failure.',
+    );
+    [$restrictedFanoutExit, $restrictedFanoutOutput, $restrictedFanoutError] = observer_cli($projectRoot, [
+        'replay-internal-fanout',
+        '--event=' . $declarationPublicId,
+        '--module=poisonmod',
+        '--actor-user-id=' . $restrictedActorId,
+    ]);
+    observer_same(1, $restrictedFanoutExit, 'Restricted internal fanout replay CLI should fail.');
+    observer_same('', $restrictedFanoutOutput, 'Restricted internal fanout replay CLI reported a transition.');
+    observer_same(
+        'Error: An active administrator user ID is required.' . "\n",
+        $restrictedFanoutError,
+        'Restricted internal fanout replay CLI did not use the redacted actor failure.',
+    );
+    observer_same(
+        'dead_lettered',
+        (string) $pdo->query(
+            "SELECT status FROM domain_event_module_fanout
+             WHERE event_id = (SELECT id FROM domain_event_outbox WHERE public_id = " . $pdo->quote($declarationPublicId) . ")
+               AND module_key = 'poisonmod'",
+        )->fetchColumn(),
+        'Denied fanout replay changed queue state.',
+    );
+    observer_same(0, (int) $pdo->query("SELECT COUNT(*) FROM audit_logs WHERE action = 'internal_event_fanout.replay'")->fetchColumn(), 'Denied fanout replay wrote false audit attribution.');
     [$fanoutReplayExit, $fanoutReplayOutput, $fanoutReplayError] = observer_cli($projectRoot, [
         'replay-internal-fanout',
         '--event=' . $declarationPublicId,
@@ -663,6 +761,13 @@ try {
     observer_same(0, $fanoutRepeatExit, 'Repeated fanout replay was not idempotent: ' . $fanoutRepeatError);
     observer_true(str_contains($fanoutRepeatOutput, 'already-replayed'), 'Repeated fanout replay did not report idempotency.');
     observer_same(1, (int) $pdo->query("SELECT COUNT(*) FROM audit_logs WHERE action = 'internal_event_fanout.replay'")->fetchColumn(), 'Idempotent fanout replay wrote duplicate audit entries.');
+    $fanoutAudit = $pdo->query(
+        "SELECT actor_user_id, detail FROM audit_logs
+         WHERE action = 'internal_event_fanout.replay' ORDER BY id DESC LIMIT 1",
+    )->fetch(PDO::FETCH_ASSOC);
+    observer_true(is_array($fanoutAudit), 'Fanout replay audit is missing.');
+    observer_same($adminId, (int) $fanoutAudit['actor_user_id'], 'Fanout replay audit did not attribute the administrator.');
+    observer_same('Dead-lettered internal observer fanout replayed.', $fanoutAudit['detail'], 'Fanout replay audit detail was not fixed and payload-free.');
     $fanoutReplay = (new InternalEventFanoutWorker($pdo, null, $declarationResolver))->work(10);
     observer_same(1, $fanoutReplay['expanded'], 'Corrected declaration did not recover through normal fanout leasing.');
     observer_same(1, $fanoutReplay['deliveries_created'], 'Corrected declaration replay did not create its stable delivery.');
@@ -876,14 +981,18 @@ try {
     putenv('CPE_DOMAIN_EVENT_OUTBOX_PATH=' . $outboxPath);
     [$outboxExit, $outboxOutput, $outboxError] = observer_cli($projectRoot, ['work-outbox', '--limit=100']);
     observer_same(0, $outboxExit, 'Paired outbox CLI failed: ' . $outboxError);
-    observer_true(str_contains($outboxOutput, 'Domain events claimed: 1'), 'CLI changed external outbox processing.');
+    observer_true(str_contains($outboxOutput, 'Domain events claimed: 0'), 'CLI exposed a private internal event to external delivery.');
     observer_true(str_contains($outboxOutput, 'Internal fanout expanded: 1'), 'CLI did not run post-commit internal fanout.');
     observer_true(str_contains($outboxOutput, 'Internal observers delivered: 1'), 'CLI did not deliver expanded internal observer work.');
-    $externalLines = file($outboxPath, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [];
-    observer_same(1, count($externalLines), 'CLI changed external file sink cardinality.');
-    $envelope = json_decode($externalLines[0], true, 512, JSON_THROW_ON_ERROR);
-    observer_same('career_services.domain_event.v1', $envelope['schema'] ?? null, 'External sink contract changed.');
-    observer_same($cliPublicId, $envelope['id'] ?? null, 'External sink received the wrong event.');
+    $externalLines = is_file($outboxPath)
+        ? (file($outboxPath, FILE_IGNORE_NEW_LINES | FILE_SKIP_EMPTY_LINES) ?: [])
+        : [];
+    observer_same(0, count($externalLines), 'Private internal event leaked to the external file sink.');
+    observer_same(
+        null,
+        $pdo->query('SELECT processed_at FROM domain_event_outbox WHERE public_id = ' . $pdo->quote($cliPublicId))->fetchColumn() ?: null,
+        'External worker acknowledged a private internal event.',
+    );
     observer_same(2, (int) $pdo->query('SELECT COUNT(*) FROM advising_tasks')->fetchColumn(), 'CLI did not execute the internal Advising observer.');
 
     $structuredLog = is_file($structuredLogPath) ? (string) file_get_contents($structuredLogPath) : '';

@@ -13,9 +13,9 @@ through this deliberately small contract.
 - `App\Hosted\Tenant\TenantResolver`, `ResolvedTenant`, `HostedContext`, and
   `HostedBootstrap` as the tenant-resolution portion of the versioned
   integration seam.
-- `App\Core\Modules\ModuleLifecycleService` and the release's
-  `config/modules.php` capability manifest as the module-lifecycle portion of
-  that seam.
+- The release's internal `ModuleLifecycleService` and `config/modules.php`
+  manifest as implementation used by the pinned management adapter, not as an
+  institution-facing public PHP API.
 - `App\Install\Installer::installHosted()` as the sole atomic first-install
   identity-binding operation.
 - `App\Core\Persistence\DatabaseOwnership` as database-role contract version 1.
@@ -205,8 +205,10 @@ path.
 
 ## Module lifecycle
 
-`ModuleLifecycleService::CONTRACT_VERSION` versions these public, idempotent
-Engine operations. Version 1 includes:
+`ModuleLifecycleService::CONTRACT_VERSION` versions these release-pinned,
+idempotent adapter operations. They are private Engine PHP APIs, not part of the
+public integration declaration whose `engine_api` array is empty. Version 1
+includes:
 
 - `ModuleLifecycleService::modules()` returns the release capability manifest
   together with installed, configured, entitled, and effective state.
@@ -222,9 +224,9 @@ manifest dependency order, and record desired state separately from observed
 convergence. It may not edit module tables directly or carry a private copy of
 module behavior.
 
-Contract consumers must pin an immutable Engine release and verify the contract
-version, service class, public method signatures, and capability manifest before
-provisioning or reconciliation. Additive modules may appear in later compatible
-releases; a consumer must fail closed on module keys unknown to its pinned
-release. Breaking signature or lifecycle-semantics changes require a managed
-hosting contract version increment.
+The private management adapter must pin an immutable Engine release and verify
+the contract version, service class, method signatures, and capability manifest
+before provisioning or reconciliation. Additive modules may appear in later
+compatible releases; the adapter must fail closed on module keys unknown to its
+pinned release. This operational seam does not grant third-party connector
+access and is not an institution-facing module ABI.

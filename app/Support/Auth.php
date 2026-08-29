@@ -41,6 +41,7 @@ final class Auth
         'preference.create' => 'Preference request created.',
         'preference.resolve' => 'Preference request resolved.',
         'privacy.person_erased' => 'Portal privacy erasure completed.',
+        'public_event.dead_letter_replay' => 'Dead-lettered public event requeued for delivery.',
         'round_panelist.create' => 'Round panelist created.',
         'round_panelist.update' => 'Round panelist updated.',
         'round_schedule.create' => 'Round schedule created.',
@@ -65,7 +66,7 @@ final class Auth
         'company_round', 'import', 'notification', 'person', 'preference_request', 'round_panelist',
         'round_schedule', 'slot_assignment', 'system', 'user', 'wanted_alert', 'workflow_version',
         'candidate_unavailability',
-        'internal_event_delivery', 'internal_event_fanout',
+        'internal_event_delivery', 'internal_event_fanout', 'public_event',
     ];
 
     private const AUDIT_SUBJECT_ALIASES = [

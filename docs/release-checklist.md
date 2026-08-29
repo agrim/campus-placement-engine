@@ -56,6 +56,11 @@ Use this before a public alpha tag or downloadable archive.
   PostgreSQL 17 release job must run it against a fresh dedicated database.
 - Run `php tests/database_contract.php` against SQLite and a fresh PostgreSQL 17
   database.
+- Run `php tests/public_event_contract.php` against SQLite and a fresh dedicated
+  PostgreSQL 17 database. Confirm database guards, all seven application-status
+  mutation paths, exact/private-safe envelopes, retry and aggregate ordering,
+  portability continuity limits, strict producer schemas, and tolerant frozen
+  consumer behavior.
 - Run `php tests/managed_hosting_contract.php` and confirm the external resolver
   seam, tenant database identity, module entitlements, and session binding fail
   closed as documented.
@@ -66,6 +71,9 @@ Use this before a public alpha tag or downloadable archive.
 - Confirm the ZIP and tarball each have a `.sha256` sidecar, the combined
   `SHA256SUMS` contains both archives, and run `php placement verify-package`
   against both formats.
+- Confirm both Git-free unpacked archives contain `contracts/`, pass JSON
+  validation and `publication-check`, and can run
+  `tests/public_event_contract.php` without relying on repository metadata.
 - Run CLI first-run install against a throwaway database with
   `CPE_ADMIN_PASSWORD=... php placement install ...`.
 - Run `php placement upgrade` against a throwaway installed database and confirm
@@ -119,8 +127,9 @@ Use this before a public alpha tag or downloadable archive.
   guarantee.
 - Run `php placement work-outbox` with a local JSONL sink; confirm internal
   fanout, observer, and external sink counts are all reported, and that a second
-  run does not redeliver acknowledged work. Exercise both audited replay commands
-  against isolated dead-letter fixtures.
+  run does not redeliver acknowledged work. Exercise all three audited replay
+  commands against isolated dead-letter fixtures, including public
+  deadletter-to-ordered-resume behavior.
 - Follow `docs/browser-qa.md` for dense-board desktop and phone-width checks.
 - Confirm the GitHub Actions CI workflow is green.
 - For PostgreSQL, run the fresh-database backup/restore contract, then separately
@@ -152,6 +161,10 @@ Use this before a public alpha tag or downloadable archive.
   allows it.
 - Confirm portability excludes control-plane metadata, sessions, password
   hashes, SSO secrets, notification credentials, and event delivery state.
+- Confirm portability exports positive application aggregate versions, accepts
+  older bundles without that field as version 1, and restores without synthetic
+  events. Record that restore breaks stream continuity and requires connector
+  resynchronization.
 - Round-trip a custom published workflow and every installed module into a clean
   target installation.
 
@@ -174,6 +187,10 @@ Use this before a public alpha tag or downloadable archive.
 - Implementation status lists known gaps honestly.
 - Managed-hosting contract, disaster recovery, security operations, module
   development, and testing runbooks are current.
+- Public event, compatibility, and integration threat-model documents match the
+  frozen contract, strict producer schemas, and consumer fixtures. Run the
+  pinned Draft 2020-12 validator with both schema URNs registered; do not treat
+  the dependency-light PHP artifact checks as standards-resolution proof.
 
 ## Operational Smoke
 

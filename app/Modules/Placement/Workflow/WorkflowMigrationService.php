@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Modules\Placement\Workflow;
 
+use App\Core\Persistence\WriteTransaction;
+use App\Modules\Placement\Application\ApplicationStatusWriter;
 use App\Support\Auth;
 use PDO;
 use RuntimeException;
@@ -58,13 +60,20 @@ final class WorkflowMigrationService
         }
         $target = $this->target($targetVersionId);
         $rows = $this->applicationsOutsideVersion($targetVersionId);
-        $ownsTransaction = !$this->pdo->inTransaction();
-        if ($ownsTransaction) {
-            $this->pdo->beginTransaction();
-        }
-        try {
-            $applicationUpdate = $this->pdo->prepare(
-                'UPDATE applications SET current_status = ?, workflow_version_id = ?, updated_at = ? WHERE id = ?'
+        return WriteTransaction::run($this->pdo, function () use (
+            $targetVersionId,
+            $stateMap,
+            $actorId,
+            $actorRole,
+            $reason,
+            $preview,
+            $target,
+            $rows,
+        ): array {
+            $applicationVersionUpdate = $this->pdo->prepare(
+                'UPDATE applications
+                 SET workflow_version_id = ?, updated_at = ?
+                 WHERE id = ? AND current_status = ? AND aggregate_version = ?'
             );
             $instanceUpdate = $this->pdo->prepare(
                 'UPDATE workflow_instances
@@ -77,11 +86,7 @@ final class WorkflowMigrationService
                   transition_key, from_state_key, to_state_key, actor_user_id, actor_role, reason, note, context_json, occurred_at)
                  VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
             );
-            $legacyEvent = $this->pdo->prepare(
-                'INSERT INTO events
-                 (application_id, candidate_id, company_id, from_status, to_status, actor_user_id, actor_role, note, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
-            );
+            $statusWriter = new ApplicationStatusWriter($this->pdo);
             $now = cpe_now();
             foreach ($rows as $row) {
                 $applicationId = (int) $row['id'];
@@ -89,9 +94,33 @@ final class WorkflowMigrationService
                 $from = (string) $row['current_status'];
                 $to = (string) ($stateMap[$from] ?? $from);
                 $terminal = !empty($target['states'][$to]['is_terminal']);
-                $applicationUpdate->execute([$to, $targetVersionId, $now, $applicationId]);
-                $instanceUpdate->execute([$targetVersionId, $to, $terminal ? $now : null, $now, $instanceId]);
+                $aggregateVersion = (int) $row['aggregate_version'];
                 $note = 'Workflow version migration: ' . $reason;
+                if ($from !== $to) {
+                    $statusWriter->changeStatus(
+                        $applicationId,
+                        $from,
+                        $aggregateVersion,
+                        $to,
+                        $actorId,
+                        $actorRole,
+                        $note,
+                        $now,
+                        ['source' => 'workflow.version_migration'],
+                    );
+                    $aggregateVersion++;
+                }
+                $applicationVersionUpdate->execute([
+                    $targetVersionId,
+                    $now,
+                    $applicationId,
+                    $to,
+                    $aggregateVersion,
+                ]);
+                if ($applicationVersionUpdate->rowCount() !== 1) {
+                    throw new RuntimeException('Application changed during workflow version migration.');
+                }
+                $instanceUpdate->execute([$targetVersionId, $to, $terminal ? $now : null, $now, $instanceId]);
                 $eventInsert->execute([
                     $this->publicId('workflow_event'),
                     $instanceId,
@@ -107,31 +136,10 @@ final class WorkflowMigrationService
                     json_encode(['previous_version_id' => (int) $row['workflow_version_id']], JSON_THROW_ON_ERROR),
                     $now,
                 ]);
-                if ($from !== $to) {
-                    $legacyEvent->execute([
-                        $applicationId,
-                        (int) $row['candidate_id'],
-                        (int) $row['company_id'],
-                        $from,
-                        $to,
-                        $actorId,
-                        $actorRole,
-                        $note,
-                        $now,
-                    ]);
-                }
             }
             Auth::audit($actorId, 'workflow.instances.migrate', 'workflow_version', $targetVersionId, 'Migrated ' . count($rows) . ' application(s): ' . $reason);
-            if ($ownsTransaction) {
-                $this->pdo->commit();
-            }
             return [...$preview, 'migrated' => count($rows)];
-        } catch (\Throwable $e) {
-            if ($ownsTransaction && $this->pdo->inTransaction()) {
-                $this->pdo->rollBack();
-            }
-            throw $e;
-        }
+        });
     }
 
     private function target(int $versionId): array
@@ -146,7 +154,7 @@ final class WorkflowMigrationService
     private function applicationsOutsideVersion(int $targetVersionId): array
     {
         $stmt = $this->pdo->prepare(
-            'SELECT id, candidate_id, company_id, current_status, workflow_version_id
+            'SELECT id, candidate_id, company_id, current_status, workflow_version_id, aggregate_version
              FROM applications
              WHERE workflow_version_id IS NULL OR workflow_version_id != ?
              ORDER BY id'

@@ -64,6 +64,11 @@ Date: 2026-07-18
   post-commit declaration expansion and isolated callbacks, token-fenced retry,
   dead-letter and audited replay state, plus the existing JSONL or signed HTTPS
   delivery with stable event IDs.
+- Governed event-only public integration contract v1 with
+  `application.status_changed` schema 1, strict privacy-minimized envelopes,
+  immutable explicit outbox projections, per-application aggregate versions and
+  ordering, exact audited dead-letter recovery, and no public Engine API or API
+  scope. Internal `DomainEvent` payloads and module PHP APIs remain private.
 - Bounded read-only HTTP load probe with optional `curl_multi` concurrency and a
   PHP streams fallback.
 - Hosted operations, disaster recovery, module development, security operations,

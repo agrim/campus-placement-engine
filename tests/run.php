@@ -30,6 +30,7 @@ use App\Core\Events\DomainEvent;
 use App\Core\Events\DomainEventOutboxWorker;
 use App\Core\Events\InternalEventDeliveryWorker;
 use App\Core\Events\InternalEventFanoutWorker;
+use App\Core\Events\PublicEventProjection;
 use App\Core\Http\AuthorizationException;
 use App\Core\Http\UserVisibleException;
 use App\Core\Persistence\DatabaseConnectionInvalidException;
@@ -147,6 +148,33 @@ function run_cli_from(string $root, array $args, array $env = []): array
     fclose($pipes[2]);
     $exitCode = proc_close($process);
     return [$exitCode, $stdout, $stderr];
+}
+
+function run_php_from(string $root, string $relative, array $env = []): array
+{
+    $processEnv = $_ENV;
+    foreach (['CPE_DB_PATH', 'CPE_DB_DRIVER', 'CPE_DATABASE_URL', 'CPE_TEST_SCHEMA_PYTHON'] as $key) {
+        $value = getenv($key);
+        if ($value !== false) {
+            $processEnv[$key] = $value;
+        }
+    }
+    $processEnv = array_merge($processEnv, $env);
+    $process = proc_open(
+        [PHP_BINARY, $root . '/' . $relative],
+        [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+        $pipes,
+        $root,
+        $processEnv,
+    );
+    if (!is_resource($process)) {
+        throw new RuntimeException('Could not start PHP contract process.');
+    }
+    $stdout = stream_get_contents($pipes[1]) ?: '';
+    $stderr = stream_get_contents($pipes[2]) ?: '';
+    fclose($pipes[1]);
+    fclose($pipes[2]);
+    return [proc_close($process), $stdout, $stderr];
 }
 
 function render_layout_for_test(array $vars): string
@@ -729,6 +757,7 @@ test_case('career advising proves module lifecycle events privacy and independen
 test_case('domain event outbox claims delivers retries and dead letters without duplicate delivery', function (): void {
     $pdo = Database::connection();
     $pdo->exec('DELETE FROM domain_event_outbox');
+    $instanceId = (string) $pdo->query("SELECT public_id FROM institutions WHERE slug = 'default'")->fetchColumn();
     $outbox = sys_get_temp_dir() . '/cpe-domain-events-' . bin2hex(random_bytes(4)) . '.jsonl';
     $blocker = sys_get_temp_dir() . '/cpe-domain-events-blocker-' . bin2hex(random_bytes(4));
     file_put_contents($blocker, 'not a directory');
@@ -740,6 +769,14 @@ test_case('domain event outbox claims delivers retries and dead letters without 
             'placement',
             ['contract' => true],
             cpe_now(),
+            PublicEventProjection::applicationStatusChanged(
+                $instanceId,
+                'application_' . str_repeat('c', 32),
+                2,
+                'requested',
+                'scheduled',
+                StructuredLogger::requestId(),
+            ),
         );
         $publicId = cpe_context()->events()->dispatch($event);
         putenv('CPE_DOMAIN_EVENT_OUTBOX_PATH=' . $outbox);
@@ -760,6 +797,14 @@ test_case('domain event outbox claims delivers retries and dead letters without 
             'placement',
             ['contract' => false],
             cpe_now(),
+            PublicEventProjection::applicationStatusChanged(
+                $instanceId,
+                'application_' . str_repeat('d', 32),
+                2,
+                'scheduled',
+                'intransit',
+                StructuredLogger::requestId(),
+            ),
         ));
         putenv('CPE_DOMAIN_EVENT_OUTBOX_PATH=' . $blocker . '/events.jsonl');
         putenv('CPE_DOMAIN_EVENT_MAX_ATTEMPTS=1');
@@ -777,6 +822,185 @@ test_case('domain event outbox claims delivers retries and dead letters without 
             unlink($blocker);
         }
         $pdo->exec('DELETE FROM domain_event_outbox');
+    }
+});
+
+test_case('public dead-letter replay CLI targets one exact event and audits idempotently', function (): void {
+    $db = sys_get_temp_dir() . '/cpe-public-replay-cli-' . bin2hex(random_bytes(4)) . '.sqlite';
+    try {
+        [$installStatus, , $installError] = run_cli(['install-demo'], ['CPE_DB_PATH' => $db]);
+        assert_same(0, $installStatus, 'Public replay CLI fixture install should succeed: ' . $installError);
+        $fixture = (static function (string $path): array {
+            $pdo = new PDO('sqlite:' . $path);
+            $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+            $pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
+            $institution = $pdo->query(
+                "SELECT id, public_id FROM institutions WHERE slug = 'default'",
+            )->fetch();
+            $applicationPublicId = (string) $pdo->query(
+                'SELECT public_id FROM applications ORDER BY id LIMIT 1',
+            )->fetchColumn();
+            assert_true(is_array($institution), 'Public replay CLI fixture institution is missing');
+            assert_true($applicationPublicId !== '', 'Public replay CLI fixture application is missing');
+            $adminId = (int) $pdo->query(
+                "SELECT id FROM users WHERE active = 1 AND role = 'admin' ORDER BY id LIMIT 1",
+            )->fetchColumn();
+            $restrictedActorId = (int) $pdo->query(
+                "SELECT id FROM users WHERE active = 1 AND role <> 'admin' ORDER BY id LIMIT 1",
+            )->fetchColumn();
+            assert_true($adminId > 0, 'Public replay CLI fixture administrator is missing');
+            assert_true($restrictedActorId > 0, 'Public replay CLI fixture restricted user is missing');
+            $inactiveEmail = 'inactive-cli-replay-' . bin2hex(random_bytes(4)) . '@example.test';
+            $inactive = $pdo->prepare(
+                "INSERT INTO users (name, email, password_hash, role, active, created_at)
+                 VALUES (?, ?, ?, 'admin', 0, ?)",
+            );
+            $inactive->execute([
+                'Inactive CLI Replay Administrator',
+                $inactiveEmail,
+                password_hash('inactive-cli-replay-password', PASSWORD_DEFAULT),
+                cpe_now(),
+            ]);
+            $inactiveQuery = $pdo->prepare('SELECT id FROM users WHERE email = ?');
+            $inactiveQuery->execute([$inactiveEmail]);
+            $inactiveAdminId = (int) $inactiveQuery->fetchColumn();
+            assert_true($inactiveAdminId > 0, 'Public replay CLI fixture inactive administrator is missing');
+            $eventPublicId = 'event_' . bin2hex(random_bytes(16));
+            $now = cpe_now();
+            $insert = $pdo->prepare(
+                'INSERT INTO domain_event_outbox
+                 (public_id, event_name, aggregate_type, aggregate_public_id, institution_id,
+                  module_key, payload_json, occurred_at, processed_at, attempts, available_at,
+                  delivered_to, failed_at, locked_at, lock_token,
+                  public_event_type, public_schema_version, public_instance_id,
+                  public_aggregate_type, public_aggregate_id, public_aggregate_version,
+                  public_payload_json, public_correlation_id)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 10, ?, ?, ?, NULL, NULL,
+                         ?, ?, ?, ?, ?, ?, ?, ?)',
+            );
+            $insert->execute([
+                $eventPublicId,
+                'placement.application.transitioned',
+                'placement_application',
+                $applicationPublicId,
+                (int) $institution['id'],
+                'placement',
+                '{"private":"not-for-audit-or-delivery"}',
+                $now,
+                $now,
+                '',
+                $now,
+                'application.status_changed',
+                1,
+                (string) $institution['public_id'],
+                'application',
+                $applicationPublicId,
+                2,
+                '{"from_status":"idle","to_status":"scheduled"}',
+                'req_' . bin2hex(random_bytes(12)),
+            ]);
+            return [
+                'event_public_id' => $eventPublicId,
+                'admin_id' => $adminId,
+                'restricted_actor_id' => $restrictedActorId,
+                'inactive_admin_id' => $inactiveAdminId,
+            ];
+        })($db);
+        $eventPublicId = (string) $fixture['event_public_id'];
+        $actorFailure = 'Error: An active administrator user ID is required.' . "\n";
+        foreach ([
+            'active restricted' => ['--actor-user-id=' . (int) $fixture['restricted_actor_id']],
+            'inactive administrator' => ['--actor-user-id=' . (int) $fixture['inactive_admin_id']],
+            'missing' => [],
+            'unknown' => ['--actor-user-id=2147483647'],
+        ] as $actorLabel => $actorArguments) {
+            [$deniedStatus, $deniedOut, $deniedError] = run_cli([
+                'replay-public-event',
+                '--event=' . $eventPublicId,
+                ...$actorArguments,
+            ], ['CPE_DB_PATH' => $db]);
+            assert_same(1, $deniedStatus, ucfirst($actorLabel) . ' actor should be rejected by public replay CLI');
+            assert_same('', $deniedOut, 'Denied public replay CLI should not report a state transition');
+            assert_same($actorFailure, $deniedError, 'Denied public replay CLI should use one stable redacted actor message');
+        }
+        $deniedProof = (static function (string $path, string $publicId): array {
+            $pdo = new PDO('sqlite:' . $path);
+            $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+            return [
+                'dead_lettered' => (int) $pdo->query(
+                    'SELECT COUNT(*) FROM domain_event_outbox
+                     WHERE public_id = ' . $pdo->quote($publicId) . ' AND failed_at IS NOT NULL',
+                )->fetchColumn(),
+                'audits' => (int) $pdo->query(
+                    "SELECT COUNT(*) FROM audit_logs WHERE action = 'public_event.dead_letter_replay'",
+                )->fetchColumn(),
+            ];
+        })($db, $eventPublicId);
+        assert_same(1, $deniedProof['dead_lettered'], 'Denied public replay CLI changed dead-letter state');
+        assert_same(0, $deniedProof['audits'], 'Denied public replay CLI wrote false attribution');
+
+        [$status, $stdout, $stderr] = run_cli([
+            'replay-public-event',
+            '--event=' . $eventPublicId,
+            '--actor-user-id=' . (int) $fixture['admin_id'],
+        ], ['CPE_DB_PATH' => $db]);
+        assert_same(0, $status, 'Public replay CLI should requeue an exact dead letter: ' . $stderr);
+        assert_same(
+            'Public event replay replayed: ' . $eventPublicId . "\n",
+            $stdout,
+            'Public replay CLI should report only the exact event identity and outcome',
+        );
+
+        $proof = (static function (string $path, string $publicId): array {
+            $pdo = new PDO('sqlite:' . $path);
+            $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+            $event = $pdo->query(
+                'SELECT attempts, failed_at, locked_at, lock_token
+                 FROM domain_event_outbox WHERE public_id = ' . $pdo->quote($publicId),
+            )->fetch(PDO::FETCH_ASSOC);
+            $audit = $pdo->query(
+                "SELECT actor_user_id, subject_type, detail
+                 FROM audit_logs WHERE action = 'public_event.dead_letter_replay'",
+            )->fetchAll(PDO::FETCH_ASSOC);
+            return ['event' => $event, 'audit' => $audit];
+        })($db, $eventPublicId);
+        assert_same(0, (int) $proof['event']['attempts'], 'Public replay CLI should reset attempts');
+        assert_same(null, $proof['event']['failed_at'], 'Public replay CLI should clear dead-letter state');
+        assert_same(null, $proof['event']['locked_at'], 'Public replay CLI should clear stale lock time');
+        assert_same(null, $proof['event']['lock_token'], 'Public replay CLI should clear stale lock token');
+        assert_same(1, count($proof['audit']), 'Public replay CLI should write one audit row');
+        assert_same((int) $fixture['admin_id'], (int) $proof['audit'][0]['actor_user_id'], 'Public replay CLI audit should record the active administrator');
+        assert_same('public_event', (string) $proof['audit'][0]['subject_type'], 'Public replay CLI audit subject differs');
+        assert_same(
+            'Dead-lettered public event requeued for delivery.',
+            (string) $proof['audit'][0]['detail'],
+            'Public replay CLI audit must remain fixed and payload-free',
+        );
+
+        [$repeatStatus, $repeatOut, $repeatError] = run_cli([
+            'replay-public-event',
+            '--event=' . $eventPublicId,
+            '--actor-user-id=' . (int) $fixture['admin_id'],
+        ], ['CPE_DB_PATH' => $db]);
+        assert_same(0, $repeatStatus, 'Repeated public replay CLI should be idempotent: ' . $repeatError);
+        assert_same(
+            'Public event replay already-replayed: ' . $eventPublicId . "\n",
+            $repeatOut,
+            'Repeated public replay CLI outcome differs',
+        );
+        $auditCount = (static function (string $path): int {
+            $pdo = new PDO('sqlite:' . $path);
+            return (int) $pdo->query(
+                "SELECT COUNT(*) FROM audit_logs WHERE action = 'public_event.dead_letter_replay'",
+            )->fetchColumn();
+        })($db);
+        assert_same(1, $auditCount, 'Repeated public replay CLI should not duplicate the audit marker');
+    } finally {
+        foreach ([$db, $db . '-wal', $db . '-shm'] as $path) {
+            if (is_file($path)) {
+                unlink($path);
+            }
+        }
     }
 });
 
@@ -861,6 +1085,52 @@ test_case('logical portability bundle round trips placement data and rejects tam
         assert_true(!str_contains($bundleText, '"password_hash":'), 'Bundle should exclude password hash fields');
         assert_true(!str_contains($bundleText, '$2y$'), 'Bundle should exclude bcrypt password values');
 
+        $placementPath = $bundle . '/modules/placement.json';
+        $manifestPath = $bundle . '/manifest.json';
+        $originalPlacementJson = (string) file_get_contents($placementPath);
+        $originalManifestJson = (string) file_get_contents($manifestPath);
+        $assertPublicIdTamperRejected = static function (
+            string $collection,
+            string $invalidPublicId,
+            string $label,
+        ) use ($placementPath, $manifestPath, $originalPlacementJson, $originalManifestJson, $sourcePdo, $bundle): void {
+            $payload = json_decode($originalPlacementJson, true, 512, JSON_THROW_ON_ERROR);
+            assert_true(is_array($payload[$collection] ?? null) && isset($payload[$collection][0]), 'Tamper fixture lacks ' . $collection);
+            $payload[$collection][0]['public_id'] = $invalidPublicId;
+            $tamperedJson = json_encode(
+                $payload,
+                JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR,
+            ) . "\n";
+            file_put_contents($placementPath, $tamperedJson);
+            $manifest = json_decode($originalManifestJson, true, 64, JSON_THROW_ON_ERROR);
+            foreach ($manifest['files'] as &$file) {
+                if (($file['path'] ?? null) === 'modules/placement.json') {
+                    $file['bytes'] = strlen($tamperedJson);
+                    $file['sha256'] = hash('sha256', $tamperedJson);
+                }
+            }
+            unset($file);
+            file_put_contents(
+                $manifestPath,
+                json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n",
+            );
+            try {
+                (new PortalPortabilityService($sourcePdo))->validate($bundle);
+                throw new RuntimeException('Tampered ' . $label . ' public id was accepted.');
+            } catch (RuntimeException $e) {
+                assert_true(
+                    str_contains($e->getMessage(), 'invalid ' . $label . ' public id'),
+                    'Tampered ' . $label . ' public id did not fail at canonical-id validation',
+                );
+            } finally {
+                file_put_contents($placementPath, $originalPlacementJson);
+                file_put_contents($manifestPath, $originalManifestJson);
+            }
+        };
+        $assertPublicIdTamperRejected('applications', 'application_' . str_repeat('g', 32), 'application');
+        $assertPublicIdTamperRejected('candidates', 'candidate_' . str_repeat('a', 31), 'candidate');
+        $assertPublicIdTamperRejected('companies', 'company_' . str_repeat('A', 32), 'company');
+
         Database::useProvider(new SqliteConnectionProvider($targetDb));
         (new Installer())->install([
             'college_name' => 'Empty Target College',
@@ -906,6 +1176,40 @@ test_case('logical portability bundle round trips placement data and rejects tam
         );
         assert_true(Auth::attempt('target-admin@test.local', 'target-password-123'), 'Target administrator should remain local to the target installation');
 
+        $transitionApplication = $targetPdo->query(
+            "SELECT id, public_id, current_status, aggregate_version
+             FROM applications
+             WHERE current_status NOT IN ('placed', 'rejected')
+             ORDER BY CASE WHEN current_status = 'idle' THEN 0 ELSE 1 END, id
+             LIMIT 1",
+        )->fetch(PDO::FETCH_ASSOC);
+        assert_true(is_array($transitionApplication), 'Imported portability data has no transitionable application');
+        $publicEventsBeforeTransition = (int) $targetPdo->query(
+            'SELECT COUNT(*) FROM domain_event_outbox WHERE public_event_type IS NOT NULL',
+        )->fetchColumn();
+        (new PlacementService($targetPdo))->moveNext(
+            (int) $transitionApplication['id'],
+            1,
+            'admin',
+            'Post-portability public event contract',
+            (string) $transitionApplication['current_status'],
+        );
+        assert_same(
+            (int) $transitionApplication['aggregate_version'] + 1,
+            (int) $targetPdo->query(
+                'SELECT aggregate_version FROM applications WHERE id = ' . (int) $transitionApplication['id'],
+            )->fetchColumn(),
+            'Imported application aggregate version did not advance after a real status change',
+        );
+        $restoredProjection = $targetPdo->query(
+            'SELECT public_aggregate_id, public_aggregate_version
+             FROM domain_event_outbox WHERE public_event_type IS NOT NULL ORDER BY id DESC LIMIT 1',
+        )->fetch(PDO::FETCH_ASSOC);
+        assert_true(is_array($restoredProjection), 'Imported application status change did not publish a public event');
+        assert_same($transitionApplication['public_id'], $restoredProjection['public_aggregate_id'], 'Restored application published a noncanonical aggregate id');
+        assert_same((int) $transitionApplication['aggregate_version'] + 1, (int) $restoredProjection['public_aggregate_version'], 'Restored application published the wrong aggregate version');
+        assert_same($publicEventsBeforeTransition + 1, (int) $targetPdo->query('SELECT COUNT(*) FROM domain_event_outbox WHERE public_event_type IS NOT NULL')->fetchColumn(), 'Post-portability transition did not emit exactly one public event');
+
         Database::useProvider(new SqliteConnectionProvider($hostedTargetDb));
         (new Installer())->installHosted([
             'college_name' => 'Hosted Target College',
@@ -946,6 +1250,58 @@ test_case('logical portability bundle round trips placement data and rejects tam
     } finally {
         putenv('CPE_BACKUP_DIR');
         Database::useProvider($sourceProvider);
+        Portal::reset();
+        remove_tree($root);
+    }
+});
+
+test_case('hosted portability wrapper validates and round trips one exact tenant identity', function (): void {
+    $originalProvider = Database::provider();
+    $root = sys_get_temp_dir() . '/cpe-hosted-portability-' . bin2hex(random_bytes(4));
+    $sourceDb = $root . '/source.sqlite';
+    $targetDb = $root . '/target.sqlite';
+    $bundle = $root . '/bundle';
+    $backupDir = $root . '/backups';
+    $tenantPublicId = 'tenant_' . str_repeat('e', 32);
+    mkdir($root, 0775, true);
+    try {
+        Database::useProvider(new SqliteConnectionProvider($sourceDb));
+        (new Installer())->installHosted([
+            'college_name' => 'Hosted Portability Source',
+            'timezone' => 'UTC',
+            'admin_name' => 'Hosted Source Administrator',
+            'admin_email' => 'hosted-source@example.test',
+            'admin_password' => 'hosted-source-password-123',
+            'seed_demo' => '1',
+        ], $tenantPublicId);
+        $sourcePdo = Database::connection();
+        $sourceApplications = $sourcePdo->query(
+            'SELECT public_id, aggregate_version FROM applications ORDER BY public_id',
+        )->fetchAll(PDO::FETCH_ASSOC);
+        $export = (new PortalPortabilityService($sourcePdo))->export($bundle);
+
+        Database::useProvider(new SqliteConnectionProvider($targetDb));
+        (new Installer())->installHosted([
+            'college_name' => 'Hosted Portability Target',
+            'timezone' => 'UTC',
+            'admin_name' => 'Hosted Target Administrator',
+            'admin_email' => 'hosted-target-roundtrip@example.test',
+            'admin_password' => 'hosted-target-roundtrip-password-123',
+            'seed_demo' => '0',
+        ], $tenantPublicId);
+        putenv('CPE_BACKUP_DIR=' . $backupDir);
+        $targetPdo = Database::connection();
+        $portability = new PortalPortabilityService($targetPdo);
+        $validation = $portability->validate($bundle);
+        assert_same($export['bundle_id'], $validation['bundle_id'], 'Hosted wrapper validation changed the bundle id');
+        assert_same($tenantPublicId, $validation['institution_public_id'], 'Hosted wrapper validation changed tenant identity');
+        $portability->import($bundle);
+        assert_same($tenantPublicId, (string) $targetPdo->query("SELECT public_id FROM institutions WHERE slug = 'default'")->fetchColumn(), 'Hosted portability changed target tenant identity');
+        assert_same($sourceApplications, $targetPdo->query('SELECT public_id, aggregate_version FROM applications ORDER BY public_id')->fetchAll(PDO::FETCH_ASSOC), 'Hosted wrapper roundtrip changed application public ids or aggregate versions');
+        assert_same(0, (int) $targetPdo->query('SELECT COUNT(*) FROM domain_event_outbox')->fetchColumn(), 'Hosted portability synthesized event rows');
+    } finally {
+        putenv('CPE_BACKUP_DIR');
+        Database::useProvider($originalProvider);
         Portal::reset();
         remove_tree($root);
     }
@@ -1772,7 +2128,7 @@ test_case('open-source release governance files and ignore protections exist', f
         assert_true(is_file($root . '/' . $path), "Missing release governance file: {$path}");
     }
     $ci = (string) file_get_contents($root . '/.github/workflows/ci.yml');
-    foreach (['php tests/run.php', 'php tests/alpha1_release_acceptance.php', 'php tests/backup_restore_contract.php', 'php tests/database_connection_cleanup_contract.php', 'php tests/incident_boundary_contract.php', 'php tests/legacy_backup_compatibility_contract.php', 'php tests/worker_delivery_contract.php', 'php tests/database_ownership_contract.php', 'php tests/migration_lock_contract.php', 'php tests/database_lock_release_contract.php', 'php tests/install_concurrency_contract.php', 'php tests/hosted_install_atomicity_contract.php', 'php tests/hosted_install_preflight_contract.php', 'php tests/setup_authorization_contract.php', 'php tests/hosted_install_contract.php', 'php tests/managed_hosting_contract.php', 'php placement publication-check', 'php placement package', 'php placement verify-package', 'php placement install', 'php placement upgrade', 'php placement setup --check', 'php placement serve --help', 'php placement install-demo', 'php placement seed-large-demo', 'php placement browser-qa-plan', 'php placement smoke-http', 'php placement readiness', 'php placement metrics', 'php placement placement-report', 'php placement privacy-report', 'php placement export', 'php placement rollback-import', 'php placement config-export', 'php placement config-validate', 'php placement config-import', 'php placement deliver-notifications', 'php placement certify-notifications', 'php placement optimize-slots', 'php placement assign-optimized-slots', 'php -l placement'] as $command) {
+    foreach (['php tests/run.php', 'php tests/alpha1_release_acceptance.php', 'php tests/backup_restore_contract.php', 'php tests/database_connection_cleanup_contract.php', 'php tests/incident_boundary_contract.php', 'php tests/legacy_backup_compatibility_contract.php', 'php tests/worker_delivery_contract.php', 'php tests/public_event_contract.php', 'php tests/database_ownership_contract.php', 'php tests/migration_lock_contract.php', 'php tests/database_lock_release_contract.php', 'php tests/install_concurrency_contract.php', 'php tests/hosted_install_atomicity_contract.php', 'php tests/hosted_install_preflight_contract.php', 'php tests/setup_authorization_contract.php', 'php tests/hosted_install_contract.php', 'php tests/managed_hosting_contract.php', 'php placement publication-check', 'php placement package', 'php placement verify-package', 'php placement install', 'php placement upgrade', 'php placement setup --check', 'php placement serve --help', 'php placement install-demo', 'php placement seed-large-demo', 'php placement browser-qa-plan', 'php placement smoke-http', 'php placement readiness', 'php placement metrics', 'php placement placement-report', 'php placement privacy-report', 'php placement export', 'php placement rollback-import', 'php placement config-export', 'php placement config-validate', 'php placement config-import', 'php placement deliver-notifications', 'php placement certify-notifications', 'php placement optimize-slots', 'php placement assign-optimized-slots', 'php -l placement'] as $command) {
         assert_true(str_contains($ci, $command), "Missing CI command: {$command}");
     }
     $releaseWorkflow = (string) file_get_contents($root . '/.github/workflows/release.yml');
@@ -1829,6 +2185,11 @@ YAML;
             str_contains($workflow, 'cpe_database_connection_cleanup_contract')
                 && str_contains($workflow, 'php tests/database_connection_cleanup_contract.php'),
             'CI and release must run invalid-connection cleanup against a fresh dedicated PostgreSQL database.',
+        );
+        assert_true(
+            str_contains($workflow, 'cpe_public_event_contract')
+                && str_contains($workflow, 'php tests/public_event_contract.php'),
+            'CI and release must run the public event contract against a fresh dedicated PostgreSQL database.',
         );
     }
     $deployment = (string) file_get_contents($root . '/docs/deployment.md');
@@ -1939,6 +2300,7 @@ test_case('release package includes public source and excludes private runtime d
     $root = dirname(__DIR__);
     $target = sys_get_temp_dir() . '/cpe-package-' . bin2hex(random_bytes(4));
     $extractDir = sys_get_temp_dir() . '/cpe-package-extract-' . bin2hex(random_bytes(4));
+    $tarExtractDir = sys_get_temp_dir() . '/cpe-package-tar-extract-' . bin2hex(random_bytes(4));
     $packageDb = sys_get_temp_dir() . '/cpe-package-db-' . bin2hex(random_bytes(4)) . '.sqlite';
     $runtimeStaging = $root . '/data/restore-staging/package-contract-' . bin2hex(random_bytes(4));
     try {
@@ -2003,6 +2365,11 @@ test_case('release package includes public source and excludes private runtime d
         assert_true(str_contains($joined, '/app/Core/Events/InternalEventFanoutReplayService.php'), 'Package should include audited declaration fanout replay');
         assert_true(str_contains($joined, '/app/Core/Events/InternalEventSubscriberRegistry.php'), 'Package should include the internal observer registry');
         assert_true(str_contains($joined, '/app/Core/Events/InternalEventSubscription.php'), 'Package should include stable internal observer subscriptions');
+        assert_true(str_contains($joined, '/app/Core/Events/PublicEventProjection.php'), 'Package should include the governed public projection');
+        assert_true(str_contains($joined, '/app/Core/Events/PublicEventEnvelope.php'), 'Package should include the governed public envelope');
+        assert_true(str_contains($joined, '/app/Core/Events/PublicEventDeadLetterReplayService.php'), 'Package should include audited public dead-letter replay');
+        assert_true(str_contains($joined, '/app/Core/Events/ReplayOperatorAuthorization.php'), 'Package should include centralized replay operator authorization');
+        assert_true(str_contains($joined, '/app/Modules/Placement/Application/ApplicationStatusWriter.php'), 'Package should include the shared application status writer');
         assert_true(str_contains($joined, '/app/Core/Persistence/DatabaseConnectionInvalidException.php'), 'Package should include typed invalid-connection cleanup failures');
         assert_true(str_contains($joined, '/app/Core/Security/AuthorizationUnavailable.php'), 'Package should include typed installed-runtime authorization failures');
         assert_true(str_contains($joined, '/app/Core/Modules/ModuleVersionIntegrity.php'), 'Package should include exact bundled module version integrity');
@@ -2026,10 +2393,20 @@ test_case('release package includes public source and excludes private runtime d
         assert_true(str_contains($joined, '/tests/authorization_state_contract.php'), 'Package should include the portable authorization-state contract');
         assert_true(str_contains($joined, '/tests/installation_state_contract.php'), 'Package should include the portable installation-state contract');
         assert_true(str_contains($joined, '/tests/internal_event_delivery_contract.php'), 'Package should include the internal observer delivery contract');
+        assert_true(str_contains($joined, '/tests/public_event_contract.php'), 'Package should include the public event contract');
+        assert_true(str_contains($joined, '/tests/validate_public_event_schemas.py'), 'Package should include the independent Draft 2020-12 validator');
+        assert_true(str_contains($joined, '/tests/requirements-public-event-schema.txt'), 'Package should include pinned schema-validator test dependencies');
         assert_true(str_contains($joined, '/tests/authorized_setup_recovery_fixture.php'), 'Package should include the authorized setup recovery test fixture');
         assert_true(str_contains($joined, '/tests/hosted_install_contract.php'), 'Package should include the hosted identity immutability contract');
         assert_true(str_contains($joined, '/tests/managed_hosting_contract.php'), 'Package should include the managed-hosting probe contract');
         assert_true(str_contains($joined, '/docs/environment.md'), 'Package should include environment variable guide');
+        assert_true(str_contains($joined, '/docs/integrations/events.md'), 'Package should include the public event guide');
+        assert_true(str_contains($joined, '/docs/compatibility.md'), 'Package should include public compatibility rules');
+        assert_true(str_contains($joined, '/docs/security/integration-threat-model.md'), 'Package should include the integration threat model');
+        assert_true(str_contains($joined, '/contracts/public-integration.v1.json'), 'Package should include the frozen public integration declaration');
+        assert_true(str_contains($joined, '/contracts/schemas/application.status_changed.v1.schema.json'), 'Package should include the strict event schema');
+        assert_true(str_contains($joined, '/contracts/examples/application.status_changed.v1.json'), 'Package should include the public event example');
+        assert_true(str_contains($joined, '/contracts/fixtures/application.status_changed.v1.consumer.json'), 'Package should include the frozen consumer fixture');
         assert_true(str_contains($joined, '/docs/releases/v0.1.0-alpha.3.md'), 'Package should include current release notes');
         assert_true(str_contains($joined, '/examples/env/local.env.example'), 'Package should include synthetic env template');
         assert_true(str_contains($joined, '/examples/deployment/apache-vhost.conf'), 'Package should include Apache deployment example');
@@ -2037,9 +2414,11 @@ test_case('release package includes public source and excludes private runtime d
         assert_true(str_contains($joined, '/database/migrations/014_round_schedule_day.sql'), 'Package should include migrations');
         assert_true(str_contains($joined, '/database/migrations/047_internal_event_deliveries.sql'), 'Package should include SQLite internal observer delivery migration');
         assert_true(str_contains($joined, '/database/migrations/048_module_enabled_constraint.sql'), 'Package should include SQLite module enabled constraint migration');
+        assert_true(str_contains($joined, '/database/migrations/049_public_event_projection.sql'), 'Package should include SQLite public event migration');
         assert_true(str_contains($joined, '/database/migrations/pgsql/001_portal_baseline.sql'), 'Package should include PostgreSQL migrations');
         assert_true(str_contains($joined, '/database/migrations/pgsql/011_internal_event_deliveries.sql'), 'Package should include PostgreSQL internal observer delivery migration');
         assert_true(str_contains($joined, '/database/migrations/pgsql/012_module_enabled_constraint.sql'), 'Package should include PostgreSQL module enabled constraint migration');
+        assert_true(str_contains($joined, '/database/migrations/pgsql/013_public_event_projection.sql'), 'Package should include PostgreSQL public event migration');
         assert_true(str_contains($joined, '/data/.gitkeep'), 'Package should keep an empty data directory marker');
         assert_true(!str_contains($joined, '.legacy-private'), 'Package should exclude private archive material');
         assert_true(!str_contains($joined, 'data/app.sqlite'), 'Package should exclude runtime SQLite data');
@@ -2053,7 +2432,24 @@ test_case('release package includes public source and excludes private runtime d
             assert_same(0, $verifyCode, 'Package verifier should accept matching checksum: ' . $archivePath . ' ' . $verifyErr);
             assert_true(str_contains($verifyOut, 'Package checksum verified'), 'Package verifier should report checksum verification');
             assert_true(str_contains($verifyOut, 'Package archive inspected'), 'Package verifier should inspect archive structure');
+            assert_true(str_contains($verifyOut, 'Package integration JSON verified'), 'Package verifier should validate public integration JSON');
         }
+
+        $tarArchive = new PharData($tarPath);
+        $tarArchive->extractTo($tarExtractDir);
+        $tarPackageRoot = $tarExtractDir . '/' . $rootName;
+        [$tarPublicationCode, $tarPublicationOut, $tarPublicationErr] = run_cli_from($tarPackageRoot, ['publication-check']);
+        assert_same(0, $tarPublicationCode, 'Git-free extracted tarball publication check should pass: ' . $tarPublicationErr);
+        assert_true(str_contains($tarPublicationOut, 'Public integration JSON'), 'Extracted tarball should validate public integration JSON');
+        $tarContractTmp = $tarExtractDir . '/public-event-tmp';
+        assert_true(mkdir($tarContractTmp, 0700, true), 'Could not create extracted tarball contract temp directory');
+        [$tarContractCode, $tarContractOut, $tarContractErr] = run_php_from($tarPackageRoot, 'tests/public_event_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $tarContractTmp,
+        ]);
+        assert_same(0, $tarContractCode, 'Git-free extracted tarball public event contract should pass: ' . $tarContractErr);
+        assert_true(str_contains($tarContractOut, 'PASS public event contract (sqlite'), 'Extracted tarball should run the portable public event contract');
 
         $zipArchive = new PharData($zipPath);
         $zipArchive->extractTo($extractDir);
@@ -2064,6 +2460,15 @@ test_case('release package includes public source and excludes private runtime d
         [$publicationCode, $publicationOut, $publicationErr] = run_cli_from($packageRoot, ['publication-check']);
         assert_same(0, $publicationCode, 'Git-free extracted package publication check should pass: ' . $publicationErr);
         assert_true(str_contains($publicationOut, 'OK: Required release files are present.'), 'Extracted package publication check should report success');
+        $zipContractTmp = $extractDir . '/public-event-tmp';
+        assert_true(mkdir($zipContractTmp, 0700, true), 'Could not create extracted ZIP contract temp directory');
+        [$packageContractCode, $packageContractOut, $packageContractErr] = run_php_from($packageRoot, 'tests/public_event_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $zipContractTmp,
+        ]);
+        assert_same(0, $packageContractCode, 'Git-free extracted ZIP public event contract should pass: ' . $packageContractErr);
+        assert_true(str_contains($packageContractOut, 'PASS public event contract (sqlite'), 'Extracted ZIP should run the portable public event contract');
 
         $packageRuntimeFixture = $packageRoot . '/data/restore-staging/package-contract.sqlite';
         try {
@@ -2134,6 +2539,7 @@ test_case('release package includes public source and excludes private runtime d
     } finally {
         remove_tree($target);
         remove_tree($extractDir);
+        remove_tree($tarExtractDir);
         if (is_file($packageDb)) {
             unlink($packageDb);
         }
@@ -2521,7 +2927,7 @@ test_case('stale board moves are rejected before transition', function (): void 
     $companyId = $service->saveCompany(['code' => 'STL', 'name' => 'Stale Company'], 1);
     $service->saveApplication($candidateId, $companyId, 'scheduled', null, 1);
     $appId = (int) $pdo->query("SELECT id FROM applications WHERE candidate_id = {$candidateId} AND company_id = {$companyId}")->fetchColumn();
-    $pdo->exec("UPDATE applications SET current_status = 'intransit' WHERE id = {$appId}");
+    $pdo->exec("UPDATE applications SET current_status = 'intransit', aggregate_version = aggregate_version + 1 WHERE id = {$appId}");
     try {
         $service->moveNext($appId, 1, 'admin', 'stale form submit', 'scheduled');
         throw new RuntimeException('Expected stale board failure');
@@ -5253,7 +5659,7 @@ test_case('opted-out candidates cannot move forward', function (): void {
 test_case('placement freeze blocks non-admin placement but allows admin override', function (): void {
     $pdo = Database::connection();
     $appId = (int) $pdo->query("SELECT id FROM applications WHERE current_status != 'placed' LIMIT 1")->fetchColumn();
-    $pdo->exec("UPDATE applications SET current_status = 'sent' WHERE id = {$appId}");
+    $pdo->exec("UPDATE applications SET current_status = 'sent', aggregate_version = aggregate_version + 1 WHERE id = {$appId}");
     $pdo->exec("INSERT INTO settings (key, value) VALUES ('placement_freeze', '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value");
     try {
         (new PlacementService($pdo))->moveNext($appId, 1, 'placement');
@@ -5270,19 +5676,18 @@ test_case('offer upgrades are blocked unless enabled', function (): void {
     $pdo = Database::connection();
     $candidateId = (int) $pdo->query("SELECT id FROM candidates WHERE placed_company_id IS NOT NULL LIMIT 1")->fetchColumn();
     $companyId = (int) $pdo->query("SELECT id FROM companies WHERE id != (SELECT placed_company_id FROM candidates WHERE id = {$candidateId}) LIMIT 1")->fetchColumn();
-    $stmt = $pdo->prepare('INSERT OR IGNORE INTO applications (candidate_id, company_id, current_status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)');
-    $stmt->execute([$candidateId, $companyId, 'sent', cpe_now(), cpe_now()]);
+    $service = new PlacementService($pdo);
+    $service->saveApplication($candidateId, $companyId, 'sent', null, 1);
     $appId = (int) $pdo->query("SELECT id FROM applications WHERE candidate_id = {$candidateId} AND company_id = {$companyId}")->fetchColumn();
-    $pdo->exec("UPDATE applications SET current_status = 'sent' WHERE id = {$appId}");
     $pdo->exec("INSERT INTO settings (key, value) VALUES ('allow_offer_upgrade', '0') ON CONFLICT(key) DO UPDATE SET value = excluded.value");
     try {
-        (new PlacementService($pdo))->moveNext($appId, 1, 'admin');
+        $service->moveNext($appId, 1, 'admin');
         throw new RuntimeException('Expected upgrade failure');
     } catch (RuntimeException $e) {
         assert_true(str_contains($e->getMessage(), 'upgrades are disabled'), 'Expected upgrade message');
     }
     $pdo->exec("INSERT INTO settings (key, value) VALUES ('allow_offer_upgrade', '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value");
-    (new PlacementService($pdo))->moveNext($appId, 1, 'admin');
+    $service->moveNext($appId, 1, 'admin');
     assert_same('placed', $pdo->query("SELECT current_status FROM applications WHERE id = {$appId}")->fetchColumn());
 });
 

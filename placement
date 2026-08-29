@@ -20,6 +20,8 @@ use App\Core\Backup\LegacySqliteBackupConverter;
 use App\Core\Http\UserVisibleException;
 use App\Core\Install\InstallationState;
 use App\Core\Events\DomainEventOutboxWorker;
+use App\Core\Events\PublicEventDeadLetterReplayService;
+use App\Core\Events\ReplayOperatorAuthorization;
 use App\Core\Events\InternalEventDeliveryWorker;
 use App\Core\Events\InternalEventDeliveryReplayService;
 use App\Core\Events\InternalEventFanoutReplayService;
@@ -88,6 +90,7 @@ try {
         'verify-package' => verify_release_package($argv[2] ?? ''),
         'deliver-notifications' => deliver_notifications(array_slice($argv, 2)),
         'work-outbox' => work_outbox(array_slice($argv, 2)),
+        'replay-public-event' => replay_public_event(array_slice($argv, 2)),
         'replay-internal-delivery' => replay_internal_delivery(array_slice($argv, 2)),
         'replay-internal-fanout' => replay_internal_fanout(array_slice($argv, 2)),
         'certify-notifications' => certify_notifications(array_slice($argv, 2)),
@@ -144,12 +147,11 @@ function upgrade(array $args): void
     if ($args !== []) {
         throw new UserVisibleException('CLI_UPGRADE_ARGUMENT_INVALID', 'Upgrade does not accept positional arguments.');
     }
+    (new SystemRequirements())->assertReady();
+    Database::adoptInstalledEngineOwnershipForUpgrade();
     if (!Database::hasInstalledMarkerStrict()) {
         throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
     }
-
-    (new SystemRequirements())->assertReady();
-    Database::adoptInstalledEngineOwnershipForUpgrade();
     $backup = create_database_backup('upgrade');
     echo "Upgrade backup written. A recovery path is available only to the operator who configured backup storage.\n";
     Database::migrate();
@@ -1123,6 +1125,7 @@ function verify_release_package(string $path): void
     $archive = new PharData($path);
     $archivePrefix = 'phar://' . (realpath($path) ?: $path) . '/';
     $entries = [];
+    $integrationDocuments = [];
     $rootName = '';
     $uncompressedBytes = 0;
     foreach (new RecursiveIteratorIterator($archive) as $file) {
@@ -1161,6 +1164,13 @@ function verify_release_package(string $path): void
             throw new RuntimeException('Release package exceeds safe inspection limits.');
         }
         $entries[$relative] = true;
+        if (in_array($relative, public_integration_artifact_paths(), true)) {
+            $body = file_get_contents($pathname);
+            if (!is_string($body)) {
+                throw new RuntimeException('Release package contains an unreadable integration artifact: ' . $relative);
+            }
+            $integrationDocuments[$relative] = $body;
+        }
     }
     foreach (['.htaccess', 'README.md', 'INSTALL.md', 'placement', 'app/Core/Backup/BackupArtifact.php', 'app/Core/Backup/BackupMetadata.php', 'app/Core/Backup/LegacySqliteBackupConverter.php', 'app/Core/Persistence/DatabaseConnectionInvalidException.php', 'app/Core/Persistence/DatabaseLock.php', 'app/Core/Persistence/DatabaseOwnership.php', 'app/Core/Persistence/SqlMigrationRunner.php', 'app/Security/OperationalBearerAuthorization.php', 'app/Security/SetupAuthorization.php', 'app/Security/SetupAuthorizationDenied.php', 'app/Security/SetupAuthorizationStageFailure.php', 'app/Security/SetupHttp.php', 'app/Views/setup-unlock.php', 'public/.htaccess', 'public/health.php', 'public/index.php', 'public/install.php', 'public/metrics.php', 'database/.htaccess', 'database/migrations/001_initial.sql', 'database/migrations/pgsql/001_portal_baseline.sql', 'docs/environment.md', 'docs/managed-hosting-contract.md', 'docs/disaster-recovery.md', 'docs/releases/v0.1.0-alpha.3.md', 'examples/env/local.env.example', 'examples/deployment/apache-vhost.conf', 'examples/deployment/nginx-server.conf', 'tests/.htaccess', 'tests/alpha1_release_acceptance.php', 'tests/backup_restore_contract.php', 'tests/database_connection_cleanup_contract.php', 'tests/database_ownership_contract.php', 'tests/database_ownership_worker.php', 'tests/legacy_backup_compatibility_contract.php', 'tests/migration_lock_contract.php', 'tests/migration_lock_worker.php', 'tests/install_concurrency_contract.php', 'tests/install_concurrency_worker.php', 'tests/setup_authorization_contract.php', 'tests/hosted_install_contract.php', 'tests/managed_hosting_contract.php', 'data/.gitkeep', 'data/.htaccess'] as $required) {
         if (!isset($entries[$required])) {
@@ -1182,8 +1192,27 @@ function verify_release_package(string $path): void
         'app/Security/SetupRecoveryAuthority.php',
         'database/migrations/047_internal_event_deliveries.sql',
         'database/migrations/048_module_enabled_constraint.sql',
+        'database/migrations/049_public_event_projection.sql',
         'database/migrations/pgsql/011_internal_event_deliveries.sql',
         'database/migrations/pgsql/012_module_enabled_constraint.sql',
+        'database/migrations/pgsql/013_public_event_projection.sql',
+        'app/Core/Events/PublicEventProjection.php',
+        'app/Core/Events/PublicEventEnvelope.php',
+        'app/Core/Events/PublicEventDeadLetterReplayService.php',
+        'app/Core/Events/ReplayOperatorAuthorization.php',
+        'app/Modules/Placement/Application/ApplicationStatusWriter.php',
+        'contracts/public-integration.v1.json',
+        'contracts/schemas/public-event-envelope.v1.schema.json',
+        'contracts/schemas/application.status_changed.v1.schema.json',
+        'contracts/examples/application.status_changed.v1.json',
+        'contracts/fixtures/application.status_changed.v1.consumer.json',
+        'contracts/fixtures/application.status_changed.v1.future-optional.consumer.json',
+        'docs/integrations/events.md',
+        'docs/compatibility.md',
+        'docs/security/integration-threat-model.md',
+        'tests/public_event_contract.php',
+        'tests/validate_public_event_schemas.py',
+        'tests/requirements-public-event-schema.txt',
         'tests/authorization_failure_contract.php',
         'tests/authorization_state_contract.php',
         'tests/installation_state_contract.php',
@@ -1207,8 +1236,13 @@ function verify_release_package(string $path): void
             throw new RuntimeException('Release package contains forbidden runtime data.');
         }
     }
+    $integrationFailures = public_integration_artifact_failures($integrationDocuments);
+    if ($integrationFailures !== []) {
+        throw new RuntimeException('Release package integration contract is invalid: ' . $integrationFailures[0]);
+    }
     echo "Package checksum verified: {$path}\n";
     echo "Package archive inspected: " . count($entries) . " files.\n";
+    echo "Package integration JSON verified.\n";
 }
 
 function release_package_files(): array
@@ -1226,6 +1260,7 @@ function release_package_files(): array
         'placement',
         'app',
         'config',
+        'contracts',
         'database',
         'docs',
         'examples',
@@ -1379,23 +1414,29 @@ function replay_internal_delivery(array $args): void
     $options = cli_options($args);
     $eventPublicId = trim((string) ($options['event'] ?? ''));
     $subscriptionId = trim((string) ($options['subscription'] ?? ''));
-    $actorUserId = filter_var(
-        $options['actor-user-id'] ?? null,
-        FILTER_VALIDATE_INT,
-        ['options' => ['min_range' => 1]],
-    );
-    if ($actorUserId === false) {
-        throw new UserVisibleException(
-            'INTERNAL_EVENT_REPLAY_ACTOR_INVALID',
-            'Use --actor-user-id with an active operator user ID.',
-        );
-    }
+    $actorUserId = replay_actor_user_id($options, ReplayOperatorAuthorization::INTERNAL_DELIVERY);
     $result = (new InternalEventDeliveryReplayService())->replay(
         $eventPublicId,
         $subscriptionId,
-        (int) $actorUserId,
+        $actorUserId,
     );
     echo "Internal observer replay {$result['status']}: {$eventPublicId},{$subscriptionId}\n";
+}
+
+function replay_public_event(array $args): void
+{
+    if (!Database::hasInstalledMarkerStrict()) {
+        throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
+    }
+    Database::migrate();
+    $options = cli_options($args);
+    $eventPublicId = trim((string) ($options['event'] ?? ''));
+    $actorUserId = replay_actor_user_id($options, ReplayOperatorAuthorization::PUBLIC_EVENT);
+    $result = (new PublicEventDeadLetterReplayService())->replay(
+        $eventPublicId,
+        $actorUserId,
+    );
+    echo "Public event replay {$result['status']}: {$eventPublicId}\n";
 }
 
 function replay_internal_fanout(array $args): void
@@ -1407,23 +1448,27 @@ function replay_internal_fanout(array $args): void
     $options = cli_options($args);
     $eventPublicId = trim((string) ($options['event'] ?? ''));
     $moduleKey = trim((string) ($options['module'] ?? ''));
+    $actorUserId = replay_actor_user_id($options, ReplayOperatorAuthorization::INTERNAL_FANOUT);
+    $result = (new InternalEventFanoutReplayService())->replay(
+        $eventPublicId,
+        $moduleKey,
+        $actorUserId,
+    );
+    echo "Internal observer fanout replay {$result['status']}: {$eventPublicId},{$moduleKey}\n";
+}
+
+/** @param array<string, string|bool> $options */
+function replay_actor_user_id(array $options, string $context): int
+{
     $actorUserId = filter_var(
         $options['actor-user-id'] ?? null,
         FILTER_VALIDATE_INT,
         ['options' => ['min_range' => 1]],
     );
     if ($actorUserId === false) {
-        throw new UserVisibleException(
-            'INTERNAL_EVENT_FANOUT_REPLAY_ACTOR_INVALID',
-            'Use --actor-user-id with an active operator user ID.',
-        );
+        throw ReplayOperatorAuthorization::invalid($context);
     }
-    $result = (new InternalEventFanoutReplayService())->replay(
-        $eventPublicId,
-        $moduleKey,
-        (int) $actorUserId,
-    );
-    echo "Internal observer fanout replay {$result['status']}: {$eventPublicId},{$moduleKey}\n";
+    return (int) $actorUserId;
 }
 
 function certify_notifications(array $args): void
@@ -2109,11 +2154,22 @@ function publication_check(): void
         'database/.htaccess',
         'database/migrations/047_internal_event_deliveries.sql',
         'database/migrations/048_module_enabled_constraint.sql',
+        'database/migrations/049_public_event_projection.sql',
         'database/migrations/pgsql/001_portal_baseline.sql',
         'database/migrations/pgsql/011_internal_event_deliveries.sql',
         'database/migrations/pgsql/012_module_enabled_constraint.sql',
+        'database/migrations/pgsql/013_public_event_projection.sql',
+        'contracts/public-integration.v1.json',
+        'contracts/schemas/public-event-envelope.v1.schema.json',
+        'contracts/schemas/application.status_changed.v1.schema.json',
+        'contracts/examples/application.status_changed.v1.json',
+        'contracts/fixtures/application.status_changed.v1.consumer.json',
+        'contracts/fixtures/application.status_changed.v1.future-optional.consumer.json',
         'tests/.htaccess',
         'docs/environment.md',
+        'docs/integrations/events.md',
+        'docs/compatibility.md',
+        'docs/security/integration-threat-model.md',
         'docs/release-checklist.md',
         'docs/migration-from-legacy.md',
         'docs/releases/v0.1.0-alpha.3.md',
@@ -2123,6 +2179,8 @@ function publication_check(): void
         'app/Core/Events/InternalEventDeliveryWorker.php',
         'app/Core/Events/InternalEventSubscriberRegistry.php',
         'app/Core/Events/InternalEventSubscription.php',
+        'app/Core/Events/PublicEventDeadLetterReplayService.php',
+        'app/Core/Events/ReplayOperatorAuthorization.php',
         'app/Core/Modules/ModuleVersionIntegrity.php',
         'app/Core/Persistence/DatabaseConnectionInvalidException.php',
         'app/Core/Security/AuthorizationUnavailable.php',
@@ -2143,6 +2201,9 @@ function publication_check(): void
         'tests/database_connection_cleanup_contract.php',
         'tests/legacy_backup_compatibility_contract.php',
         'tests/internal_event_delivery_contract.php',
+        'tests/public_event_contract.php',
+        'tests/validate_public_event_schemas.py',
+        'tests/requirements-public-event-schema.txt',
         'tests/authorized_setup_recovery_fixture.php',
         'tests/authorization_failure_contract.php',
         'tests/setup_authorization_contract.php',
@@ -2158,6 +2219,16 @@ function publication_check(): void
         if (!is_file(__DIR__ . '/' . $path)) {
             $failures[] = "Missing required release file: {$path}";
         }
+    }
+
+    $integrationDocuments = [];
+    foreach (public_integration_artifact_paths() as $path) {
+        if (is_file(__DIR__ . '/' . $path)) {
+            $integrationDocuments[$path] = (string) file_get_contents(__DIR__ . '/' . $path);
+        }
+    }
+    foreach (public_integration_artifact_failures($integrationDocuments) as $failure) {
+        $failures[] = 'Invalid public integration artifact: ' . $failure;
     }
 
     $gitignore = is_file(__DIR__ . '/.gitignore') ? (string) file_get_contents(__DIR__ . '/.gitignore') : '';
@@ -2189,6 +2260,212 @@ function publication_check(): void
     echo "OK: Private archive and runtime data patterns are ignored.\n";
     echo "OK: No forbidden publish-risk files found outside allowed paths.\n";
     echo "OK: No obvious secret or token patterns found in public files.\n";
+    echo "OK: Public integration JSON and frozen compatibility fixtures are valid.\n";
+}
+
+/** @return list<string> */
+function public_integration_artifact_paths(): array
+{
+    return [
+        'contracts/public-integration.v1.json',
+        'contracts/schemas/public-event-envelope.v1.schema.json',
+        'contracts/schemas/application.status_changed.v1.schema.json',
+        'contracts/examples/application.status_changed.v1.json',
+        'contracts/fixtures/application.status_changed.v1.consumer.json',
+        'contracts/fixtures/application.status_changed.v1.future-optional.consumer.json',
+    ];
+}
+
+/**
+ * @param array<string, string> $documents
+ * @return list<string>
+ */
+function public_integration_artifact_failures(array $documents): array
+{
+    $decoded = [];
+    $failures = [];
+    foreach (public_integration_artifact_paths() as $path) {
+        if (!array_key_exists($path, $documents)) {
+            $failures[] = 'missing ' . $path;
+            continue;
+        }
+        try {
+            $value = json_decode($documents[$path], true, 64, JSON_THROW_ON_ERROR);
+        } catch (JsonException) {
+            $failures[] = 'malformed JSON in ' . $path;
+            continue;
+        }
+        if (!is_array($value) || array_is_list($value)) {
+            $failures[] = 'top-level JSON object required in ' . $path;
+            continue;
+        }
+        $decoded[$path] = $value;
+    }
+    if ($failures !== []) {
+        return $failures;
+    }
+
+    $contractPath = 'contracts/public-integration.v1.json';
+    $expectedContract = [
+        'schema' => 1,
+        'event_schemas' => ['application.status_changed' => [1]],
+        'api_scopes' => [],
+        'engine_api' => [],
+    ];
+    if ($decoded[$contractPath] !== $expectedContract) {
+        $failures[] = 'public-integration.v1.json differs from the frozen event-only declaration';
+    }
+
+    $requiredEnvelope = [
+        'event_id', 'event_type', 'schema_version', 'occurred_at',
+        'instance_id', 'aggregate', 'data', 'trace',
+    ];
+    foreach ([
+        'contracts/schemas/public-event-envelope.v1.schema.json',
+        'contracts/schemas/application.status_changed.v1.schema.json',
+    ] as $path) {
+        $schema = $decoded[$path];
+        $required = $schema['required'] ?? null;
+        if (($schema['$schema'] ?? null) !== 'https://json-schema.org/draft/2020-12/schema'
+            || ($schema['type'] ?? null) !== 'object'
+            || ($schema['additionalProperties'] ?? null) !== false
+            || !is_array($required)
+            || array_values($required) !== $requiredEnvelope
+            || (($schema['properties']['event_type']['const'] ?? null) !== 'application.status_changed')
+            || (($schema['properties']['schema_version']['const'] ?? null) !== 1)
+            || (($schema['properties']['aggregate']['additionalProperties'] ?? null) !== false)
+            || (($schema['properties']['trace']['additionalProperties'] ?? null) !== false)) {
+            $failures[] = 'strict producer envelope constraints differ in ' . $path;
+        }
+    }
+    $eventSchema = $decoded['contracts/schemas/application.status_changed.v1.schema.json'];
+    $envelopeSchema = $decoded['contracts/schemas/public-event-envelope.v1.schema.json'];
+    if (!is_string($eventSchema['$id'] ?? null)
+        || ($envelopeSchema['properties']['data']['$ref'] ?? null)
+            !== $eventSchema['$id'] . '#/$defs/data') {
+        $failures[] = 'envelope data reference does not resolve from the event schema absolute identifier';
+    }
+    if (($eventSchema['$defs']['data']['additionalProperties'] ?? null) !== false
+        || ($eventSchema['$defs']['data']['required'] ?? null) !== ['from_status', 'to_status']) {
+        $failures[] = 'application status data schema is not strict';
+    }
+
+    $example = $decoded['contracts/examples/application.status_changed.v1.json'];
+    $frozen = $decoded['contracts/fixtures/application.status_changed.v1.consumer.json'];
+    $future = $decoded['contracts/fixtures/application.status_changed.v1.future-optional.consumer.json'];
+    foreach (public_event_wire_failures($example, true) as $failure) {
+        $failures[] = 'example: ' . $failure;
+    }
+    foreach (public_event_wire_failures($frozen, true) as $failure) {
+        $failures[] = 'frozen consumer fixture: ' . $failure;
+    }
+    foreach (public_event_wire_failures($future, false) as $failure) {
+        $failures[] = 'future-optional consumer fixture: ' . $failure;
+    }
+    if (public_event_wire_failures($future, true) === []) {
+        $failures[] = 'future-optional fixture does not prove strict producer rejection';
+    }
+    if (public_event_consumer_view($frozen) !== public_event_consumer_view($future)) {
+        $failures[] = 'future-optional fixture changes the frozen v1 consumer view';
+    }
+
+    return $failures;
+}
+
+/**
+ * @param array<string, mixed> $event
+ * @return list<string>
+ */
+function public_event_wire_failures(array $event, bool $strict): array
+{
+    $failures = [];
+    $required = [
+        'event_id', 'event_type', 'schema_version', 'occurred_at',
+        'instance_id', 'aggregate', 'data', 'trace',
+    ];
+    foreach ($required as $key) {
+        if (!array_key_exists($key, $event)) {
+            $failures[] = 'missing ' . $key;
+        }
+    }
+    if ($strict && array_keys($event) !== $required) {
+        $failures[] = 'unexpected top-level field';
+    }
+    foreach ([
+        'event_id' => '/^event_[a-f0-9]{32}$/D',
+        'occurred_at' => '/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/D',
+        'instance_id' => '/^(?:inst|tenant)_[a-f0-9]{32}$/D',
+    ] as $key => $pattern) {
+        if (!is_string($event[$key] ?? null) || preg_match($pattern, $event[$key]) !== 1) {
+            $failures[] = 'invalid ' . $key;
+        }
+    }
+    if (($event['event_type'] ?? null) !== 'application.status_changed'
+        || ($event['schema_version'] ?? null) !== 1) {
+        $failures[] = 'unsupported event catalog identity';
+    }
+
+    $aggregate = $event['aggregate'] ?? null;
+    if (!is_array($aggregate) || array_is_list($aggregate)) {
+        $failures[] = 'aggregate object required';
+    } else {
+        if ($strict && array_keys($aggregate) !== ['type', 'id', 'version']) {
+            $failures[] = 'unexpected aggregate field';
+        }
+        if (($aggregate['type'] ?? null) !== 'application'
+            || !is_string($aggregate['id'] ?? null)
+            || preg_match('/^application_[a-f0-9]{32}$/D', $aggregate['id']) !== 1
+            || !is_int($aggregate['version'] ?? null)
+            || $aggregate['version'] < 2) {
+            $failures[] = 'invalid aggregate';
+        }
+    }
+
+    $data = $event['data'] ?? null;
+    if (!is_array($data) || array_is_list($data)) {
+        $failures[] = 'data object required';
+    } else {
+        if ($strict && array_keys($data) !== ['from_status', 'to_status']) {
+            $failures[] = 'unexpected data field';
+        }
+        foreach (['from_status', 'to_status'] as $field) {
+            if (!is_string($data[$field] ?? null)
+                || preg_match('/^[a-z][a-z0-9_]{0,79}$/D', $data[$field]) !== 1) {
+                $failures[] = 'invalid ' . $field;
+            }
+        }
+        if (($data['from_status'] ?? null) === ($data['to_status'] ?? null)) {
+            $failures[] = 'status change is not real';
+        }
+    }
+
+    $trace = $event['trace'] ?? null;
+    if (!is_array($trace) || array_is_list($trace)) {
+        $failures[] = 'trace object required';
+    } else {
+        if ($strict && array_keys($trace) !== ['correlation_id']) {
+            $failures[] = 'unexpected trace field';
+        }
+        if (!is_string($trace['correlation_id'] ?? null)
+            || preg_match('/^req_[a-f0-9]{24}$/D', $trace['correlation_id']) !== 1) {
+            $failures[] = 'invalid correlation_id';
+        }
+    }
+    return $failures;
+}
+
+/** @param array<string, mixed> $event @return array<string, int|string> */
+function public_event_consumer_view(array $event): array
+{
+    return [
+        'event_id' => (string) ($event['event_id'] ?? ''),
+        'event_type' => (string) ($event['event_type'] ?? ''),
+        'schema_version' => (int) ($event['schema_version'] ?? 0),
+        'aggregate_id' => (string) ($event['aggregate']['id'] ?? ''),
+        'aggregate_version' => (int) ($event['aggregate']['version'] ?? 0),
+        'from_status' => (string) ($event['data']['from_status'] ?? ''),
+        'to_status' => (string) ($event['data']['to_status'] ?? ''),
+    ];
 }
 
 function publication_forbidden_files(string $root): array
@@ -2501,6 +2778,7 @@ function help(): void
     echo "  php placement verify-package /path/to/campus-placement-engine-version.tar.gz|.zip\n";
     echo "  php placement deliver-notifications [--channel=file|webhook|email|sms|whatsapp] [--limit=100] [--dry-run]\n";
     echo "  php placement work-outbox [--limit=100]\n";
+    echo "  php placement replay-public-event --event=event_ID --actor-user-id=USER_ID\n";
     echo "  php placement replay-internal-delivery --event=event_ID --subscription=internal.module.name.v1 --actor-user-id=USER_ID\n";
     echo "  php placement replay-internal-fanout --event=event_ID --module=MODULE_KEY --actor-user-id=USER_ID\n";
     echo "  php placement certify-notifications --channel=sms|whatsapp [--require-live]\n";

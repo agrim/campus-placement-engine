@@ -41,17 +41,23 @@ External integrations may not:
 
 ## Public extension surfaces
 
-The governed public surfaces are introduced in dependency order:
+The governed public surfaces are introduced in dependency order. Phase 1 is
+implemented as the event-only contract in `contracts/public-integration.v1.json`:
 
-1. versioned, privacy-minimized event schemas;
-2. signed outbound webhooks with at-least-once delivery;
-3. an institution-local, scoped, versioned REST API;
-4. an out-of-process connector manifest and deployment contract.
+1. `application.status_changed` schema 1, delivered at least once through the
+   existing outbox sinks;
+2. a future institution-local, scoped, versioned REST API, if approved;
+3. broader out-of-process connector capabilities only after their public
+   contracts are governed.
+
+The Phase 1 declaration has empty `api_scopes` and `engine_api` arrays. It does
+not introduce an API surface.
 
 Internal PHP class names, database tables, templates, and module subscriber
 interfaces are not public contracts. The public compatibility policy is
 versioned independently from the Engine release and fails closed on unknown
-future contract versions.
+future contract versions. Private outbox payloads are never public by inference;
+external delivery requires a complete explicit public projection.
 
 ## Engine and Cloud ownership
 

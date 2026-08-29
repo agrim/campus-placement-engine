@@ -266,7 +266,9 @@ final class PortalPortabilityService
         if (($payload['schema'] ?? '') !== self::CORE_SCHEMA || !is_array($payload['institution'] ?? null)) {
             throw new RuntimeException('Portability core payload has an unsupported schema.');
         }
-        if (preg_match('/^inst_[a-f0-9]{32}$/', (string) ($payload['institution']['public_id'] ?? '')) !== 1) {
+        $institutionPublicId = $payload['institution']['public_id'] ?? null;
+        if (!is_string($institutionPublicId)
+            || preg_match('/^(?:inst|tenant)_[a-f0-9]{32}$/D', $institutionPublicId) !== 1) {
             throw new RuntimeException('Portability core payload has an invalid institution public id.');
         }
         (new ConfigurationSnapshotService($this->pdo))->validatePortabilityPayload(

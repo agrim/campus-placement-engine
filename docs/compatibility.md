@@ -1,0 +1,51 @@
+# Public integration compatibility
+
+The machine-readable compatibility declaration is
+`contracts/public-integration.v1.json`. Version 1 is exactly:
+
+```json
+{
+  "schema": 1,
+  "event_schemas": {
+    "application.status_changed": [1]
+  },
+  "api_scopes": [],
+  "engine_api": []
+}
+```
+
+This is an event-only contract. It grants no Engine API surface and no API
+scope. Internal PHP module APIs, `DomainEvent` payloads, database schemas, and
+observer subscriptions are outside this compatibility promise.
+
+## Version rules
+
+- A connector validates the top-level contract schema before using any other
+  declaration and rejects an unknown future contract schema.
+- Its event permission set must exactly match the compatible event declarations
+  it accepts. An undeclared event or unsupported event schema fails closed.
+- `application.status_changed` schema `1` is described by the strict producer
+  schemas under `contracts/schemas/`. The example under `contracts/examples/`
+  must validate against them. The envelope's data reference is an absolute URN
+  resolved from the event schema `$id`; CI and release validation register both
+  resources in a pinned Draft 2020-12 implementation.
+- The Engine v1 producer emits no undeclared envelope, aggregate, data, or trace
+  fields. A new incompatible shape requires a new event schema version and a
+  catalog update.
+- Consumers should read only the required v1 fields and ignore unknown optional
+  fields. The frozen and future-optional fixtures under `contracts/fixtures/`
+  prove that defensive consumer behavior; the optional fixture is not an Engine
+  v1 producer payload.
+- Engine release versions and public integration schema versions are separate.
+  A connector must check the compatibility artifact in the pinned, verified
+  Engine release rather than infer support from a release number.
+
+The default runtime and downloadable package have no JSON Schema library
+dependency. The portable PHP contract invokes the pinned test-only validator
+and fails closed when it is absent, so a lightweight artifact check is never
+reported as proof of standards-compliant reference resolution.
+
+Compatibility is a schema and behavior promise, not an uninterrupted stream
+promise. Delivery is at least once and ordered only within one application
+aggregate. Restores break stream continuity and require connector
+resynchronization as described in `docs/integrations/events.md`.

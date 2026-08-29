@@ -77,16 +77,24 @@ Keep `internal_event_observer_events` in `config/modules.php` exactly aligned
 with each module's declarations. Zero or mismatched declarations fail and retry;
 they are never silently marked expanded. Operators can recover corrected dead
 letters with `replay-internal-fanout` or `replay-internal-delivery`, using the
-exact event/module or event/subscription identity and an active operator user ID.
-Both operations are transactionally fenced and audit only fixed metadata.
+exact event/module or event/subscription identity and an active local
+administrator user ID. Missing, inactive, nonexistent, and non-admin actors are
+rejected; local shell access does not grant replay authority. Both operations
+are transactionally fenced and audit only fixed metadata.
 
-The outbox envelope is `career_services.domain_event.v1`. Its public event ID is
-also the stable idempotency key in file and webhook delivery, and webhook
-requests send it in `X-CPE-Idempotency-Key`. Consumers must deduplicate on that
-key: a successful side effect whose acknowledgement loses its worker claim is
-reported as outcome unknown and may be replayed after stale-claim recovery. Add
-only stable, necessary references to payloads; do not place passwords, session
-IDs, gateway tokens, or unbounded private notes in an event.
+`DomainEvent`, its payload, module fanout rows, and observer delivery state are
+private Engine implementation details. They must not be documented or consumed
+as an institution-facing wire format. A source transaction may additionally
+attach a governed `PublicEventProjection`; only a complete explicit projection
+is eligible for external delivery, and the worker serializes it through the
+public envelope without selecting or decoding the private payload. The current
+catalog contains only `application.status_changed` schema 1. See
+`docs/integrations/events.md` and `docs/compatibility.md`.
+
+The public `event_id` is the stable connector deduplication key. A successful
+side effect whose acknowledgement loses its worker claim may be delivered again,
+so external connectors must be idempotent. Internal observers keep their own
+stable subscription identities and independent at-least-once state.
 
 ## Privacy And Portability
 

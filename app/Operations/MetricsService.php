@@ -24,11 +24,17 @@ final class MetricsService
             'app_version' => (string) cpe_config('app.version', '0.0.0'),
             'database_driver' => Database::driver(),
             'pending_migrations' => count(Database::pendingMigrations()),
-            'domain_events_pending' => $this->columnExists('domain_event_outbox', 'failed_at')
-                ? $this->count('SELECT COUNT(*) FROM domain_event_outbox WHERE processed_at IS NULL AND failed_at IS NULL')
-                : $this->count('SELECT COUNT(*) FROM domain_event_outbox WHERE processed_at IS NULL'),
-            'domain_events_dead_lettered' => $this->columnExists('domain_event_outbox', 'failed_at')
-                ? $this->count('SELECT COUNT(*) FROM domain_event_outbox WHERE failed_at IS NOT NULL')
+            'domain_events_pending' => $this->columnExists('domain_event_outbox', 'public_event_type')
+                ? $this->count(
+                    'SELECT COUNT(*) FROM domain_event_outbox
+                     WHERE public_event_type IS NOT NULL AND processed_at IS NULL AND failed_at IS NULL',
+                )
+                : 0,
+            'domain_events_dead_lettered' => $this->columnExists('domain_event_outbox', 'public_event_type')
+                ? $this->count(
+                    'SELECT COUNT(*) FROM domain_event_outbox
+                     WHERE public_event_type IS NOT NULL AND failed_at IS NOT NULL',
+                )
                 : 0,
             'notification_deliveries_queued' => $this->count("SELECT COUNT(*) FROM notification_deliveries WHERE status = 'queued'"),
             'notification_deliveries_failed' => $this->count("SELECT COUNT(*) FROM notification_deliveries WHERE status = 'failed'"),
