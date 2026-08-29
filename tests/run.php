@@ -2160,6 +2160,13 @@ YAML;
     }
     foreach ([$ci, $releaseWorkflow] as $workflow) {
         assert_true(
+            str_contains(
+                $workflow,
+                'echo "CPE_TEST_SCHEMA_PYTHON=$RUNNER_TEMP/cpe-public-schema-validator/bin/python" >> "$GITHUB_ENV"',
+            ),
+            'CI and release must persist the exact pinned schema-validator interpreter for extracted-package subprocesses.',
+        );
+        assert_true(
             str_contains($workflow, 'git archive --format=tar v0.1.0-alpha.1')
                 && str_contains($workflow, 'CPE_ALPHA1_DATABASE_FIXTURE=')
                 && str_contains($workflow, 'CPE_ALPHA1_BACKUP_FIXTURE=')
@@ -2192,6 +2199,14 @@ YAML;
             'CI and release must run the public event contract against a fresh dedicated PostgreSQL database.',
         );
     }
+    $suiteSource = (string) file_get_contents(__FILE__);
+    assert_true(
+        preg_match(
+            "/foreach \(\['CPE_DB_PATH', 'CPE_DB_DRIVER', 'CPE_DATABASE_URL', 'CPE_TEST_SCHEMA_PYTHON'\] as \\$key\)/",
+            $suiteSource,
+        ) === 1,
+        'Extracted-package PHP subprocesses must explicitly forward CPE_TEST_SCHEMA_PYTHON from GITHUB_ENV.',
+    );
     $deployment = (string) file_get_contents($root . '/docs/deployment.md');
     foreach (['examples/deployment/apache-vhost.conf', 'examples/deployment/nginx-server.conf', 'point the virtual host document root at `public/`', 'public/.htaccess', 'CPE_SETUP_TOKEN', 'php placement setup', 'cpe_database_ownership', 'no force/rebind flag', 'cpe.engine-migrations', 'cpe.engine-installation'] as $snippet) {
         assert_true(str_contains($deployment, $snippet), "Missing deployment guidance: {$snippet}");

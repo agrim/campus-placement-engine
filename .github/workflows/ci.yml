@@ -49,6 +49,7 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/cpe-public-schema-validator"
           "$RUNNER_TEMP/cpe-public-schema-validator/bin/python" -m pip install --disable-pip-version-check --requirement tests/requirements-public-event-schema.txt
           "$RUNNER_TEMP/cpe-public-schema-validator/bin/python" tests/validate_public_event_schemas.py
+          echo "CPE_TEST_SCHEMA_PYTHON=$RUNNER_TEMP/cpe-public-schema-validator/bin/python" >> "$GITHUB_ENV"
           echo "$RUNNER_TEMP/cpe-public-schema-validator/bin" >> "$GITHUB_PATH"
 
       - name: Install PostgreSQL 17 client
