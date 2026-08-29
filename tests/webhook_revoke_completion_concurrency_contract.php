@@ -87,23 +87,25 @@ function webhook_revoke_spawn(string $script, array $extraEnvironment): array
 /** @param array{process: resource, stdout: resource, stderr: resource} $worker */
 function webhook_revoke_collect(array $worker): array
 {
+    $status = null;
     webhook_revoke_wait(
-        static function () use ($worker): bool {
-            $status = proc_get_status($worker['process']);
-            return is_array($status) && !($status['running'] ?? false);
+        static function () use ($worker, &$status): bool {
+            $observed = proc_get_status($worker['process']);
+            if (!is_array($observed) || ($observed['running'] ?? false)) {
+                return false;
+            }
+            $status = $observed;
+            return true;
         },
         'worker completion',
     );
-    $status = proc_get_status($worker['process']);
     $stdout = (string) stream_get_contents($worker['stdout']);
     $stderr = (string) stream_get_contents($worker['stderr']);
     fclose($worker['stdout']);
     fclose($worker['stderr']);
     $closeCode = proc_close($worker['process']);
-    $exitCode = (int) ($status['exitcode'] ?? $closeCode);
-    if ($exitCode < 0) {
-        $exitCode = $closeCode;
-    }
+    $capturedExitCode = is_array($status) ? (int) ($status['exitcode'] ?? -1) : -1;
+    $exitCode = $capturedExitCode >= 0 ? $capturedExitCode : $closeCode;
     $decoded = json_decode(trim($stdout), true);
     webhook_revoke_assert(
         $exitCode === 0 && is_array($decoded) && ($decoded['status'] ?? '') === 'ok',

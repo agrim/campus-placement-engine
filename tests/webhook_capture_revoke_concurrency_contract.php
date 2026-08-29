@@ -108,23 +108,25 @@ function webhook_capture_spawn(string $mode, string $ready, string $start, strin
 function webhook_capture_collect(array $worker): array
 {
     webhook_capture_wait(static fn (): bool => is_file($worker['done']), 'worker result');
+    $status = null;
     webhook_capture_wait(
-        static function () use ($worker): bool {
-            $status = proc_get_status($worker['process']);
-            return is_array($status) && !($status['running'] ?? false);
+        static function () use ($worker, &$status): bool {
+            $observed = proc_get_status($worker['process']);
+            if (!is_array($observed) || ($observed['running'] ?? false)) {
+                return false;
+            }
+            $status = $observed;
+            return true;
         },
         'worker completion',
     );
-    $status = proc_get_status($worker['process']);
     $stdout = (string) stream_get_contents($worker['stdout']);
     $stderr = (string) stream_get_contents($worker['stderr']);
     fclose($worker['stdout']);
     fclose($worker['stderr']);
     $closeCode = proc_close($worker['process']);
-    $exitCode = (int) ($status['exitcode'] ?? $closeCode);
-    if ($exitCode < 0) {
-        $exitCode = $closeCode;
-    }
+    $capturedExitCode = is_array($status) ? (int) ($status['exitcode'] ?? -1) : -1;
+    $exitCode = $capturedExitCode >= 0 ? $capturedExitCode : $closeCode;
     $decoded = json_decode(trim($stdout), true);
     webhook_capture_assert(
         $exitCode === 0 && is_array($decoded) && ($decoded['status'] ?? '') === 'ok',
