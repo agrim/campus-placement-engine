@@ -37,9 +37,21 @@ final class ModuleLifecycleService
         }
         $modules = [];
         foreach ($this->definitions as $key => $definition) {
+            ModuleVersionIntegrity::implementationMetadata((string) $key, $definition);
             $manifest = ModuleManifest::fromArray((string) $key, $definition);
             $manifest->assertCompatible((string) cpe_config('app.version', '0.0.0'), $this->definitions);
             $row = $installed[$key] ?? null;
+            if ($row !== null) {
+                $installedVersion = $row['version'] ?? null;
+                if (!is_string($installedVersion)) {
+                    throw \App\Core\Security\AuthorizationUnavailable::moduleState();
+                }
+                ModuleVersionIntegrity::assertDurableMatchesDefinition(
+                    (string) $key,
+                    $installedVersion,
+                    $definition,
+                );
+            }
             $configuredEnabled = $row !== null ? (bool) $row['enabled'] : false;
             $entitled = HostedContext::allowsModule((string) $key);
             $modules[] = [
@@ -60,6 +72,7 @@ final class ModuleLifecycleService
     public function install(string $moduleKey, ?int $actorId = null): void
     {
         $manifest = $this->manifest($moduleKey);
+        $this->assertInstalledVersionIntegrity($moduleKey);
         $changed = $this->transaction(function () use ($manifest, $moduleKey, $actorId): bool {
             foreach ($manifest->requiresModules() as $dependency) {
                 if (!$this->installed($dependency)) {
@@ -98,6 +111,7 @@ final class ModuleLifecycleService
         if (!$this->installed($moduleKey)) {
             $this->install($moduleKey, $actorId);
         }
+        $this->assertInstalledVersionIntegrity($moduleKey);
         $changed = $this->transaction(function () use ($manifest, $moduleKey, $actorId): bool {
             foreach ($manifest->requiresModules() as $dependency) {
                 if (!$this->enabled($dependency)) {
@@ -129,6 +143,7 @@ final class ModuleLifecycleService
     public function disable(string $moduleKey, ?int $actorId = null): void
     {
         $this->manifest($moduleKey);
+        $this->assertInstalledVersionIntegrity($moduleKey);
         $changed = $this->transaction(function () use ($moduleKey, $actorId): bool {
             foreach ($this->modules() as $candidate) {
                 if (!$candidate['enabled'] || !in_array($moduleKey, $candidate['requires_modules'], true)) {
@@ -176,6 +191,7 @@ final class ModuleLifecycleService
         if (!is_array($definition)) {
             throw new UserVisibleException('MODULE_UNKNOWN', 'Unknown module.');
         }
+        ModuleVersionIntegrity::implementationMetadata($moduleKey, $definition);
         $manifest = ModuleManifest::fromArray($moduleKey, $definition);
         $manifest->assertCompatible((string) cpe_config('app.version', '0.0.0'), $this->definitions);
         return $manifest;
@@ -185,9 +201,14 @@ final class ModuleLifecycleService
     {
         $class = (string) ($this->definitions[$moduleKey]['class'] ?? '');
         $module = $class !== '' && class_exists($class) ? new $class() : null;
-        if (!$module instanceof Module || $module->key() !== $moduleKey) {
+        if (!$module instanceof Module) {
             throw new RuntimeException('Module implementation is unavailable: ' . $moduleKey);
         }
+        ModuleVersionIntegrity::implementationManifest(
+            $moduleKey,
+            $module,
+            $this->definitions[$moduleKey],
+        );
         return $module;
     }
 
@@ -196,6 +217,24 @@ final class ModuleLifecycleService
         $stmt = $this->pdo->prepare('SELECT COUNT(*) FROM module_installations WHERE module_key = ?');
         $stmt->execute([$moduleKey]);
         return (int) $stmt->fetchColumn() > 0;
+    }
+
+    private function assertInstalledVersionIntegrity(string $moduleKey): void
+    {
+        $stmt = $this->pdo->prepare('SELECT version FROM module_installations WHERE module_key = ?');
+        $stmt->execute([$moduleKey]);
+        $version = $stmt->fetchColumn();
+        if ($version === false) {
+            return;
+        }
+        if (!is_string($version)) {
+            throw \App\Core\Security\AuthorizationUnavailable::moduleState();
+        }
+        ModuleVersionIntegrity::assertDurableMatchesDefinition(
+            $moduleKey,
+            $version,
+            $this->definitions[$moduleKey],
+        );
     }
 
     private function enabled(string $moduleKey): bool

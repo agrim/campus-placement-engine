@@ -7,6 +7,8 @@ define('CPE_DEFER_HTTP_SESSION', true);
 require __DIR__ . '/../app/bootstrap.php';
 
 use App\Controllers\InstallController;
+use App\Core\Install\InstallationState;
+use App\Core\Install\InstallationStateUnavailable;
 use App\Hosted\HostedContext;
 use App\Security\Csrf;
 use App\Security\SetupAuthorization;
@@ -89,6 +91,21 @@ function cpe_setup_unexpected(Throwable $exception, string $diagnosticCode, stri
     exit;
 }
 
+function cpe_setup_installation_state_unavailable(InstallationStateUnavailable $exception): never
+{
+    $incidentId = IncidentReporter::report(
+        $exception,
+        'CPE_SETUP_INSTALLATION_STATE_UNAVAILABLE',
+        'setup',
+        ['operation' => 'installation_state'],
+    );
+    http_response_code(503);
+    header('Content-Type: text/plain; charset=UTF-8');
+    header('Cache-Control: no-store, private');
+    echo 'Setup state temporarily unavailable. Reference: ' . $incidentId . "\n";
+    exit;
+}
+
 $methodValue = $_SERVER['REQUEST_METHOD'] ?? 'GET';
 $method = is_string($methodValue) ? strtoupper($methodValue) : '';
 try {
@@ -96,16 +113,26 @@ try {
         cpe_setup_hosted_unavailable();
     }
 
-    if (Database::isInstalled()) {
+    // A complete installation is a runtime fact and must not reopen setup,
+    // even when no setup grant remains. Ambiguous markerless state is not
+    // classified here; only an authorized setup probe may recover it below.
+    try {
+        $runtimeInstallationState = Database::installationStateStrict();
+    } catch (InstallationStateUnavailable $runtimeFailure) {
+        try {
+            Database::assertSetupEntryTargetSafeStrict();
+        } catch (InstallationStateUnavailable) {
+            cpe_setup_installation_state_unavailable($runtimeFailure);
+        }
+        $runtimeInstallationState = null;
+    }
+    if ($runtimeInstallationState === InstallationState::INSTALLED) {
         if ($method === 'GET' || $method === 'HEAD') {
             cpe_setup_redirect('/');
         }
         if ($method === 'POST') {
             cpe_setup_installed_conflict();
         }
-        cpe_setup_not_found();
-    }
-    if ($method !== 'GET' && $method !== 'POST') {
         cpe_setup_not_found();
     }
 
@@ -148,6 +175,30 @@ try {
     if ($authorized
         && ($access['mode'] ?? null) === SetupAuthorization::MODE_LOCAL
         && !SetupHttp::localTopologyAllowed($_SERVER)) {
+        cpe_setup_not_found();
+    }
+    if ($authorized) {
+        try {
+            try {
+                $installationState = Database::installationStateStrict();
+            } catch (InstallationStateUnavailable) {
+                $recoveryAuthority = $authorization->issueRecoveryAuthority();
+                $installationState = Database::installationStateForAuthorizedSetupStrict($recoveryAuthority);
+            }
+        } catch (InstallationStateUnavailable $e) {
+            cpe_setup_installation_state_unavailable($e);
+        }
+        if ($installationState === InstallationState::INSTALLED) {
+            if ($method === 'GET' || $method === 'HEAD') {
+                cpe_setup_redirect('/');
+            }
+            if ($method === 'POST') {
+                cpe_setup_installed_conflict();
+            }
+            cpe_setup_not_found();
+        }
+    }
+    if ($method !== 'GET' && $method !== 'POST') {
         cpe_setup_not_found();
     }
     if ($method === 'GET') {
@@ -219,6 +270,8 @@ try {
     cpe_setup_not_found();
 } catch (SetupAuthorizationDenied $e) {
     cpe_setup_authorization_denied($e, 'request');
+} catch (InstallationStateUnavailable $e) {
+    cpe_setup_installation_state_unavailable($e);
 } catch (Throwable $e) {
     cpe_setup_unexpected($e, 'CPE_SETUP_REQUEST_FAILED', 'request');
 }

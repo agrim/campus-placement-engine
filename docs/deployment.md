@@ -227,6 +227,11 @@ CPE_ADMIN_PASSWORD='change-this-password' php placement install \
   --admin-email=admin@example.edu
 ```
 
+The CLI installer accepts only a genuinely empty target. If a prior setup
+attempt already created the Engine schema but did not commit `installed_at`,
+use the browser installer with an explicit setup authorization credential to
+retry. Mutable CLI process metadata is not a recovery credential.
+
 Optional flags:
 
 - `--site-name='Placement Desk'`

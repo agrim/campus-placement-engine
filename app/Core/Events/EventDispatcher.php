@@ -4,32 +4,19 @@ declare(strict_types=1);
 
 namespace App\Core\Events;
 
-use App\Core\Modules\ModuleManager;
-use App\Core\Modules\ProvidesEventSubscribers;
-use App\Support\IncidentReporter;
+use App\Core\Modules\ModuleRegistry;
+use App\Core\Persistence\WriteTransaction;
+use App\Support\Database;
 use PDO;
 use RuntimeException;
-use Throwable;
 
 final class EventDispatcher
 {
-    private array $subscribers = [];
-
-    public function __construct(private readonly PDO $pdo, ModuleManager $modules)
-    {
-        foreach ($modules->modules() as $module) {
-            if (!$module instanceof ProvidesEventSubscribers) {
-                continue;
-            }
-            foreach ($module->eventSubscribers() as $eventName => $listeners) {
-                foreach ($listeners as $listener) {
-                    if (!is_callable($listener)) {
-                        throw new RuntimeException('Module event subscriber is not callable: ' . $eventName);
-                    }
-                    $this->subscribers[$eventName][] = $listener;
-                }
-            }
-        }
+    public function __construct(
+        private readonly PDO $pdo,
+        private readonly ModuleRegistry $modules,
+        private readonly ?InternalEventSubscriberRegistry $subscribers = null,
+    ) {
     }
 
     public function dispatch(DomainEvent $event): string
@@ -38,66 +25,81 @@ final class EventDispatcher
             throw new RuntimeException('Invalid domain event name: ' . $event->name);
         }
         $publicId = 'event_' . bin2hex(random_bytes(16));
-        $institutionId = $this->pdo->query("SELECT id FROM institutions WHERE slug = 'default'")->fetchColumn();
-        if ($institutionId === false) {
-            throw new RuntimeException('Cannot publish an event without an institution context.');
-        }
-        $stmt = $this->pdo->prepare(
-            'INSERT INTO domain_event_outbox
-             (public_id, event_name, aggregate_type, aggregate_public_id, institution_id, module_key,
-              payload_json, occurred_at, available_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
-        );
-        $stmt->execute([
-            $publicId,
-            $event->name,
-            $event->aggregateType,
-            $event->aggregatePublicId,
-            (int) $institutionId,
-            $event->moduleKey,
-            json_encode($event->payload, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES),
-            $event->occurredAt,
-            $event->occurredAt,
-        ]);
-        foreach ($this->subscribers[$event->name] ?? [] as $listener) {
-            $listener($event);
-        }
+        $payloadJson = json_encode($event->payload, JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
+        WriteTransaction::run($this->pdo, function () use ($event, $payloadJson, $publicId): void {
+            $eligibleModuleKeys = $this->eligibleModuleKeys($event->name);
+            $institutionId = $this->pdo->query("SELECT id FROM institutions WHERE slug = 'default'")->fetchColumn();
+            if ($institutionId === false) {
+                throw new RuntimeException('Cannot publish an event without an institution context.');
+            }
+            $stmt = $this->pdo->prepare(
+                'INSERT INTO domain_event_outbox
+                 (public_id, event_name, aggregate_type, aggregate_public_id, institution_id, module_key,
+                  payload_json, occurred_at, available_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+            );
+            $stmt->execute([
+                $publicId,
+                $event->name,
+                $event->aggregateType,
+                $event->aggregatePublicId,
+                (int) $institutionId,
+                $event->moduleKey,
+                $payloadJson,
+                $event->occurredAt,
+                $event->occurredAt,
+            ]);
+            $eventId = Database::lastInsertId($this->pdo);
+            if ($eligibleModuleKeys === []) {
+                return;
+            }
+            $createdAt = cpe_now();
+            $fanout = $this->pdo->prepare(
+                'INSERT INTO domain_event_module_fanout
+                 (event_id, module_key, status, attempt_count, available_at, last_error, created_at, updated_at)
+                 VALUES (?, ?, ?, 0, ?, ?, ?, ?)'
+            );
+            foreach ($eligibleModuleKeys as $moduleKey) {
+                $fanout->execute([
+                    $eventId,
+                    $moduleKey,
+                    'pending',
+                    $event->occurredAt,
+                    '',
+                    $createdAt,
+                    $createdAt,
+                ]);
+            }
+        });
         return $publicId;
     }
 
-    public function pending(int $limit = 100): array
+    /** @return list<string> */
+    private function eligibleModuleKeys(string $eventName): array
     {
-        $limit = max(1, min(1000, $limit));
-        $stmt = $this->pdo->prepare(
-            "SELECT * FROM domain_event_outbox
-             WHERE processed_at IS NULL AND available_at <= ?
-             ORDER BY id LIMIT {$limit}"
-        );
-        $stmt->execute([cpe_now()]);
-        return $stmt->fetchAll();
+        if ($this->subscribers !== null) {
+            return $this->subscribers->moduleKeysForEvent($eventName);
+        }
+
+        $keys = [];
+        foreach ($this->modules->enabled() as $moduleKey => $definition) {
+            $events = $definition['internal_event_observer_events'] ?? null;
+            if (!is_array($events)) {
+                throw new RuntimeException('Bundled module event eligibility metadata is invalid.');
+            }
+            $normalized = [];
+            foreach ($events as $declaredEvent) {
+                if (!is_string($declaredEvent)
+                    || preg_match('/^[a-z][a-z0-9_.]{2,127}$/D', $declaredEvent) !== 1) {
+                    throw new RuntimeException('Bundled module event eligibility metadata is invalid.');
+                }
+                $normalized[$declaredEvent] = true;
+            }
+            if (isset($normalized[$eventName])) {
+                $keys[] = (string) $moduleKey;
+            }
+        }
+        return $keys;
     }
 
-    public function markProcessed(int $eventId): void
-    {
-        $stmt = $this->pdo->prepare('UPDATE domain_event_outbox SET processed_at = ?, attempts = attempts + 1, last_error = ? WHERE id = ?');
-        $stmt->execute([cpe_now(), '', $eventId]);
-    }
-
-    public function markFailed(int $eventId, Throwable|string $failure): void
-    {
-        $exception = $failure instanceof Throwable
-            ? $failure
-            : new RuntimeException('Domain event dispatch failed.');
-        $incidentId = IncidentReporter::report(
-            $exception,
-            'CPE_DOMAIN_EVENT_DISPATCH_FAILED',
-            'worker',
-            ['operation' => 'domain_event.dispatch', 'status' => 'failed'],
-        );
-        $stmt = $this->pdo->prepare('UPDATE domain_event_outbox SET attempts = attempts + 1, last_error = ? WHERE id = ?');
-        $stmt->execute([
-            IncidentReporter::reference('CPE_DOMAIN_EVENT_DISPATCH_FAILED', $incidentId),
-            $eventId,
-        ]);
-    }
 }

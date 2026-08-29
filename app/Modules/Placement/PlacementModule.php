@@ -26,14 +26,19 @@ use App\Modules\Placement\Privacy\PlacementPrivacyHandler;
 
 final class PlacementModule implements Module, ProvidesPortability, ProvidesPrivacy
 {
+    public const CPE_MODULE_KEY = 'placement';
+    public const CPE_MODULE_VERSION = '0.1.0';
+
     public function key(): string
     {
-        return 'placement';
+        return self::CPE_MODULE_KEY;
     }
 
     public function manifest(): ModuleManifest
     {
-        return ModuleManifest::fromArray($this->key(), cpe_config('modules.' . $this->key(), []));
+        $definition = (array) cpe_config('modules.' . self::CPE_MODULE_KEY, []);
+        $definition['version'] = self::CPE_MODULE_VERSION;
+        return ModuleManifest::fromArray(self::CPE_MODULE_KEY, $definition);
     }
 
     public function portabilityHandler(): ModulePortabilityHandler

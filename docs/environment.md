@@ -147,10 +147,13 @@ Configure at most one sink:
 | `CPE_DOMAIN_EVENT_TIMEOUT` | Webhook timeout seconds, bounded from 1 to 30. |
 | `CPE_DOMAIN_EVENT_LOCK_SECONDS` | Stale claim threshold, default 300. |
 | `CPE_DOMAIN_EVENT_MAX_ATTEMPTS` | Attempts before dead letter, default 10. |
+| `CPE_DOMAIN_EVENT_FANOUT_MAX_ATTEMPTS` | Module-declaration expansion attempts before dead letter; defaults to `CPE_DOMAIN_EVENT_MAX_ATTEMPTS`. |
 
-Run `php placement work-outbox` from cron or the hosted scheduler. With no
-external sink, the command acknowledges events as internal after in-process
-module subscribers have run.
+Run `php placement work-outbox` from cron or the hosted scheduler. The command
+processes durable module declaration fanout, internal observer deliveries, and
+the existing external event outbox independently. With no external sink, `delivered_to=internal` means only
+that no out-of-process destination was configured; internal observer completion
+is tracked per stable subscription in its own delivery state.
 
 ## Managed-hosting adapter
 

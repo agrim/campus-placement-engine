@@ -157,6 +157,8 @@ php placement package --target=dist --force
 php placement verify-package /path/to/campus-placement-engine-version.zip
 php placement deliver-notifications [--channel=file|webhook|email|sms|whatsapp] [--dry-run]
 php placement work-outbox [--limit=100]
+php placement replay-internal-delivery --event=event_ID --subscription=internal.module.name.v1 --actor-user-id=USER_ID
+php placement replay-internal-fanout --event=event_ID --module=MODULE_KEY --actor-user-id=USER_ID
 php placement certify-notifications --channel=sms|whatsapp [--require-live]
 php placement smoke-http [--base-url=http://127.0.0.1:8000] [--restricted-email=atlas@example.test]
 php placement load-smoke [--base-url=http://127.0.0.1:8000] [--requests=50] [--concurrency=5]
@@ -222,7 +224,9 @@ tenant provisioning, billing, infrastructure, entitlements, and fleet operations
 are intentionally not part of this public repository. For tested backup and
 restore procedures, see [docs/disaster-recovery.md](docs/disaster-recovery.md).
 For module boundaries and extension rules, see
-[docs/module-development.md](docs/module-development.md). For health, metrics,
+[docs/architecture/extensions.md](docs/architecture/extensions.md) and the
+Engine-contributor-only [docs/module-development.md](docs/module-development.md).
+For health, metrics,
 SSO, sessions, logs, and outbox operations, see
 [docs/security-operations.md](docs/security-operations.md).
 For the extracted product shape, see [docs/functional-spec.md](docs/functional-spec.md),

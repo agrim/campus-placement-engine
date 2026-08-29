@@ -20,6 +20,7 @@ putenv('CPE_LOG_PATH=' . $workerLog);
 
 define('CPE_SKIP_HTTP_BOOTSTRAP', true);
 require __DIR__ . '/../app/bootstrap.php';
+require __DIR__ . '/authorized_setup_recovery_fixture.php';
 
 use App\Core\Events\DomainEventOutboxWorker;
 use App\Domain\NotificationDeliveryService;
@@ -298,7 +299,7 @@ try {
         'admin_email' => 'worker-contract@example.test',
         'admin_password' => 'worker-contract-password-123',
         'seed_demo' => '0',
-    ]);
+    ], test_authorized_setup_recovery_authority());
     $pdo = Database::connection();
     $sentinels = [
         'email target' => 'sentinel.delivery@example.test',

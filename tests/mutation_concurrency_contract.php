@@ -10,6 +10,7 @@ if (trim((string) (getenv('CPE_DATABASE_URL') ?: '')) === ''
 }
 
 require __DIR__ . '/../app/bootstrap.php';
+require __DIR__ . '/authorized_setup_recovery_fixture.php';
 
 use App\Install\Installer;
 use App\Install\SystemRequirements;
@@ -104,7 +105,7 @@ try {
         'admin_email' => 'mutation-admin@example.test',
         'admin_password' => 'mutation-password-123',
         'seed_demo' => '1',
-    ]);
+    ], test_authorized_setup_recovery_authority());
     $pdo = Database::connection();
     $applicationId = (int) $pdo->query("SELECT id FROM applications WHERE current_status = 'idle' ORDER BY id LIMIT 1")->fetchColumn();
     mutation_concurrency_assert($applicationId > 0, 'Concurrency contract requires an idle application.');

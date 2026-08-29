@@ -217,6 +217,7 @@ final class AdvisingService
         Auth::audit($actorId, 'advising.task_completed', 'advising_task', $taskId, 'Advising task completed');
     }
 
+    /** Idempotent post-commit observer; safe for at-least-once delivery. */
     public function recordOfferFollowUp(DomainEvent $event): void
     {
         if ($event->name !== 'placement.offer.accepted') {

@@ -30,6 +30,7 @@ final class IncidentReporter
             'session_id_read', 'session_cookie_reset', 'session_warning_storage', 'session_warning_response',
             'session_warning_other', 'session_returned_false', 'session_threw', 'state_prepare',
             'state_permissions', 'session_fingerprint', 'state_write_prepare', 'state_write_io', 'state_sync',
+            'callback',
         ],
         'status' => ['failed'],
         'route' => [
@@ -55,6 +56,7 @@ final class IncidentReporter
             'record.panelist', 'record.round', 'record.schedule', 'system.clear_demo_data',
             'wanted.create', 'wanted.resolve', 'configuration.import', 'portability.import', 'privacy.erasure',
             'installation', 'database_restore.cleanup',
+            'internal_event.observer',
         ],
     ];
 

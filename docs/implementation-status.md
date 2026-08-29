@@ -60,8 +60,10 @@ Date: 2026-07-18
 - JSONL structured request logs with request IDs and common-secret redaction;
   liveness, readiness, token-protected metrics, outbox backlog, and dead-letter
   gauges.
-- Transactional domain-event outbox worker with portable claims, retry backoff,
-  dead letters, JSONL or signed HTTPS delivery, and stable event IDs.
+- Transactional domain-event outbox with immutable per-module eligibility,
+  post-commit declaration expansion and isolated callbacks, token-fenced retry,
+  dead-letter and audited replay state, plus the existing JSONL or signed HTTPS
+  delivery with stable event IDs.
 - Bounded read-only HTTP load probe with optional `curl_multi` concurrency and a
   PHP streams fallback.
 - Hosted operations, disaster recovery, module development, security operations,

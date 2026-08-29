@@ -90,6 +90,11 @@ jobs:
           find app config public tests -name '*.php' -print0 | xargs -0 -n 1 php -l
           php -l placement
           php tests/run.php
+          php tests/authorization_failure_contract.php
+          php tests/authorization_state_contract.php
+          php tests/installation_state_contract.php
+          php tests/internal_module_boundary_contract.php
+          php tests/internal_event_delivery_contract.php
           php tests/backup_restore_contract.php
           php tests/database_connection_cleanup_contract.php
           php tests/incident_boundary_contract.php
@@ -128,6 +133,18 @@ jobs:
           CPE_DB_DRIVER: pgsql
           CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_contract?sslmode=disable
         run: php tests/database_contract.php
+
+      - name: Test PostgreSQL authorization and internal observers
+        env:
+          CPE_DB_DRIVER: pgsql
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_authorization_state_contract'
+          CPE_DATABASE_URL='postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_authorization_state_contract?sslmode=disable' php tests/authorization_state_contract.php
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_installation_state_contract'
+          CPE_DATABASE_URL='postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_installation_state_contract?sslmode=disable' php tests/installation_state_contract.php
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_internal_event_contract'
+          CPE_DATABASE_URL='postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_internal_event_contract?sslmode=disable' php tests/internal_event_delivery_contract.php
 
       - name: Test PostgreSQL mutation concurrency
         env:

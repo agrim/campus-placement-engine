@@ -53,7 +53,12 @@ final class HostedBootstrap
         $resolved = self::$resolver->resolveHost($host);
         Database::useProvider($resolved->provider());
         HostedContext::activate($resolved);
-        if (Database::isInstalled()) {
+        try {
+            $installed = Database::hasInstalledMarkerStrict();
+        } catch (\Throwable) {
+            throw HostedResolutionException::installationStateUnavailable();
+        }
+        if ($installed) {
             self::assertDataPlaneIdentity($resolved->publicId());
         }
     }

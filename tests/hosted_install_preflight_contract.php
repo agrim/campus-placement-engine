@@ -16,6 +16,7 @@ define('CPE_SKIP_HTTP_BOOTSTRAP', true);
 require __DIR__ . '/../app/bootstrap.php';
 
 use App\Install\Installer;
+use App\Core\Install\InstallationStateUnavailable;
 use App\Support\Database;
 
 function hosted_preflight_assert(bool $condition, string $message): void
@@ -149,8 +150,10 @@ try {
             throw new RuntimeException('Installed pre-current database accepted direct installHosted retry.');
         } catch (RuntimeException $e) {
             hosted_preflight_assert(
-                str_contains($e->getMessage(), Installer::ERROR_ALREADY_INSTALLED),
-                'Installed pre-current retry did not return the stable installed conflict.',
+                $e instanceof InstallationStateUnavailable
+                    && $e->getMessage() === 'Installation state is temporarily unavailable.'
+                    && $e->getPrevious() === null,
+                'Unowned installed pre-current retry did not fail as a typed redacted ambiguous state.',
             );
         }
         hosted_preflight_assert(
@@ -160,13 +163,13 @@ try {
     }
 
     $installerSource = (string) file_get_contents(__DIR__ . '/../app/Install/Installer.php');
-    $preflightPosition = strpos($installerSource, 'Database::hasInstalledMarkerStrict()');
+    $preflightPosition = strpos($installerSource, '$this->claimInstallTarget($recoveryAuthority);');
     $migrationPosition = strpos($installerSource, 'Database::migrate(false)');
     hosted_preflight_assert(
         $preflightPosition !== false
             && $migrationPosition !== false
             && $preflightPosition < $migrationPosition,
-        'Strict installed-marker preflight must run before migration or ownership work.',
+        'Authority-aware installation target claim must run before migration or ownership work.',
     );
 
     Database::reset();

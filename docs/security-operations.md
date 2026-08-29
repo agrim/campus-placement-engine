@@ -78,9 +78,13 @@ logging personal payloads.
 
 ## Domain-Event Delivery
 
-Without an external sink, `php placement work-outbox` acknowledges events as
-`internal` after in-process module subscribers have run. Configure one optional
-external sink:
+`php placement work-outbox` first expands durable per-module declaration work,
+then processes source-bundled observer deliveries and the external event outbox.
+These paths are independent: a declaration or observer cannot block its
+neighbors or the external sink.
+Without an external sink, the external outbox records `delivered_to=internal` to
+mean that no out-of-process destination was configured; it does not represent
+observer completion. Configure one optional external sink:
 
 ```text
 CPE_DOMAIN_EVENT_OUTBOX_PATH=/secure/path/events.jsonl
@@ -98,9 +102,19 @@ proxy inheritance. A reviewed internal integration additionally needs
 override and should stay off for ordinary internet delivery. Claims are
 concurrency-safe, stale locks can be recovered, failures back off, and terminal
 failures become dead letters after `CPE_DOMAIN_EVENT_MAX_ATTEMPTS` (default 10).
-Monitor both pending and dead-lettered gauges. Consumers must deduplicate by
-stable event ID because a crash between delivery and acknowledgement can
-produce at-least-once delivery.
+Monitor pending and dead-lettered work. Internal observers and external
+consumers must be idempotent because a crash between a side effect and its
+token-fenced acknowledgement can produce at-least-once delivery.
+
+Replay only an investigated dead letter, by exact stable identity:
+
+```text
+php placement replay-internal-fanout --event=event_ID --module=MODULE_KEY --actor-user-id=USER_ID
+php placement replay-internal-delivery --event=event_ID --subscription=internal.module.name.v1 --actor-user-id=USER_ID
+```
+
+Replay clears leases and opaque errors in one transaction and writes a fixed,
+payload-free audit event. Repeating an unchanged replay is idempotent.
 
 ## Incident First Steps
 

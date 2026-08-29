@@ -12,6 +12,7 @@ putenv('CPE_CONFIG_SNAPSHOT_DIR=' . $configTmp);
 putenv('CPE_PRIVACY_SNAPSHOT_DIR=' . $privacyTmp);
 
 require __DIR__ . '/../app/bootstrap.php';
+require __DIR__ . '/authorized_setup_recovery_fixture.php';
 
 use App\Domain\PlacementService;
 use App\Domain\ConfigurationSnapshotService;
@@ -27,6 +28,8 @@ use App\Core\Backup\DatabaseBackupService;
 use App\Core\Backup\DatabaseRestoreService;
 use App\Core\Events\DomainEvent;
 use App\Core\Events\DomainEventOutboxWorker;
+use App\Core\Events\InternalEventDeliveryWorker;
+use App\Core\Events\InternalEventFanoutWorker;
 use App\Core\Http\AuthorizationException;
 use App\Core\Http\UserVisibleException;
 use App\Core\Persistence\DatabaseConnectionInvalidException;
@@ -349,6 +352,7 @@ test_case('installer creates database, admin, settings, and demo data', function
     }
 
     Database::migrate();
+    $recoveryAuthority = test_authorized_setup_recovery_authority();
     $pdo = Database::connection();
     try {
         (new Installer())->install([
@@ -358,7 +362,7 @@ test_case('installer creates database, admin, settings, and demo data', function
             'admin_name' => 'Partial Admin',
             'admin_email' => 'partial-admin@example.test',
             'admin_password' => 'password123',
-        ]);
+        ], $recoveryAuthority);
         throw new RuntimeException('Expected mid-install validation failure.');
     } catch (RuntimeException $e) {
         assert_true(str_contains($e->getMessage(), 'unknown weekday'), 'Atomic installer test should fail after beginning setup writes');
@@ -373,7 +377,7 @@ test_case('installer creates database, admin, settings, and demo data', function
         'admin_email' => 'admin@test.local',
         'admin_password' => 'password123',
         'seed_demo' => '1',
-    ]);
+    ], $recoveryAuthority);
     assert_true($adminId > 0, 'Admin id should be created');
     assert_true(Database::isInstalled(), 'Database should be installed');
     $pdo = Database::connection();
@@ -704,6 +708,14 @@ test_case('career advising proves module lifecycle events privacy and independen
     );
     cpe_context()->events()->dispatch($event);
     cpe_context()->events()->dispatch($event);
+    assert_same(0, (int) $pdo->query("SELECT COUNT(*) FROM advising_tasks WHERE task_type = 'offer_outcome_followup'")->fetchColumn(), 'Advising observer must not run in the publishing transaction');
+    assert_same(2, (int) $pdo->query("SELECT COUNT(*) FROM domain_event_module_fanout WHERE module_key = 'advising'")->fetchColumn(), 'Each event should persist durable Advising eligibility');
+    assert_same(0, (int) $pdo->query("SELECT COUNT(*) FROM domain_event_deliveries WHERE subscription_id = 'internal.advising.offer_follow_up.v1'")->fetchColumn(), 'Publishing must not construct Advising declarations');
+    $fanoutResult = (new InternalEventFanoutWorker($pdo))->work(10);
+    assert_same(2, $fanoutResult['expanded'], 'Post-commit fanout should expand both Advising declarations');
+    assert_same(2, (int) $pdo->query("SELECT COUNT(*) FROM domain_event_deliveries WHERE subscription_id = 'internal.advising.offer_follow_up.v1'")->fetchColumn(), 'Each event should expand to one stable Advising delivery');
+    $observerResult = (new InternalEventDeliveryWorker($pdo))->work(10);
+    assert_same(2, $observerResult['delivered'], 'Post-commit worker should deliver both Advising observations');
     assert_same(1, (int) $pdo->query("SELECT COUNT(*) FROM advising_tasks WHERE task_type = 'offer_outcome_followup'")->fetchColumn(), 'Advising event subscriber should be idempotent');
     assert_same($studentId, (int) $pdo->query("SELECT student_profile_id FROM advising_tasks WHERE task_type = 'offer_outcome_followup'")->fetchColumn(), 'Event subject should resolve through the core person reference bridge');
 
@@ -1977,6 +1989,7 @@ test_case('release package includes public source and excludes private runtime d
         assert_true(str_contains($joined, '/app/Security/SetupAuthorization.php'), 'Package should include the setup authorization core');
         assert_true(str_contains($joined, '/app/Security/SetupAuthorizationStageFailure.php'), 'Package should include fixed setup authorization stage failures');
         assert_true(str_contains($joined, '/app/Security/SetupHttp.php'), 'Package should include the setup HTTP boundary');
+        assert_true(str_contains($joined, '/app/Security/SetupRecoveryAuthority.php'), 'Package should include target-bound setup recovery authority');
         assert_true(str_contains($joined, '/app/Views/setup-unlock.php'), 'Package should include the setup unlock view');
         assert_true(str_contains($joined, '/public/install.php'), 'Package should include the protected installer entrypoint');
         assert_true(str_contains($joined, '/public/health.php'), 'Package should include the health probe entrypoint');
@@ -1984,7 +1997,17 @@ test_case('release package includes public source and excludes private runtime d
         assert_true(str_contains($joined, '/app/Core/Backup/BackupArtifact.php'), 'Package should include the internal backup artifact contract');
         assert_true(str_contains($joined, '/app/Core/Backup/BackupMetadata.php'), 'Package should include checksum-bound backup metadata');
         assert_true(str_contains($joined, '/app/Core/Backup/LegacySqliteBackupConverter.php'), 'Package should include explicit legacy SQLite conversion');
+        assert_true(str_contains($joined, '/app/Core/Events/InternalEventDeliveryWorker.php'), 'Package should include the post-commit observer worker');
+        assert_true(str_contains($joined, '/app/Core/Events/InternalEventDeliveryReplayService.php'), 'Package should include audited internal observer replay');
+        assert_true(str_contains($joined, '/app/Core/Events/InternalEventFanoutWorker.php'), 'Package should include post-commit declaration fanout');
+        assert_true(str_contains($joined, '/app/Core/Events/InternalEventFanoutReplayService.php'), 'Package should include audited declaration fanout replay');
+        assert_true(str_contains($joined, '/app/Core/Events/InternalEventSubscriberRegistry.php'), 'Package should include the internal observer registry');
+        assert_true(str_contains($joined, '/app/Core/Events/InternalEventSubscription.php'), 'Package should include stable internal observer subscriptions');
         assert_true(str_contains($joined, '/app/Core/Persistence/DatabaseConnectionInvalidException.php'), 'Package should include typed invalid-connection cleanup failures');
+        assert_true(str_contains($joined, '/app/Core/Security/AuthorizationUnavailable.php'), 'Package should include typed installed-runtime authorization failures');
+        assert_true(str_contains($joined, '/app/Core/Modules/ModuleVersionIntegrity.php'), 'Package should include exact bundled module version integrity');
+        assert_true(str_contains($joined, '/app/Core/Install/InstallationState.php'), 'Package should include typed installation state');
+        assert_true(str_contains($joined, '/app/Core/Install/InstallationStateUnavailable.php'), 'Package should include redacted installation-state failures');
         assert_true(str_contains($joined, '/tests/alpha1_release_acceptance.php'), 'Package should include exact alpha.1 external acceptance');
         assert_true(str_contains($joined, '/tests/backup_restore_contract.php'), 'Package should include the backup/restore identity contract');
         assert_true(str_contains($joined, '/tests/database_connection_cleanup_contract.php'), 'Package should include the invalid-connection cleanup contract');
@@ -1999,6 +2022,11 @@ test_case('release package includes public source and excludes private runtime d
         assert_true(str_contains($joined, '/tests/hosted_install_atomicity_contract.php'), 'Package should include the hosted installation atomicity contract');
         assert_true(str_contains($joined, '/tests/hosted_install_preflight_contract.php'), 'Package should include the hosted installation preflight contract');
         assert_true(str_contains($joined, '/tests/setup_authorization_contract.php'), 'Package should include the setup authorization regression contract');
+        assert_true(str_contains($joined, '/tests/authorization_failure_contract.php'), 'Package should include the installed-runtime authorization regression contract');
+        assert_true(str_contains($joined, '/tests/authorization_state_contract.php'), 'Package should include the portable authorization-state contract');
+        assert_true(str_contains($joined, '/tests/installation_state_contract.php'), 'Package should include the portable installation-state contract');
+        assert_true(str_contains($joined, '/tests/internal_event_delivery_contract.php'), 'Package should include the internal observer delivery contract');
+        assert_true(str_contains($joined, '/tests/authorized_setup_recovery_fixture.php'), 'Package should include the authorized setup recovery test fixture');
         assert_true(str_contains($joined, '/tests/hosted_install_contract.php'), 'Package should include the hosted identity immutability contract');
         assert_true(str_contains($joined, '/tests/managed_hosting_contract.php'), 'Package should include the managed-hosting probe contract');
         assert_true(str_contains($joined, '/docs/environment.md'), 'Package should include environment variable guide');
@@ -2007,7 +2035,11 @@ test_case('release package includes public source and excludes private runtime d
         assert_true(str_contains($joined, '/examples/deployment/apache-vhost.conf'), 'Package should include Apache deployment example');
         assert_true(str_contains($joined, '/examples/deployment/nginx-server.conf'), 'Package should include Nginx deployment example');
         assert_true(str_contains($joined, '/database/migrations/014_round_schedule_day.sql'), 'Package should include migrations');
+        assert_true(str_contains($joined, '/database/migrations/047_internal_event_deliveries.sql'), 'Package should include SQLite internal observer delivery migration');
+        assert_true(str_contains($joined, '/database/migrations/048_module_enabled_constraint.sql'), 'Package should include SQLite module enabled constraint migration');
         assert_true(str_contains($joined, '/database/migrations/pgsql/001_portal_baseline.sql'), 'Package should include PostgreSQL migrations');
+        assert_true(str_contains($joined, '/database/migrations/pgsql/011_internal_event_deliveries.sql'), 'Package should include PostgreSQL internal observer delivery migration');
+        assert_true(str_contains($joined, '/database/migrations/pgsql/012_module_enabled_constraint.sql'), 'Package should include PostgreSQL module enabled constraint migration');
         assert_true(str_contains($joined, '/data/.gitkeep'), 'Package should keep an empty data directory marker');
         assert_true(!str_contains($joined, '.legacy-private'), 'Package should exclude private archive material');
         assert_true(!str_contains($joined, 'data/app.sqlite'), 'Package should exclude runtime SQLite data');

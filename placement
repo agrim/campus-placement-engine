@@ -18,7 +18,12 @@ use App\Core\Backup\DatabaseRestoreService;
 use App\Core\Backup\BackupArtifact;
 use App\Core\Backup\LegacySqliteBackupConverter;
 use App\Core\Http\UserVisibleException;
+use App\Core\Install\InstallationState;
 use App\Core\Events\DomainEventOutboxWorker;
+use App\Core\Events\InternalEventDeliveryWorker;
+use App\Core\Events\InternalEventDeliveryReplayService;
+use App\Core\Events\InternalEventFanoutReplayService;
+use App\Core\Events\InternalEventFanoutWorker;
 use App\Domain\ConfigurationSnapshotService;
 use App\Domain\NotificationDeliveryService;
 use App\Domain\ReadinessService;
@@ -83,6 +88,8 @@ try {
         'verify-package' => verify_release_package($argv[2] ?? ''),
         'deliver-notifications' => deliver_notifications(array_slice($argv, 2)),
         'work-outbox' => work_outbox(array_slice($argv, 2)),
+        'replay-internal-delivery' => replay_internal_delivery(array_slice($argv, 2)),
+        'replay-internal-fanout' => replay_internal_fanout(array_slice($argv, 2)),
         'certify-notifications' => certify_notifications(array_slice($argv, 2)),
         'smoke-http' => smoke_http(array_slice($argv, 2)),
         'load-smoke' => load_smoke(array_slice($argv, 2)),
@@ -261,7 +268,8 @@ function install_app(array $args): void
         install_help();
         return;
     }
-    if (Database::isInstalled()) {
+    $installationState = Database::installationStateStrict();
+    if ($installationState === InstallationState::INSTALLED) {
         throw new UserVisibleException(
             'CLI_APP_ALREADY_INSTALLED',
             'App is already installed. Use upgrade or configuration import for an existing installation.',
@@ -328,7 +336,8 @@ function seed_large_demo(int $candidateCount, int $companyCount): void
 
 function install_demo(): void
 {
-    if (Database::isInstalled()) {
+    $installationState = Database::installationStateStrict();
+    if ($installationState === InstallationState::INSTALLED) {
         throw new UserVisibleException(
             'CLI_APP_ALREADY_INSTALLED',
             'App is already installed. Use upgrade for an existing installation.',
@@ -1158,6 +1167,33 @@ function verify_release_package(string $path): void
             throw new RuntimeException('Release package is missing required file: ' . $required);
         }
     }
+    foreach ([
+        'app/Core/Security/AuthorizationUnavailable.php',
+        'app/Core/Modules/ModuleVersionIntegrity.php',
+        'app/Core/Install/InstallationState.php',
+        'app/Core/Install/InstallationStateUnavailable.php',
+        'app/Core/Events/InternalEventDeliveryWorker.php',
+        'app/Core/Events/InternalEventDeliveryReplayService.php',
+        'app/Core/Events/InternalEventFanoutWorker.php',
+        'app/Core/Events/InternalEventFanoutClaimLost.php',
+        'app/Core/Events/InternalEventFanoutReplayService.php',
+        'app/Core/Events/InternalEventSubscriberRegistry.php',
+        'app/Core/Events/InternalEventSubscription.php',
+        'app/Security/SetupRecoveryAuthority.php',
+        'database/migrations/047_internal_event_deliveries.sql',
+        'database/migrations/048_module_enabled_constraint.sql',
+        'database/migrations/pgsql/011_internal_event_deliveries.sql',
+        'database/migrations/pgsql/012_module_enabled_constraint.sql',
+        'tests/authorization_failure_contract.php',
+        'tests/authorization_state_contract.php',
+        'tests/installation_state_contract.php',
+        'tests/internal_event_delivery_contract.php',
+        'tests/authorized_setup_recovery_fixture.php',
+    ] as $required) {
+        if (!isset($entries[$required])) {
+            throw new RuntimeException('Release package is missing required file: ' . $required);
+        }
+    }
     foreach (['.legacy-private', 'data/app.sqlite', '.playwright-cli'] as $forbidden) {
         foreach (array_keys($entries) as $entry) {
             if ($entry === $forbidden || str_starts_with($entry, $forbidden . '/')) {
@@ -1268,12 +1304,14 @@ function deliver_notifications(array $args): void
 
 function work_outbox(array $args): void
 {
-    if (!Database::isInstalled()) {
+    if (!Database::hasInstalledMarkerStrict()) {
         throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
     }
     Database::migrate();
     $options = cli_options($args);
     $limit = max(1, min(1000, (int) ($options['limit'] ?? 100)));
+    $fanoutResult = (new InternalEventFanoutWorker())->work($limit);
+    $internalResult = (new InternalEventDeliveryWorker())->work($limit);
     $result = (new DomainEventOutboxWorker())->work($limit);
     echo "Domain events claimed: {$result['claimed']}\n";
     echo "Delivered: {$result['delivered']}\n";
@@ -1292,12 +1330,100 @@ function work_outbox(array $args): void
         }
         echo "\n";
     }
-    if ($result['failed'] > 0 || $result['outcome_unknown'] > 0) {
+    echo "Internal fanout claimed: {$fanoutResult['claimed']}\n";
+    echo "Internal fanout expanded: {$fanoutResult['expanded']}\n";
+    echo "Internal deliveries created: {$fanoutResult['deliveries_created']}\n";
+    echo "Internal fanout failed: {$fanoutResult['failed']}\n";
+    echo "Internal fanout retrying: {$fanoutResult['retrying']}\n";
+    echo "Internal fanout dead-lettered: {$fanoutResult['dead_lettered']}\n";
+    echo "Internal fanout outcome unknown: {$fanoutResult['outcome_unknown']}\n";
+    echo "Internal fanout claim lost: {$fanoutResult['claim_lost']}\n";
+    foreach ($fanoutResult['rows'] as $row) {
+        echo "{$row['public_id']},{$row['module_key']},{$row['status']}";
+        if ($row['error'] !== '') {
+            echo ',' . $row['error'];
+        }
+        echo "\n";
+    }
+    echo "Internal observers claimed: {$internalResult['claimed']}\n";
+    echo "Internal observers delivered: {$internalResult['delivered']}\n";
+    echo "Internal observers skipped: {$internalResult['skipped']}\n";
+    echo "Internal observers failed: {$internalResult['failed']}\n";
+    echo "Internal observers retrying: {$internalResult['retrying']}\n";
+    echo "Internal observers dead-lettered: {$internalResult['dead_lettered']}\n";
+    echo "Internal observer outcome unknown: {$internalResult['outcome_unknown']}\n";
+    echo "Internal observer claim lost: {$internalResult['claim_lost']}\n";
+    foreach ($internalResult['rows'] as $row) {
+        echo "{$row['public_id']},{$row['subscription_id']},{$row['status']}";
+        if ($row['error'] !== '') {
+            echo ',' . $row['error'];
+        }
+        echo "\n";
+    }
+    if ($result['failed'] > 0 || $result['outcome_unknown'] > 0
+        || $fanoutResult['failed'] > 0 || $fanoutResult['outcome_unknown'] > 0
+        || $internalResult['failed'] > 0 || $internalResult['outcome_unknown'] > 0) {
         throw new UserVisibleException(
             'CLI_DOMAIN_EVENT_DELIVERY_FAILED',
-            'One or more domain events could not be delivered. Review the incident references above.',
+            'One or more domain events or internal observers could not be delivered. Review the incident references above.',
         );
     }
+}
+
+function replay_internal_delivery(array $args): void
+{
+    if (!Database::hasInstalledMarkerStrict()) {
+        throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
+    }
+    Database::migrate();
+    $options = cli_options($args);
+    $eventPublicId = trim((string) ($options['event'] ?? ''));
+    $subscriptionId = trim((string) ($options['subscription'] ?? ''));
+    $actorUserId = filter_var(
+        $options['actor-user-id'] ?? null,
+        FILTER_VALIDATE_INT,
+        ['options' => ['min_range' => 1]],
+    );
+    if ($actorUserId === false) {
+        throw new UserVisibleException(
+            'INTERNAL_EVENT_REPLAY_ACTOR_INVALID',
+            'Use --actor-user-id with an active operator user ID.',
+        );
+    }
+    $result = (new InternalEventDeliveryReplayService())->replay(
+        $eventPublicId,
+        $subscriptionId,
+        (int) $actorUserId,
+    );
+    echo "Internal observer replay {$result['status']}: {$eventPublicId},{$subscriptionId}\n";
+}
+
+function replay_internal_fanout(array $args): void
+{
+    if (!Database::hasInstalledMarkerStrict()) {
+        throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
+    }
+    Database::migrate();
+    $options = cli_options($args);
+    $eventPublicId = trim((string) ($options['event'] ?? ''));
+    $moduleKey = trim((string) ($options['module'] ?? ''));
+    $actorUserId = filter_var(
+        $options['actor-user-id'] ?? null,
+        FILTER_VALIDATE_INT,
+        ['options' => ['min_range' => 1]],
+    );
+    if ($actorUserId === false) {
+        throw new UserVisibleException(
+            'INTERNAL_EVENT_FANOUT_REPLAY_ACTOR_INVALID',
+            'Use --actor-user-id with an active operator user ID.',
+        );
+    }
+    $result = (new InternalEventFanoutReplayService())->replay(
+        $eventPublicId,
+        $moduleKey,
+        (int) $actorUserId,
+    );
+    echo "Internal observer fanout replay {$result['status']}: {$eventPublicId},{$moduleKey}\n";
 }
 
 function certify_notifications(array $args): void
@@ -1981,7 +2107,11 @@ function publication_check(): void
         'public/.htaccess',
         'data/.htaccess',
         'database/.htaccess',
+        'database/migrations/047_internal_event_deliveries.sql',
+        'database/migrations/048_module_enabled_constraint.sql',
         'database/migrations/pgsql/001_portal_baseline.sql',
+        'database/migrations/pgsql/011_internal_event_deliveries.sql',
+        'database/migrations/pgsql/012_module_enabled_constraint.sql',
         'tests/.htaccess',
         'docs/environment.md',
         'docs/release-checklist.md',
@@ -1990,12 +2120,18 @@ function publication_check(): void
         'app/Core/Backup/BackupArtifact.php',
         'app/Core/Backup/BackupMetadata.php',
         'app/Core/Backup/LegacySqliteBackupConverter.php',
+        'app/Core/Events/InternalEventDeliveryWorker.php',
+        'app/Core/Events/InternalEventSubscriberRegistry.php',
+        'app/Core/Events/InternalEventSubscription.php',
+        'app/Core/Modules/ModuleVersionIntegrity.php',
         'app/Core/Persistence/DatabaseConnectionInvalidException.php',
+        'app/Core/Security/AuthorizationUnavailable.php',
         'app/Security/OperationalBearerAuthorization.php',
         'app/Security/SetupAuthorization.php',
         'app/Security/SetupAuthorizationDenied.php',
         'app/Security/SetupAuthorizationStageFailure.php',
         'app/Security/SetupHttp.php',
+        'app/Security/SetupRecoveryAuthority.php',
         'app/Views/setup-unlock.php',
         'public/install.php',
         'public/health.php',
@@ -2006,6 +2142,9 @@ function publication_check(): void
         'tests/backup_restore_contract.php',
         'tests/database_connection_cleanup_contract.php',
         'tests/legacy_backup_compatibility_contract.php',
+        'tests/internal_event_delivery_contract.php',
+        'tests/authorized_setup_recovery_fixture.php',
+        'tests/authorization_failure_contract.php',
         'tests/setup_authorization_contract.php',
         'tests/hosted_install_contract.php',
         'tests/managed_hosting_contract.php',
@@ -2362,6 +2501,8 @@ function help(): void
     echo "  php placement verify-package /path/to/campus-placement-engine-version.tar.gz|.zip\n";
     echo "  php placement deliver-notifications [--channel=file|webhook|email|sms|whatsapp] [--limit=100] [--dry-run]\n";
     echo "  php placement work-outbox [--limit=100]\n";
+    echo "  php placement replay-internal-delivery --event=event_ID --subscription=internal.module.name.v1 --actor-user-id=USER_ID\n";
+    echo "  php placement replay-internal-fanout --event=event_ID --module=MODULE_KEY --actor-user-id=USER_ID\n";
     echo "  php placement certify-notifications --channel=sms|whatsapp [--require-live]\n";
     echo "  php placement smoke-http [--base-url=http://127.0.0.1:8000] [--email=admin@example.test] [--password=password123] [--restricted-email=atlas@example.test]\n";
     echo "  php placement load-smoke [--base-url=http://127.0.0.1:8000] [--path='/?r=public'] [--requests=50] [--concurrency=5]\n";

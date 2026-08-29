@@ -117,8 +117,10 @@ Use this before a public alpha tag or downloadable archive.
 - Run `php placement load-smoke --base-url=http://localhost:8000` and record the
   release-candidate baseline rather than treating it as a production capacity
   guarantee.
-- Run `php placement work-outbox` with a local JSONL sink and confirm a second run
-  does not deliver acknowledged events again.
+- Run `php placement work-outbox` with a local JSONL sink; confirm internal
+  fanout, observer, and external sink counts are all reported, and that a second
+  run does not redeliver acknowledged work. Exercise both audited replay commands
+  against isolated dead-letter fixtures.
 - Follow `docs/browser-qa.md` for dense-board desktop and phone-width checks.
 - Confirm the GitHub Actions CI workflow is green.
 - For PostgreSQL, run the fresh-database backup/restore contract, then separately

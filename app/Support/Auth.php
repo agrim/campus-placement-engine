@@ -6,6 +6,7 @@ namespace App\Support;
 
 use App\Core\Http\AuthorizationException;
 use App\Core\Http\UserVisibleException;
+use App\Core\Security\AuthorizationUnavailable;
 use PDO;
 
 final class Auth
@@ -31,6 +32,8 @@ final class Auth
         'import' => 'Import completed.',
         'import.rollback' => 'Import rollback completed.',
         'install' => 'Initial installation completed.',
+        'internal_event_delivery.replay' => 'Dead-lettered internal observer delivery replayed.',
+        'internal_event_fanout.replay' => 'Dead-lettered internal observer fanout replayed.',
         'login' => 'User signed in.',
         'login.sso' => 'User signed in through institutional SSO.',
         'notification.acknowledge' => 'Notification acknowledged.',
@@ -62,6 +65,7 @@ final class Auth
         'company_round', 'import', 'notification', 'person', 'preference_request', 'round_panelist',
         'round_schedule', 'slot_assignment', 'system', 'user', 'wanted_alert', 'workflow_version',
         'candidate_unavailability',
+        'internal_event_delivery', 'internal_event_fanout',
     ];
 
     private const AUDIT_SUBJECT_ALIASES = [
@@ -130,6 +134,8 @@ final class Auth
     {
         try {
             return \App\Core\Portal::context()->capabilities()->allows($user, $capability);
+        } catch (AuthorizationUnavailable $e) {
+            throw $e;
         } catch (\Throwable $e) {
             StructuredLogger::log('error', 'authorization.capability_resolution_failed', [
                 'capability' => $capability,
@@ -229,14 +235,21 @@ final class Auth
         self::audit($actorId, 'user.password_reset', 'user', $id, 'Password reset by administrator');
     }
 
-    public static function audit(?int $actorId, string $action, string $subjectType, ?int $subjectId, string $detail = ''): void
+    public static function audit(
+        ?int $actorId,
+        string $action,
+        string $subjectType,
+        ?int $subjectId,
+        string $detail = '',
+        ?PDO $pdo = null,
+    ): void
     {
         $safeAction = isset(self::AUDIT_DETAILS[$action]) ? $action : 'audit.unclassified';
         $safeDetail = self::AUDIT_DETAILS[$action] ?? 'Unclassified audit event recorded.';
         $safeSubjectType = self::AUDIT_SUBJECT_ALIASES[$subjectType] ?? $subjectType;
         $safeSubjectType = in_array($safeSubjectType, self::AUDIT_SUBJECT_TYPES, true) ? $safeSubjectType : 'unknown';
         [$ipAddress, $userAgent] = self::requestMetadata();
-        $stmt = Database::connection()->prepare(
+        $stmt = ($pdo ?? Database::connection())->prepare(
             'INSERT INTO audit_logs (actor_user_id, action, subject_type, subject_id, detail, ip_address, user_agent, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
         );

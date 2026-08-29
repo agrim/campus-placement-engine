@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace App\Install;
 
 use App\Core\Http\UserVisibleException;
+use App\Core\Install\InstallationState;
+use App\Core\Install\InstallationStateUnavailable;
 use App\Core\Install\PortalKernelSynchronizer;
 use App\Core\Persistence\DatabaseLock;
 use App\Core\Persistence\DatabaseLockException;
@@ -12,6 +14,7 @@ use App\Core\Persistence\TransactionRollbackGuard;
 use App\Modules\Placement\Install\LegacyDomainSynchronizer;
 use App\Modules\Placement\Application\PlacementService;
 use App\Modules\Placement\Workflow\WorkflowPublisher;
+use App\Security\SetupRecoveryAuthority;
 use App\Support\Auth;
 use App\Support\Database;
 use App\Support\TimezoneValidator;
@@ -31,24 +34,32 @@ final class Installer
     {
     }
 
-    public function install(array $input): int
+    public function install(array $input, ?SetupRecoveryAuthority $recoveryAuthority = null): int
     {
-        return $this->performInstall($input, null);
+        return $this->performInstall($input, null, $recoveryAuthority);
     }
 
     /**
      * Installs a hosted data plane and binds its immutable tenant identity in
      * the same transaction as the installation marker.
      */
-    public function installHosted(array $input, string $tenantPublicId): int
+    public function installHosted(
+        array $input,
+        string $tenantPublicId,
+        ?SetupRecoveryAuthority $recoveryAuthority = null,
+    ): int
     {
         if (preg_match('/^tenant_[a-f0-9]{32}$/', $tenantPublicId) !== 1) {
             throw new RuntimeException('Hosted tenant public ID is invalid.');
         }
-        return $this->performInstall($input, $tenantPublicId);
+        return $this->performInstall($input, $tenantPublicId, $recoveryAuthority);
     }
 
-    private function performInstall(array $input, ?string $tenantPublicId): int
+    private function performInstall(
+        array $input,
+        ?string $tenantPublicId,
+        ?SetupRecoveryAuthority $recoveryAuthority,
+    ): int
     {
         $college = trim((string) ($input['college_name'] ?? ''));
         try {
@@ -72,12 +83,7 @@ final class Installer
         }
 
         (new SystemRequirements())->assertReady();
-        if (Database::hasInstalledMarkerStrict()) {
-            throw new RuntimeException(
-                self::ERROR_ALREADY_INSTALLED
-                . ': App is already installed. Use upgrade, configuration import, or a different CPE_DB_PATH for a fresh setup.',
-            );
-        }
+        $claimedState = $this->claimInstallTarget($recoveryAuthority);
         Database::migrate(false);
         $pdo = Database::connection();
         $driver = strtolower((string) $pdo->getAttribute(PDO::ATTR_DRIVER_NAME));
@@ -98,8 +104,10 @@ final class Installer
                 $name,
                 $email,
                 $password,
+                $claimedState,
+                $recoveryAuthority,
                 ): int {
-                $this->assertInstallAvailable($pdo);
+                $this->assertClaimedInstallAvailable($claimedState, $recoveryAuthority);
                 $started = false;
                 try {
                     $pdo->beginTransaction();
@@ -110,7 +118,7 @@ final class Installer
                         }
                         DatabaseLock::assertPostgresSession($pdo, $lockBackendPid);
                     }
-                    $this->assertInstallAvailable($pdo);
+                    $this->assertClaimedInstallAvailable($claimedState, $recoveryAuthority);
 
                     // Installation runs every post-migration synchronizer inside
                     // the same transaction as the marker and identity check.
@@ -235,16 +243,69 @@ final class Installer
         return null;
     }
 
-    private function assertInstallAvailable(PDO $pdo): void
+    private function claimInstallTarget(?SetupRecoveryAuthority $recoveryAuthority): string
     {
-        $installed = $pdo->query("SELECT value FROM settings WHERE key = 'installed_at'")
-            ->fetch(PDO::FETCH_ASSOC);
-        if (is_array($installed)) {
+        try {
+            $state = Database::installationStateStrict();
+        } catch (InstallationStateUnavailable $failure) {
+            if ($recoveryAuthority === null) {
+                throw $failure;
+            }
+            $state = Database::installationStateForAuthorizedSetupStrict($recoveryAuthority);
+        }
+        if ($state === InstallationState::INSTALLED) {
             throw new RuntimeException(
                 self::ERROR_ALREADY_INSTALLED
                 . ': App is already installed. Use upgrade, configuration import, or a different CPE_DB_PATH for a fresh setup.',
             );
         }
+        if ($state === InstallationState::FRESH) {
+            if ($recoveryAuthority !== null) {
+                throw InstallationStateUnavailable::state();
+            }
+            return $state;
+        }
+        if ($state !== InstallationState::RECOVERABLE || $recoveryAuthority === null) {
+            throw new RuntimeException('Installation target state is unavailable.');
+        }
+        return $state;
+    }
+
+    private function assertClaimedInstallAvailable(
+        string $claimedState,
+        ?SetupRecoveryAuthority $recoveryAuthority,
+    ): void
+    {
+        if ($claimedState === InstallationState::FRESH && $recoveryAuthority === null) {
+            $state = Database::freshInstallContinuationStateStrict();
+            if ($state === InstallationState::INSTALLED) {
+                $this->alreadyInstalled();
+            }
+            return;
+        }
+        if ($claimedState === InstallationState::RECOVERABLE && $recoveryAuthority !== null) {
+            try {
+                $state = Database::installationStateStrict();
+                if ($state === InstallationState::INSTALLED) {
+                    $this->alreadyInstalled();
+                }
+                // FRESH is never valid for a recovery capability. Route every
+                // non-installed outcome through the one-state authority probe.
+                throw InstallationStateUnavailable::state();
+            } catch (InstallationStateUnavailable) {
+                Database::installationStateForAuthorizedSetupStrict($recoveryAuthority);
+            }
+            return;
+        }
+        throw InstallationStateUnavailable::state();
+    }
+
+    private function alreadyInstalled(): never
+    {
+        throw new RuntimeException(
+            self::ERROR_ALREADY_INSTALLED
+            . ': App is already installed. Use upgrade, configuration import, or a different CPE_DB_PATH for a fresh setup.',
+        );
     }
 
     private function set(PDO $pdo, string $key, string $value): void

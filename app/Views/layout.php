@@ -3,6 +3,7 @@
 use App\Support\Auth;
 use App\Support\Database;
 use App\Support\Flash;
+use App\Core\Security\AuthorizationUnavailable;
 use App\Modules\Placement\Application\PlacementService;
 
 $title = $title ?? cpe_config('app.name');
@@ -14,6 +15,8 @@ $metaRefreshSeconds = isset($boardRefreshSeconds) ? max(0, (int) $boardRefreshSe
 if (Database::isInstalled()) {
     try {
         $college = cpe_context()->institution()->name();
+    } catch (AuthorizationUnavailable $e) {
+        throw $e;
     } catch (Throwable) {
     }
 }
@@ -25,6 +28,8 @@ if ($user && Database::isInstalled()) {
             $notificationCount = (new PlacementService())->notificationCountForUser($user);
         }
         $navigation = cpe_context()->moduleManager()->navigation($user);
+    } catch (AuthorizationUnavailable $e) {
+        throw $e;
     } catch (Throwable) {
         $notificationCount = 0;
     }

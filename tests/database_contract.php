@@ -10,10 +10,13 @@ if (trim((string) (getenv('CPE_DATABASE_URL') ?: '')) === ''
 }
 
 require __DIR__ . '/../app/bootstrap.php';
+require __DIR__ . '/authorized_setup_recovery_fixture.php';
 
 use App\Core\Modules\ModuleLifecycleService;
 use App\Core\Events\DomainEvent;
 use App\Core\Events\DomainEventOutboxWorker;
+use App\Core\Events\InternalEventDeliveryWorker;
+use App\Core\Events\InternalEventFanoutWorker;
 use App\Core\Http\UserVisibleException;
 use App\Core\Portal;
 use App\Domain\ReadinessService;
@@ -53,7 +56,7 @@ try {
         'admin_email' => 'contract-admin@example.test',
         'admin_password' => 'contract-password-123',
         'seed_demo' => '1',
-    ]);
+    ], test_authorized_setup_recovery_authority());
 
     $pdo = Database::connection();
     $placement = new PlacementService($pdo);
@@ -176,6 +179,10 @@ try {
         ['candidate_public_id' => $candidatePublicId],
         cpe_now(),
     ));
+    $fanoutResult = (new InternalEventFanoutWorker($pdo))->work(10);
+    contract_assert($fanoutResult['expanded'] === 1, 'Advising post-commit observer fanout differs.');
+    $observerResult = (new InternalEventDeliveryWorker($pdo))->work(10);
+    contract_assert($observerResult['delivered'] === 1, 'Advising post-commit observer delivery differs.');
     contract_assert((int) $pdo->query('SELECT COUNT(*) FROM advising_tasks')->fetchColumn() === 1, 'Advising event subscriber differs.');
     $advisingPortable = (new AdvisingPortabilityHandler($pdo))->export();
     contract_assert((new AdvisingPortabilityHandler($pdo))->validate($advisingPortable)['appointments'] === 1, 'Advising portability differs.');

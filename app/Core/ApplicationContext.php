@@ -31,7 +31,7 @@ final class ApplicationContext
     {
         $pdo = Database::connection();
         $modules = new ModuleRegistry(cpe_config('modules', []), $pdo);
-        $capabilities = CapabilityService::fromDatabase($pdo, cpe_config('capabilities.roles', []), $modules);
+        $capabilities = CapabilityService::fromDatabase($pdo, $modules);
         $moduleManager = new ModuleManager($modules, $capabilities);
         return new self(
             $pdo,
@@ -40,7 +40,7 @@ final class ApplicationContext
             $modules,
             $moduleManager,
             $capabilities,
-            new EventDispatcher($pdo, $moduleManager),
+            new EventDispatcher($pdo, $modules),
         );
     }
 
