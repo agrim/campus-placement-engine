@@ -1,15 +1,17 @@
 # Integration event threat model
 
-Status: Phase 1 public event boundary
+Status: Phase 2 signed institution-local webhook delivery
 
 ## Assets and trust boundary
 
 The institution database owns placement records, application aggregate state,
-public event projections, delivery state, and connector credentials. A Module is
-trusted Engine code running in process. An Integration is an institution-facing
-connection. A Connector is the out-of-process consumer across the trust
-boundary. The Cloud control plane is not a placement data plane and must not
-store event payloads, aggregate IDs, or example placement records.
+public event projections, subscription/delivery state, and encrypted Connector
+credentials. A Module is trusted Engine code running in process. An Integration
+is an institution-facing connection. A Connector is the out-of-process consumer
+across the trust boundary. The external encryption keyring remains outside the
+database. The Cloud control plane is not a placement data plane and must not
+store endpoint URLs, secrets, event payloads, delivery bodies, raw diagnostics,
+aggregate IDs, or example placement records.
 
 The only public payload in this phase is `application.status_changed` schema 1.
 There is no public Engine API or API scope. Private `DomainEvent` payloads and
@@ -27,21 +29,31 @@ durable state shares the transactional outbox table.
 | A producer rewrites history after a retry | Public projection, event identity, private source identity/content, and occurrence time are immutable once a public row exists. Aggregate type/ID/version is uniquely constrained. |
 | Concurrent writes skip or duplicate an aggregate version | Every status mutation uses status-and-version compare-and-swap. Database guards require exactly `old + 1` for a real status change and prohibit version-only drift. Source state, audit/history, private event, and public projection commit atomically. |
 | Retry causes duplicate connector side effects | Delivery is explicitly at least once. `event_id` is stable across attempts and connectors must deduplicate and make side effects idempotent. |
-| Later state overtakes unresolved earlier state | The worker blocks a later public version while an earlier version of the same application is unresolved. Other aggregates remain independent; there is no global-order claim. |
-| Outbound delivery is redirected or used for SSRF | Existing outbound policy requires HTTPS by default, rejects URL credentials, fragments, redirects, and private/reserved destinations, pins the resolved address, disables inherited proxies, bounds timeouts, and accepts private networks only by explicit deployment opt-in. |
-| Signing or operational secrets enter source or payloads | Secrets are environment-owned, release publication scans public files, and the public schema contains no credential fields. Private repository visibility is not treated as a secret store. |
+| A placement transaction commits without endpoint delivery work | Eligible active/degraded subscriptions and event selection are captured as per-subscription delivery rows inside the same source transaction. Capture locks eligible subscription rows before insertion, serializing with revoke so unresolved work cannot appear after revocation. A capture fault rolls back the source event; no network, transport, or secret object is constructed in that transaction. |
+| One slow or failing endpoint blocks another | Delivery state, lease fencing, retry, circuit, backlog, health, and replay are per subscription. Endpoint and institution concurrency are bounded, a persisted cyclic cursor prevents repeated short runs from restarting at the lowest subscription, and the worker continues after one endpoint fails. |
+| Later state overtakes unresolved earlier state | The worker blocks a later public version only for the same subscription and application aggregate. A delivery deliberately terminated by revocation is never resumed or replayed and is treated as a continuity boundary for future events after clean reactivation. Other aggregates and subscriptions remain independent; there is no global-order claim. |
+| Outbound delivery is redirected, rebound, or used for SSRF | Every attempt resolves and validates all A/AAAA answers, rejects credentials, fragments, redirects, ambiguous hosts, and private/reserved ranges, and pins one validated address into the TLS connection. Proxy inheritance is disabled and request/response size plus connect/total time are bounded. Self-hosted private delivery is an explicit per-subscription administrator choice and admits only RFC 1918/ULA; managed mode is public-egress only. |
+| Invalid TLS is silently downgraded | The transport verifies the peer and hostname, restricts protocols to the configured scheme, follows no redirects, and treats TLS failure as terminal/degraded. |
+| A validation probe leaks placement data or is mistaken for a real event | Validation uses a separately typed signed `webhook.validation` challenge with no application, aggregate, candidate, employer, or example placement values. Activation requires a recent successful challenge. |
+| Signing secrets are disclosed from storage, logs, UI, or support output | Secrets are random one-time reveals. AES-256-GCM ciphertext binds institution, subscription, and explicit key version as associated data. There is no plaintext fallback; URL, body, secret, and raw failure values are excluded from audit, diagnostics, health, metrics, and Cloud. |
+| Secret rotation creates an unbounded acceptance window | At most the current and previous secret are encrypted. Both signatures are emitted for 24 hours; another rotation is refused during overlap, expired metadata is cleared, and revoke clears both immediately. |
+| A stale worker acknowledges after disable, revoke, or replay | Claims use random tokens plus monotonic lease generations. Every state mutation is token/generation fenced; revoke steals/fences active claims and dead-letters unresolved work. An already in-flight HTTP request remains possible and is covered by consumer verification/deduplication. |
+| A forged or replayed request causes side effects | HMAC-SHA256 binds event ID, Unix timestamp, and exact raw body. Consumers use constant-time comparison, reject excessive clock skew, validate the schema/header identity, and transactionally deduplicate event IDs. |
+| Signing or operational secrets enter source or payloads | Runtime keyrings are environment/secret-manager owned, publication scans public files, and the public schema contains no credential fields. Private repository visibility is not treated as a secret store. |
 | Restore silently forks or rewinds the stream | Restore is documented as a continuity break. Operators stop delivery and require connector checkpoint/deduplication review plus resynchronization before resuming. |
 | Control-plane compromise exposes institution records | Cloud compatibility fixtures contain declarations only. Connector execution and payload handling remain in a tenant-isolated data-plane runtime; Cloud stores no event payloads or aggregate IDs. |
-| Recovery replays the wrong event or changes its content | Public replay requires one exact canonical event ID, an explicit public dead letter, no retained lease, and an actor who resolves to an active local administrator. Missing, inactive, nonexistent, and non-admin actor IDs fail closed, so shell access cannot create false attribution. A transactional row lock and status guard preserve the immutable envelope, write a fixed payload-free audit, and keep later aggregate versions blocked until success. |
+| Recovery replays the wrong endpoint event or changes its content | Webhook replay requires one exact canonical delivery ID, a replayable per-subscription dead letter, no retained lease, an active/degraded subscription, and an actor who resolves to an active local administrator. Revocation-terminal deliveries are never replayable. A transactional row lock and generation fence preserve the immutable source envelope, write a fixed payload-free audit, and keep later versions for only that subscription/aggregate blocked until success. |
 
 ## Residual risks and operator duties
 
 An acknowledged side effect can repeat if acknowledgement state is lost. A
 dead-lettered earlier version intentionally stops later versions for the same
-application until investigated. Operators must monitor public pending and
-dead-letter metrics, protect sink files and webhook secrets, limit connector
-access, rotate credentials after suspected exposure, and preserve database and
-log evidence during an incident.
+subscription and application until investigated. DNS and certificate validity
+can change after validation, so every real attempt rechecks policy. An HTTP
+request already in flight at revoke cannot be recalled. Operators must monitor
+pending, dead-letter, circuit, key-version, and heartbeat health; protect
+diagnostic files and keyrings; limit Connector access; rotate or revoke after
+suspected exposure; and preserve database/log evidence during an incident.
 
 Schema validation does not authorize a connector. Deployers must separately
 approve the destination, exact compatibility declaration, network trust

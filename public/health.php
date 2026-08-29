@@ -7,6 +7,7 @@ require __DIR__ . '/../app/bootstrap.php';
 
 use App\Hosted\HostedBootstrap;
 use App\Install\SystemRequirements;
+use App\Integrations\Webhooks\WebhookHealthService;
 use App\Security\OperationalBearerAuthorization;
 use App\Support\Database;
 use App\Support\IncidentReporter;
@@ -48,6 +49,11 @@ if ($ready) {
         $checks['database'] = 'ok';
         $checks['migrations'] = Database::pendingMigrations() === [] ? 'ok' : 'pending';
         if ($checks['migrations'] !== 'ok') {
+            $status = 'unavailable';
+        }
+        $webhooks = (new WebhookHealthService(Database::connection()))->snapshot();
+        $checks['webhooks'] = $webhooks['status'] === 'fail' ? 'unavailable' : $webhooks['status'];
+        if ($checks['webhooks'] === 'unavailable') {
             $status = 'unavailable';
         }
     } catch (Throwable $e) {

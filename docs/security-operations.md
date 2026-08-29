@@ -61,8 +61,10 @@ ownership and account-linking risks.
   `CPE_METRICS_TOKEN` of at least 24 characters; absent or invalid access returns
   404.
 
-Metrics expose migration, outbox, notification, advising-task, and module-state
-gauges. Hosted-readiness and metrics credentials are accepted only from the
+Metrics expose migration, outbox, notification, signed-webhook aggregate
+health, advising-task, and module-state gauges. Webhook metrics contain counts
+and heartbeat age only, never endpoint URLs, event/application IDs, bodies, or
+diagnostics. Hosted-readiness and metrics credentials are accepted only from the
 HTTP `Authorization` header. Do not place the token in a URL, cookie,
 `X-Forwarded-*` header, or client-address allowlist. Missing, malformed, invalid,
 or weakly configured operational credentials receive the same concealed 404
@@ -76,64 +78,57 @@ refer to that ID. Secret-named fields, bearer values, common key assignments,
 and PostgreSQL URL passwords are redacted, but operators must still avoid
 logging personal payloads.
 
-## Domain-Event Delivery
+## Event And Integration Workers
 
-`php placement work-outbox` first expands durable per-module declaration work,
-then processes source-bundled observer deliveries and the external event outbox.
-These paths are independent: a declaration or observer cannot block its
-neighbors or the external sink.
-The external worker claims only rows with a complete governed public projection
-and serializes only public columns through the public envelope. It never selects
-or decodes the private `DomainEvent` payload, and it never promotes legacy rows
-by inference. The current catalog contains only
-`application.status_changed` schema 1.
-Without an external sink, the external outbox records `delivered_to=internal` to
-mean that no out-of-process destination was configured; it does not represent
-observer completion. Configure one optional external sink:
+`php placement work-outbox` expands durable Module declaration work, processes
+source-bundled internal observer deliveries, and optionally writes the governed
+public envelope to a diagnostics-only JSONL path. It never selects or decodes
+private `DomainEvent` payloads for that export. The former environment URL and
+secret sink is disabled.
+
+Production webhook delivery is institution-facing Integration state managed on
+the server-rendered Integrations page and processed separately:
 
 ```text
-CPE_DOMAIN_EVENT_OUTBOX_PATH=/secure/path/events.jsonl
-# or
-CPE_DOMAIN_EVENT_WEBHOOK_URL=https://integration.example.edu/events
-CPE_DOMAIN_EVENT_WEBHOOK_SECRET=at-least-32-characters
+php placement work-integrations --limit=100
 ```
 
-HTTPS is mandatory. Localhost HTTP is available only with
-`CPE_DOMAIN_EVENT_ALLOW_HTTP=1`. Delivery rejects URL credentials, fragments,
-redirects, non-2xx responses, and private/reserved network destinations. It
-requires PHP `ext-curl`, pins the verified destination address, and disables
-proxy inheritance. A reviewed internal integration additionally needs
-`CPE_OUTBOUND_ALLOW_PRIVATE_NETWORK=1`; this is a process-wide trust-boundary
-override and should stay off for ordinary internet delivery. Claims are
-concurrency-safe, stale locks can be recovered, failures back off, and terminal
-failures become dead letters after `CPE_DOMAIN_EVENT_MAX_ATTEMPTS` (default 10).
-Monitor pending and dead-lettered work. Internal observers and external
-consumers must be idempotent because a crash between a side effect and its
-token-fenced acknowledgement can produce at-least-once delivery.
-Later versions for one application wait for its unresolved earlier version;
-unrelated applications can progress, and there is no global-order promise. A
-database or portability restore breaks stream continuity and requires connector
-resynchronization before delivery resumes. See `integrations/events.md` and
-`security/integration-threat-model.md`.
+Run the short worker every minute from cron or the hosted scheduler. Give it the
+same institution database, `CPE_WEBHOOK_ENCRYPTION_KEYS`, and
+`CPE_WEBHOOK_ACTIVE_KEY_VERSION` as the web process. Do not run a busy loop.
+Readiness and metrics report aggregate lifecycle, backlog, dead-letter,
+heartbeat, private-policy mode, and key-version health without endpoint URLs,
+event IDs, bodies, or raw failures.
 
-Replay only an investigated dead letter, by exact stable identity:
+Engine captures one delivery row for every eligible endpoint in the source
+event transaction and reconstructs the exact immutable public body only after
+commit. Endpoint leases, retries, circuits, health, and replay are isolated.
+Delivery is at least once; Connectors must verify signatures and make event-ID
+side effects idempotent. Ordering is per subscription and application aggregate,
+so unrelated applications and endpoints continue independently.
+
+HTTPS, peer/hostname verification, approved ports, fresh all-address DNS
+validation, connection pinning, no proxy, no redirect, bounded headers,
+1 MiB request/response caps, and connect/total timeouts are mandatory. An
+explicit self-hosted per-subscription private policy admits only RFC 1918/ULA;
+managed hosting is public-egress only. Invalid TLS is terminal and never
+downgraded.
+
+Replay only an investigated dead letter by exact stable identity:
 
 ```text
+php placement replay-webhook-delivery --delivery=whdel_ID --actor-user-id=USER_ID
 php placement replay-public-event --event=event_ID --actor-user-id=USER_ID
 php placement replay-internal-fanout --event=event_ID --module=MODULE_KEY --actor-user-id=USER_ID
 php placement replay-internal-delivery --event=event_ID --subscription=internal.module.name.v1 --actor-user-id=USER_ID
 ```
 
-Public replay accepts only an explicit unresolved public dead letter and refuses
-retained lease state. The row lock and status-guarded update reset delivery
-state in one transaction without changing the envelope; later versions of that
-application remain blocked until the replay succeeds. Internal replay follows
-the corresponding queue status guards. Every replay requires the supplied actor
-to be an active local administrator and writes a fixed, payload-free audit event
-with that administrator as actor. Missing, inactive, nonexistent, and non-admin
-actors are rejected with redacted failures; possession of a local shell is not
-authorization to attribute an action to another user. Repeating an unchanged
-replay is idempotent.
+Webhook replay targets one endpoint delivery, preserves the immutable envelope,
+fences stale claims, and attributes a fixed payload-free audit entry to an
+active local administrator. Source public-event and internal Module replay keep
+their existing exact-row guards. Shell access alone does not authorize false
+administrator attribution. See `integrations/webhooks.md`,
+`integrations/events.md`, and `security/integration-threat-model.md`.
 
 ## Incident First Steps
 

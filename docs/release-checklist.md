@@ -40,7 +40,9 @@ Use this before a public alpha tag or downloadable archive.
   fresh dedicated database.
 - Run `php tests/hosted_install_preflight_contract.php` and confirm installed
   pre-current schemas reject same-tenant and wrong-tenant direct retries without
-  changing schema, migration, ownership, identity, or product state.
+  changing schema, migration, ownership, identity, or product state. Confirm a
+  recovery authority replayed against another absent target is rejected before
+  creating that target.
 - Run `php tests/database_lock_release_contract.php` and confirm its local typed
   failure companion passes. The PostgreSQL 17 release job must fault checked
   unlock for ownership, migration, and installation locks and prove every next
@@ -61,6 +63,24 @@ Use this before a public alpha tag or downloadable archive.
   mutation paths, exact/private-safe envelopes, retry and aggregate ordering,
   portability continuity limits, strict producer schemas, and tolerant frozen
   consumer behavior.
+- Run `php tests/webhook_delivery_contract.php` against SQLite and a fresh
+  dedicated PostgreSQL 17 database. Confirm encrypted one-time secrets,
+  lifecycle and immutability guards, atomic per-subscription fanout, exact
+  signatures, SSRF and DNS pinning policy, endpoint isolation, ordering,
+  fencing, retry/dead-letter policy, attributed exact replay, and redaction.
+- Run `php tests/webhook_delivery_concurrency_contract.php` against SQLite and a
+  fresh dedicated PostgreSQL 17 database. Confirm two worker processes preserve
+  global endpoint/institution claim caps and retain both parallel failure
+  increments through circuit opening.
+- Run `php tests/webhook_revoke_completion_concurrency_contract.php` and
+  `php tests/webhook_capture_revoke_concurrency_contract.php` against SQLite and
+  separate fresh PostgreSQL 17 databases. Confirm subscription-first completion
+  locking, capture-time `FOR UPDATE` serialization with revoke, terminal fencing
+  and replay refusal through reactivation without blocking future events, and
+  durable rank-first round-robin progress across
+  repeated `work(1)` runs without cap or aggregate-order regression. Run
+  `php tests/webhook_receiver_example_contract.php` and confirm oversized input
+  stops at the 1 MiB plus one-byte sentinel.
 - Run `php tests/managed_hosting_contract.php` and confirm the external resolver
   seam, tenant database identity, module entitlements, and session binding fail
   closed as documented.
@@ -73,7 +93,12 @@ Use this before a public alpha tag or downloadable archive.
   against both formats.
 - Confirm both Git-free unpacked archives contain `contracts/`, pass JSON
   validation and `publication-check`, and can run
-  `tests/public_event_contract.php` without relying on repository metadata.
+  `tests/public_event_contract.php`, `tests/webhook_delivery_contract.php`,
+  `tests/webhook_delivery_concurrency_contract.php`,
+  `tests/webhook_revoke_completion_concurrency_contract.php`,
+  `tests/webhook_capture_revoke_concurrency_contract.php`, and
+  `tests/webhook_receiver_example_contract.php` without relying on repository
+  metadata.
 - Run CLI first-run install against a throwaway database with
   `CPE_ADMIN_PASSWORD=... php placement install ...`.
 - Run `php placement upgrade` against a throwaway installed database and confirm
@@ -115,8 +140,8 @@ Use this before a public alpha tag or downloadable archive.
 - Run `php placement smoke-http --base-url=http://localhost:8000` and confirm
   it checks hardened session cookies plus browser security headers. On demo or
   staffed test installs, include `--restricted-email=atlas@example.test` or an
-  equivalent non-admin account so sensitive-page redirects are covered over
-  HTTP.
+  equivalent non-admin account so every sensitive route is proven to return
+  exact HTTP 403 with the fixed `Access denied.` body.
 - Check public `/health.php`, self-hosted `/health.php?ready=1`, and
   token-protected `/metrics.php`. For managed hosting, check readiness again
   through the real proxy with both the tenant `Host` and
@@ -125,11 +150,18 @@ Use this before a public alpha tag or downloadable archive.
 - Run `php placement load-smoke --base-url=http://localhost:8000` and record the
   release-candidate baseline rather than treating it as a production capacity
   guarantee.
-- Run `php placement work-outbox` with a local JSONL sink; confirm internal
-  fanout, observer, and external sink counts are all reported, and that a second
-  run does not redeliver acknowledged work. Exercise all three audited replay
-  commands against isolated dead-letter fixtures, including public
-  deadletter-to-ordered-resume behavior.
+- Run `php placement work-outbox` with the explicitly diagnostic-only local
+  JSONL sink; confirm internal fanout and observer counts are reported and that
+  a second run does not redeliver acknowledged work. Exercise the audited
+  internal/public replay commands against isolated dead-letter fixtures,
+  including public deadletter-to-ordered-resume behavior.
+- Run `php placement work-integrations` on an installed test database and
+  exercise an isolated signed webhook fixture through success, retry,
+  dead-letter, and `replay-webhook-delivery` with administrator attribution.
+  Confirm the worker heartbeat, backlog, last outcome, and redacted support
+  reference appear in the institution Integrations workflow without exposing
+  endpoint URLs, secrets, event bodies, or aggregate identifiers to operations
+  output.
 - Follow `docs/browser-qa.md` for dense-board desktop and phone-width checks.
 - Confirm the GitHub Actions CI workflow is green.
 - For PostgreSQL, run the fresh-database backup/restore contract, then separately
@@ -187,8 +219,9 @@ Use this before a public alpha tag or downloadable archive.
 - Implementation status lists known gaps honestly.
 - Managed-hosting contract, disaster recovery, security operations, module
   development, and testing runbooks are current.
-- Public event, compatibility, and integration threat-model documents match the
-  frozen contract, strict producer schemas, and consumer fixtures. Run the
+- Public event, signed webhook, compatibility, and integration threat-model
+  documents match the frozen contract, strict producer schemas, consumer
+  fixtures, exact signing bytes, lifecycle, replay, and network policy. Run the
   pinned Draft 2020-12 validator with both schema URNs registered; do not treat
   the dependency-light PHP artifact checks as standards-resolution proof.
 

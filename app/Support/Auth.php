@@ -59,6 +59,15 @@ final class Auth
         'wanted.resolve' => 'Wanted alert resolved.',
         'workflow.instances.migrate' => 'Workflow instances migrated.',
         'workflow.publish' => 'Workflow version published.',
+        'webhook.subscription.create' => 'Webhook integration created.',
+        'webhook.secret.generate' => 'Webhook signing secret generated.',
+        'webhook.secret.rotate' => 'Webhook signing secret rotated with a bounded overlap.',
+        'webhook.validation.start' => 'Webhook endpoint validation started.',
+        'webhook.validation.success' => 'Webhook endpoint validation succeeded.',
+        'webhook.subscription.activate' => 'Webhook integration activated.',
+        'webhook.subscription.disable' => 'Webhook integration disabled.',
+        'webhook.subscription.revoke' => 'Webhook integration and signing secrets revoked.',
+        'webhook.delivery.replay' => 'Dead-lettered webhook delivery replayed.',
     ];
 
     private const AUDIT_SUBJECT_TYPES = [
@@ -67,6 +76,7 @@ final class Auth
         'round_schedule', 'slot_assignment', 'system', 'user', 'wanted_alert', 'workflow_version',
         'candidate_unavailability',
         'internal_event_delivery', 'internal_event_fanout', 'public_event',
+        'webhook_subscription', 'webhook_delivery',
     ];
 
     private const AUDIT_SUBJECT_ALIASES = [

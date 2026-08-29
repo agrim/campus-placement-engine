@@ -54,24 +54,32 @@ transition keys, confidential fields, or internal numeric IDs.
 
 ## Delivery and consumer rules
 
-Run `php placement work-outbox` from one or more schedulers. Configure at most
-one external destination with `CPE_DOMAIN_EVENT_OUTBOX_PATH` or
-`CPE_DOMAIN_EVENT_WEBHOOK_URL`; the environment and network controls are in
-`docs/environment.md` and `docs/security-operations.md`. If neither is set, the
-worker records `delivered_to=internal`, meaning no out-of-process copy was made.
+Production delivery uses one or more administrator-configured signed webhook
+Integrations and `php placement work-integrations`. Eligibility is captured per
+active/degraded subscription in the source transaction, but network delivery is
+strictly post-commit. Each endpoint owns independent retry, circuit, health,
+backlog, and replay state. See [`webhooks.md`](webhooks.md) for exact headers,
+HMAC input, validation, one-time secrets, SSRF/TLS policy, and operations.
+
+`php placement work-outbox` remains the internal Module/source worker. Its
+optional `CPE_DOMAIN_EVENT_DIAGNOSTIC_OUTBOX_PATH` output is diagnostics-only,
+not production webhook delivery. With no diagnostic path,
+`delivered_to=internal` means only that no out-of-process diagnostic copy was
+made; it does not represent per-endpoint delivery or Module observer completion.
 
 Delivery is at least once. A connector must make side effects idempotent and
 deduplicate by `event_id`. Retry serialization preserves the immutable event ID,
 occurrence time, public projection, and content. A lost acknowledgement can
 therefore repeat an already completed external side effect.
 
-Ordering is per application aggregate, not global:
+Signed-webhook ordering is per subscription and application aggregate, not
+global:
 
 - a later public aggregate version is not claimed while an earlier version for
-  that same application is unresolved;
+  that same subscription and application is unresolved;
 - retrying or dead-lettered earlier work blocks later versions for that
-  application until an operator resolves it;
-- unrelated applications may progress independently;
+  subscription/application pair until an administrator resolves it;
+- unrelated applications and other subscriptions may progress independently;
 - no ordering relationship is promised between different applications.
 
 Consumers must accept the fields they understand, ignore unknown optional
@@ -81,9 +89,21 @@ strict and emits only the frozen schema. See `docs/compatibility.md`.
 
 ## Dead-letter recovery
 
-Investigate the sink failure and preserve incident evidence before requeueing an
-event. Recovery targets one exact governed public event and one active local
-administrator:
+For a signed webhook, investigate the endpoint failure and preserve evidence
+before replaying one exact per-endpoint delivery through the Integrations page
+or CLI:
+
+```text
+php placement replay-webhook-delivery --delivery=whdel_ID --actor-user-id=USER_ID
+```
+
+The subscription must be active or degraded. The command refuses pending,
+succeeded, unknown, disabled, or leased deliveries, fences the exact row,
+reconstructs the immutable body from the source public projection, and writes a
+fixed payload-free audit with the supplied active local administrator. A later
+version remains blocked only for that subscription and application.
+
+The diagnostics/source worker retains its lower-level exact public-event replay:
 
 ```text
 php placement replay-public-event --event=event_ID --actor-user-id=USER_ID

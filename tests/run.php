@@ -2091,6 +2091,7 @@ test_case('open-source release governance files and ignore protections exist', f
         'docs/workflow-transition-matrix.md',
         'docs/glossary.md',
         'docs/environment.md',
+        'docs/integrations/webhooks.md',
         'docs/configuration-architecture.md',
         'docs/indian-college-template-notes.md',
         'docs/migration-from-legacy.md',
@@ -2110,6 +2111,7 @@ test_case('open-source release governance files and ignore protections exist', f
         'examples/config-templates/virtual-interview-process.json',
         'examples/config-templates/walk-in-job-fair.json',
         'examples/env/local.env.example',
+        'examples/integrations/verify-webhook.php',
         'examples/deployment/apache-vhost.conf',
         'examples/deployment/nginx-server.conf',
         'app/Core/Backup/BackupArtifact.php',
@@ -2120,6 +2122,12 @@ test_case('open-source release governance files and ignore protections exist', f
         'tests/backup_restore_contract.php',
         'tests/database_connection_cleanup_contract.php',
         'tests/legacy_backup_compatibility_contract.php',
+        'tests/webhook_delivery_contract.php',
+        'tests/webhook_delivery_concurrency_contract.php',
+        'tests/webhook_delivery_concurrency_worker.php',
+        'tests/webhook_revoke_completion_concurrency_contract.php',
+        'tests/webhook_revoke_completion_concurrency_worker.php',
+        'tests/webhook_receiver_example_contract.php',
         '.github/workflows/ci.yml',
         '.github/workflows/release.yml',
         '.github/ISSUE_TEMPLATE/bug_report.md',
@@ -2128,7 +2136,7 @@ test_case('open-source release governance files and ignore protections exist', f
         assert_true(is_file($root . '/' . $path), "Missing release governance file: {$path}");
     }
     $ci = (string) file_get_contents($root . '/.github/workflows/ci.yml');
-    foreach (['php tests/run.php', 'php tests/alpha1_release_acceptance.php', 'php tests/backup_restore_contract.php', 'php tests/database_connection_cleanup_contract.php', 'php tests/incident_boundary_contract.php', 'php tests/legacy_backup_compatibility_contract.php', 'php tests/worker_delivery_contract.php', 'php tests/public_event_contract.php', 'php tests/database_ownership_contract.php', 'php tests/migration_lock_contract.php', 'php tests/database_lock_release_contract.php', 'php tests/install_concurrency_contract.php', 'php tests/hosted_install_atomicity_contract.php', 'php tests/hosted_install_preflight_contract.php', 'php tests/setup_authorization_contract.php', 'php tests/hosted_install_contract.php', 'php tests/managed_hosting_contract.php', 'php placement publication-check', 'php placement package', 'php placement verify-package', 'php placement install', 'php placement upgrade', 'php placement setup --check', 'php placement serve --help', 'php placement install-demo', 'php placement seed-large-demo', 'php placement browser-qa-plan', 'php placement smoke-http', 'php placement readiness', 'php placement metrics', 'php placement placement-report', 'php placement privacy-report', 'php placement export', 'php placement rollback-import', 'php placement config-export', 'php placement config-validate', 'php placement config-import', 'php placement deliver-notifications', 'php placement certify-notifications', 'php placement optimize-slots', 'php placement assign-optimized-slots', 'php -l placement'] as $command) {
+    foreach (['php tests/run.php', 'php tests/alpha1_release_acceptance.php', 'php tests/backup_restore_contract.php', 'php tests/database_connection_cleanup_contract.php', 'php tests/incident_boundary_contract.php', 'php tests/legacy_backup_compatibility_contract.php', 'php tests/worker_delivery_contract.php', 'php tests/public_event_contract.php', 'php tests/webhook_delivery_contract.php', 'php tests/webhook_delivery_concurrency_contract.php', 'php tests/webhook_revoke_completion_concurrency_contract.php', 'php tests/webhook_receiver_example_contract.php', 'php tests/database_ownership_contract.php', 'php tests/migration_lock_contract.php', 'php tests/database_lock_release_contract.php', 'php tests/install_concurrency_contract.php', 'php tests/hosted_install_atomicity_contract.php', 'php tests/hosted_install_preflight_contract.php', 'php tests/setup_authorization_contract.php', 'php tests/hosted_install_contract.php', 'php tests/managed_hosting_contract.php', 'php placement publication-check', 'php placement package', 'php placement verify-package', 'php placement install', 'php placement upgrade', 'php placement setup --check', 'php placement serve --help', 'php placement install-demo', 'php placement seed-large-demo', 'php placement browser-qa-plan', 'php placement smoke-http', 'php placement readiness', 'php placement metrics', 'php placement placement-report', 'php placement privacy-report', 'php placement export', 'php placement rollback-import', 'php placement config-export', 'php placement config-validate', 'php placement config-import', 'php placement deliver-notifications', 'php placement work-integrations', 'php placement certify-notifications', 'php placement optimize-slots', 'php placement assign-optimized-slots', 'php -l placement'] as $command) {
         assert_true(str_contains($ci, $command), "Missing CI command: {$command}");
     }
     $releaseWorkflow = (string) file_get_contents($root . '/.github/workflows/release.yml');
@@ -2198,7 +2206,47 @@ YAML;
                 && str_contains($workflow, 'php tests/public_event_contract.php'),
             'CI and release must run the public event contract against a fresh dedicated PostgreSQL database.',
         );
+        assert_true(
+            str_contains($workflow, 'cpe_webhook_delivery_contract')
+                && str_contains($workflow, 'php tests/webhook_delivery_contract.php'),
+            'CI and release must run the signed webhook delivery contract against a fresh dedicated PostgreSQL database.',
+        );
+        assert_true(
+            str_contains($workflow, 'cpe_webhook_delivery_concurrency_contract')
+                && str_contains($workflow, 'php tests/webhook_delivery_concurrency_contract.php'),
+            'CI and release must run two-process webhook claim and circuit concurrency against a fresh PostgreSQL database.',
+        );
+        assert_true(
+            str_contains($workflow, 'cpe_webhook_revoke_completion_concurrency_contract')
+                && str_contains($workflow, 'php tests/webhook_revoke_completion_concurrency_contract.php'),
+            'CI and release must run revoke/completion lock-order concurrency against a fresh PostgreSQL database.',
+        );
+        assert_true(
+            str_contains($workflow, 'cpe_webhook_capture_revoke_concurrency_contract')
+                && str_contains($workflow, 'php tests/webhook_capture_revoke_concurrency_contract.php'),
+            'CI and release must run capture/revoke serialization and durable fairness against a fresh PostgreSQL database.',
+        );
+        assert_true(
+            str_contains($workflow, 'CPE_WEBHOOK_TEST_PRIVILEGED_HEALTH: "1"'),
+            'CI and release must prove unreadable webhook health storage with a disposable restricted PostgreSQL role.',
+        );
     }
+    $webhookDeliveryContract = (string) file_get_contents($root . '/tests/webhook_delivery_contract.php');
+    $resetRoleOffset = strpos($webhookDeliveryContract, "\$pdo->exec('RESET ROLE')");
+    $revokeGrantOffset = strpos($webhookDeliveryContract, "'REVOKE ALL PRIVILEGES ON TABLE '");
+    $dropOwnedOffset = strpos($webhookDeliveryContract, "'DROP OWNED BY '");
+    $dropRoleOffset = strpos($webhookDeliveryContract, "'DROP ROLE '");
+    assert_true(
+        is_int($resetRoleOffset)
+            && is_int($revokeGrantOffset)
+            && is_int($dropOwnedOffset)
+            && is_int($dropRoleOffset)
+            && $resetRoleOffset < $revokeGrantOffset
+            && $revokeGrantOffset < $dropOwnedOffset
+            && $dropOwnedOffset < $dropRoleOffset
+            && str_contains($webhookDeliveryContract, 'if ($cleanupFailures !== [])'),
+        'Privileged webhook health cleanup must reset safely, revoke grants, drop owned grants, drop the role, and fail on cleanup errors.',
+    );
     $suiteSource = (string) file_get_contents(__FILE__);
     assert_true(
         str_contains(
@@ -2385,6 +2433,12 @@ test_case('release package includes public source and excludes private runtime d
         assert_true(str_contains($joined, '/app/Core/Events/PublicEventDeadLetterReplayService.php'), 'Package should include audited public dead-letter replay');
         assert_true(str_contains($joined, '/app/Core/Events/ReplayOperatorAuthorization.php'), 'Package should include centralized replay operator authorization');
         assert_true(str_contains($joined, '/app/Modules/Placement/Application/ApplicationStatusWriter.php'), 'Package should include the shared application status writer');
+        assert_true(str_contains($joined, '/app/Controllers/WebhookController.php'), 'Package should include the institution webhook administration controller');
+        assert_true(str_contains($joined, '/app/Integrations/Webhooks/WebhookDeliveryWorker.php'), 'Package should include the signed webhook delivery worker');
+        assert_true(str_contains($joined, '/app/Integrations/Webhooks/WebhookDeliveryReplayService.php'), 'Package should include attributed exact webhook replay');
+        assert_true(str_contains($joined, '/app/Integrations/Webhooks/WebhookSecretCipher.php'), 'Package should include encrypted webhook secret storage');
+        assert_true(str_contains($joined, '/app/Integrations/Webhooks/WebhookSigner.php'), 'Package should include the public signing contract');
+        assert_true(str_contains($joined, '/app/Views/webhooks.php'), 'Package should include the institution webhook workflow');
         assert_true(str_contains($joined, '/app/Core/Persistence/DatabaseConnectionInvalidException.php'), 'Package should include typed invalid-connection cleanup failures');
         assert_true(str_contains($joined, '/app/Core/Security/AuthorizationUnavailable.php'), 'Package should include typed installed-runtime authorization failures');
         assert_true(str_contains($joined, '/app/Core/Modules/ModuleVersionIntegrity.php'), 'Package should include exact bundled module version integrity');
@@ -2409,6 +2463,14 @@ test_case('release package includes public source and excludes private runtime d
         assert_true(str_contains($joined, '/tests/installation_state_contract.php'), 'Package should include the portable installation-state contract');
         assert_true(str_contains($joined, '/tests/internal_event_delivery_contract.php'), 'Package should include the internal observer delivery contract');
         assert_true(str_contains($joined, '/tests/public_event_contract.php'), 'Package should include the public event contract');
+        assert_true(str_contains($joined, '/tests/webhook_delivery_contract.php'), 'Package should include the signed webhook delivery contract');
+        assert_true(str_contains($joined, '/tests/webhook_delivery_concurrency_contract.php'), 'Package should include the signed webhook concurrency contract');
+        assert_true(str_contains($joined, '/tests/webhook_delivery_concurrency_worker.php'), 'Package should include the signed webhook concurrency worker');
+        assert_true(str_contains($joined, '/tests/webhook_revoke_completion_concurrency_contract.php'), 'Package should include the webhook revoke/completion concurrency contract');
+        assert_true(str_contains($joined, '/tests/webhook_revoke_completion_concurrency_worker.php'), 'Package should include the webhook revoke/completion concurrency worker');
+        assert_true(str_contains($joined, '/tests/webhook_capture_revoke_concurrency_contract.php'), 'Package should include the webhook capture/revoke concurrency contract');
+        assert_true(str_contains($joined, '/tests/webhook_capture_revoke_concurrency_worker.php'), 'Package should include the webhook capture/revoke concurrency worker');
+        assert_true(str_contains($joined, '/tests/webhook_receiver_example_contract.php'), 'Package should include the bounded receiver example contract');
         assert_true(str_contains($joined, '/tests/validate_public_event_schemas.py'), 'Package should include the independent Draft 2020-12 validator');
         assert_true(str_contains($joined, '/tests/requirements-public-event-schema.txt'), 'Package should include pinned schema-validator test dependencies');
         assert_true(str_contains($joined, '/tests/authorized_setup_recovery_fixture.php'), 'Package should include the authorized setup recovery test fixture');
@@ -2416,6 +2478,7 @@ test_case('release package includes public source and excludes private runtime d
         assert_true(str_contains($joined, '/tests/managed_hosting_contract.php'), 'Package should include the managed-hosting probe contract');
         assert_true(str_contains($joined, '/docs/environment.md'), 'Package should include environment variable guide');
         assert_true(str_contains($joined, '/docs/integrations/events.md'), 'Package should include the public event guide');
+        assert_true(str_contains($joined, '/docs/integrations/webhooks.md'), 'Package should include signed webhook operations and consumer guidance');
         assert_true(str_contains($joined, '/docs/compatibility.md'), 'Package should include public compatibility rules');
         assert_true(str_contains($joined, '/docs/security/integration-threat-model.md'), 'Package should include the integration threat model');
         assert_true(str_contains($joined, '/contracts/public-integration.v1.json'), 'Package should include the frozen public integration declaration');
@@ -2424,16 +2487,21 @@ test_case('release package includes public source and excludes private runtime d
         assert_true(str_contains($joined, '/contracts/fixtures/application.status_changed.v1.consumer.json'), 'Package should include the frozen consumer fixture');
         assert_true(str_contains($joined, '/docs/releases/v0.1.0-alpha.3.md'), 'Package should include current release notes');
         assert_true(str_contains($joined, '/examples/env/local.env.example'), 'Package should include synthetic env template');
+        assert_true(str_contains($joined, '/examples/integrations/verify-webhook.php'), 'Package should include the dependency-light consumer verification example');
         assert_true(str_contains($joined, '/examples/deployment/apache-vhost.conf'), 'Package should include Apache deployment example');
         assert_true(str_contains($joined, '/examples/deployment/nginx-server.conf'), 'Package should include Nginx deployment example');
         assert_true(str_contains($joined, '/database/migrations/014_round_schedule_day.sql'), 'Package should include migrations');
         assert_true(str_contains($joined, '/database/migrations/047_internal_event_deliveries.sql'), 'Package should include SQLite internal observer delivery migration');
         assert_true(str_contains($joined, '/database/migrations/048_module_enabled_constraint.sql'), 'Package should include SQLite module enabled constraint migration');
         assert_true(str_contains($joined, '/database/migrations/049_public_event_projection.sql'), 'Package should include SQLite public event migration');
+        assert_true(str_contains($joined, '/database/migrations/050_signed_webhook_integrations.sql'), 'Package should include SQLite signed webhook migration');
+        assert_true(str_contains($joined, '/database/migrations/051_webhook_claim_cursor.sql'), 'Package should include SQLite webhook fairness cursor migration');
         assert_true(str_contains($joined, '/database/migrations/pgsql/001_portal_baseline.sql'), 'Package should include PostgreSQL migrations');
         assert_true(str_contains($joined, '/database/migrations/pgsql/011_internal_event_deliveries.sql'), 'Package should include PostgreSQL internal observer delivery migration');
         assert_true(str_contains($joined, '/database/migrations/pgsql/012_module_enabled_constraint.sql'), 'Package should include PostgreSQL module enabled constraint migration');
         assert_true(str_contains($joined, '/database/migrations/pgsql/013_public_event_projection.sql'), 'Package should include PostgreSQL public event migration');
+        assert_true(str_contains($joined, '/database/migrations/pgsql/014_signed_webhook_integrations.sql'), 'Package should include PostgreSQL signed webhook migration');
+        assert_true(str_contains($joined, '/database/migrations/pgsql/015_webhook_claim_cursor.sql'), 'Package should include PostgreSQL webhook fairness cursor migration');
         assert_true(str_contains($joined, '/data/.gitkeep'), 'Package should keep an empty data directory marker');
         assert_true(!str_contains($joined, '.legacy-private'), 'Package should exclude private archive material');
         assert_true(!str_contains($joined, 'data/app.sqlite'), 'Package should exclude runtime SQLite data');
@@ -2465,6 +2533,51 @@ test_case('release package includes public source and excludes private runtime d
         ]);
         assert_same(0, $tarContractCode, 'Git-free extracted tarball public event contract should pass: ' . $tarContractErr);
         assert_true(str_contains($tarContractOut, 'PASS public event contract (sqlite'), 'Extracted tarball should run the portable public event contract');
+        $tarWebhookTmp = $tarExtractDir . '/webhook-delivery-tmp';
+        assert_true(mkdir($tarWebhookTmp, 0700, true), 'Could not create extracted tarball webhook contract temp directory');
+        [$tarWebhookCode, $tarWebhookOut, $tarWebhookErr] = run_php_from($tarPackageRoot, 'tests/webhook_delivery_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $tarWebhookTmp,
+        ]);
+        assert_same(0, $tarWebhookCode, 'Git-free extracted tarball webhook delivery contract should pass: ' . $tarWebhookErr);
+        assert_true(str_contains($tarWebhookOut, 'PASS signed webhook delivery contract (sqlite'), 'Extracted tarball should run the portable webhook delivery contract');
+        $tarWebhookConcurrencyTmp = $tarExtractDir . '/webhook-concurrency-tmp';
+        assert_true(mkdir($tarWebhookConcurrencyTmp, 0700, true), 'Could not create extracted tarball webhook concurrency temp directory');
+        [$tarWebhookConcurrencyCode, $tarWebhookConcurrencyOut, $tarWebhookConcurrencyErr] = run_php_from($tarPackageRoot, 'tests/webhook_delivery_concurrency_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $tarWebhookConcurrencyTmp,
+        ]);
+        assert_same(0, $tarWebhookConcurrencyCode, 'Git-free extracted tarball webhook concurrency contract should pass: ' . $tarWebhookConcurrencyErr);
+        assert_true(str_contains($tarWebhookConcurrencyOut, 'PASS webhook delivery concurrency contract (sqlite'), 'Extracted tarball should run the portable webhook concurrency contract');
+        $tarWebhookRevokeTmp = $tarExtractDir . '/webhook-revoke-concurrency-tmp';
+        assert_true(mkdir($tarWebhookRevokeTmp, 0700, true), 'Could not create extracted tarball webhook revoke concurrency temp directory');
+        [$tarWebhookRevokeCode, $tarWebhookRevokeOut, $tarWebhookRevokeErr] = run_php_from($tarPackageRoot, 'tests/webhook_revoke_completion_concurrency_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $tarWebhookRevokeTmp,
+        ]);
+        assert_same(0, $tarWebhookRevokeCode, 'Git-free extracted tarball webhook revoke concurrency contract should pass: ' . $tarWebhookRevokeErr);
+        assert_true(str_contains($tarWebhookRevokeOut, 'PASS webhook revoke/completion concurrency contract (sqlite'), 'Extracted tarball should run portable webhook revoke/completion fencing');
+        $tarWebhookCaptureTmp = $tarExtractDir . '/webhook-capture-revoke-tmp';
+        assert_true(mkdir($tarWebhookCaptureTmp, 0700, true), 'Could not create extracted tarball webhook capture/revoke temp directory');
+        [$tarWebhookCaptureCode, $tarWebhookCaptureOut, $tarWebhookCaptureErr] = run_php_from($tarPackageRoot, 'tests/webhook_capture_revoke_concurrency_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $tarWebhookCaptureTmp,
+        ]);
+        assert_same(0, $tarWebhookCaptureCode, 'Git-free extracted tarball webhook capture/revoke contract should pass: ' . $tarWebhookCaptureErr);
+        assert_true(str_contains($tarWebhookCaptureOut, 'PASS webhook capture/revoke and fairness contract (sqlite'), 'Extracted tarball should run portable capture/revoke serialization and durable fairness');
+        $tarReceiverTmp = $tarExtractDir . '/webhook-receiver-tmp';
+        assert_true(mkdir($tarReceiverTmp, 0700, true), 'Could not create extracted tarball receiver contract temp directory');
+        [$tarReceiverCode, $tarReceiverOut, $tarReceiverErr] = run_php_from(
+            $tarPackageRoot,
+            'tests/webhook_receiver_example_contract.php',
+            ['TMPDIR' => $tarReceiverTmp],
+        );
+        assert_same(0, $tarReceiverCode, 'Git-free extracted tarball receiver example contract should pass: ' . $tarReceiverErr);
+        assert_true(str_contains($tarReceiverOut, 'PASS webhook receiver bounded-input example contract'), 'Extracted tarball should run the bounded receiver example contract');
 
         $zipArchive = new PharData($zipPath);
         $zipArchive->extractTo($extractDir);
@@ -2484,6 +2597,51 @@ test_case('release package includes public source and excludes private runtime d
         ]);
         assert_same(0, $packageContractCode, 'Git-free extracted ZIP public event contract should pass: ' . $packageContractErr);
         assert_true(str_contains($packageContractOut, 'PASS public event contract (sqlite'), 'Extracted ZIP should run the portable public event contract');
+        $zipWebhookTmp = $extractDir . '/webhook-delivery-tmp';
+        assert_true(mkdir($zipWebhookTmp, 0700, true), 'Could not create extracted ZIP webhook contract temp directory');
+        [$packageWebhookCode, $packageWebhookOut, $packageWebhookErr] = run_php_from($packageRoot, 'tests/webhook_delivery_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $zipWebhookTmp,
+        ]);
+        assert_same(0, $packageWebhookCode, 'Git-free extracted ZIP webhook delivery contract should pass: ' . $packageWebhookErr);
+        assert_true(str_contains($packageWebhookOut, 'PASS signed webhook delivery contract (sqlite'), 'Extracted ZIP should run the portable webhook delivery contract');
+        $zipWebhookConcurrencyTmp = $extractDir . '/webhook-concurrency-tmp';
+        assert_true(mkdir($zipWebhookConcurrencyTmp, 0700, true), 'Could not create extracted ZIP webhook concurrency temp directory');
+        [$packageWebhookConcurrencyCode, $packageWebhookConcurrencyOut, $packageWebhookConcurrencyErr] = run_php_from($packageRoot, 'tests/webhook_delivery_concurrency_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $zipWebhookConcurrencyTmp,
+        ]);
+        assert_same(0, $packageWebhookConcurrencyCode, 'Git-free extracted ZIP webhook concurrency contract should pass: ' . $packageWebhookConcurrencyErr);
+        assert_true(str_contains($packageWebhookConcurrencyOut, 'PASS webhook delivery concurrency contract (sqlite'), 'Extracted ZIP should run the portable webhook concurrency contract');
+        $zipWebhookRevokeTmp = $extractDir . '/webhook-revoke-concurrency-tmp';
+        assert_true(mkdir($zipWebhookRevokeTmp, 0700, true), 'Could not create extracted ZIP webhook revoke concurrency temp directory');
+        [$packageWebhookRevokeCode, $packageWebhookRevokeOut, $packageWebhookRevokeErr] = run_php_from($packageRoot, 'tests/webhook_revoke_completion_concurrency_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $zipWebhookRevokeTmp,
+        ]);
+        assert_same(0, $packageWebhookRevokeCode, 'Git-free extracted ZIP webhook revoke concurrency contract should pass: ' . $packageWebhookRevokeErr);
+        assert_true(str_contains($packageWebhookRevokeOut, 'PASS webhook revoke/completion concurrency contract (sqlite'), 'Extracted ZIP should run portable webhook revoke/completion fencing');
+        $zipWebhookCaptureTmp = $extractDir . '/webhook-capture-revoke-tmp';
+        assert_true(mkdir($zipWebhookCaptureTmp, 0700, true), 'Could not create extracted ZIP webhook capture/revoke temp directory');
+        [$packageWebhookCaptureCode, $packageWebhookCaptureOut, $packageWebhookCaptureErr] = run_php_from($packageRoot, 'tests/webhook_capture_revoke_concurrency_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $zipWebhookCaptureTmp,
+        ]);
+        assert_same(0, $packageWebhookCaptureCode, 'Git-free extracted ZIP webhook capture/revoke contract should pass: ' . $packageWebhookCaptureErr);
+        assert_true(str_contains($packageWebhookCaptureOut, 'PASS webhook capture/revoke and fairness contract (sqlite'), 'Extracted ZIP should run portable capture/revoke serialization and durable fairness');
+        $zipReceiverTmp = $extractDir . '/webhook-receiver-tmp';
+        assert_true(mkdir($zipReceiverTmp, 0700, true), 'Could not create extracted ZIP receiver contract temp directory');
+        [$packageReceiverCode, $packageReceiverOut, $packageReceiverErr] = run_php_from(
+            $packageRoot,
+            'tests/webhook_receiver_example_contract.php',
+            ['TMPDIR' => $zipReceiverTmp],
+        );
+        assert_same(0, $packageReceiverCode, 'Git-free extracted ZIP receiver example contract should pass: ' . $packageReceiverErr);
+        assert_true(str_contains($packageReceiverOut, 'PASS webhook receiver bounded-input example contract'), 'Extracted ZIP should run the bounded receiver example contract');
 
         $packageRuntimeFixture = $packageRoot . '/data/restore-staging/package-contract.sqlite';
         try {
@@ -3095,7 +3253,7 @@ test_case('sensitive operational pages are hidden from restricted roles', functi
             assert_true(str_contains($e->getMessage(), 'Only administrators'), 'Role gate should explain admin-only denial');
         }
         $companyNav = render_layout_for_test(['title' => 'Company Nav', 'content' => '']);
-        foreach (['?r=records', '?r=reports', '?r=import', '?r=preferences', '?r=wanted', '?r=admin', '?r=system'] as $forbiddenLink) {
+        foreach (['?r=records', '?r=reports', '?r=import', '?r=preferences', '?r=wanted', '?r=admin', '?r=integrations', '?r=system'] as $forbiddenLink) {
             assert_true(!str_contains($companyNav, $forbiddenLink), 'Company nav should hide ' . $forbiddenLink);
         }
         assert_true(str_contains($companyNav, '?r=notifications'), 'Company nav should keep notifications');

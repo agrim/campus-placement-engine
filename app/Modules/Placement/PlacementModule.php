@@ -15,6 +15,7 @@ use App\Controllers\RecordsController;
 use App\Controllers\ReportsController;
 use App\Controllers\SystemController;
 use App\Controllers\WantedController;
+use App\Controllers\WebhookController;
 use App\Core\Modules\Module;
 use App\Core\Modules\ModuleManifest;
 use App\Core\Modules\ModulePortabilityHandler;
@@ -81,6 +82,15 @@ final class PlacementModule implements Module, ProvidesPortability, ProvidesPriv
             $this->route('admin-users', 'POST', AdminController::class, 'updateUsers'),
             $this->route('admin-password', 'POST', AdminController::class, 'resetPassword'),
             $this->route('admin-workflow', 'POST', AdminController::class, 'updateWorkflow'),
+            $this->route('integrations', 'GET', WebhookController::class, 'show'),
+            $this->route('integration-create', 'POST', WebhookController::class, 'create'),
+            $this->route('integration-secret-generate', 'POST', WebhookController::class, 'generateSecret'),
+            $this->route('integration-secret-rotate', 'POST', WebhookController::class, 'rotateSecret'),
+            $this->route('integration-validate', 'POST', WebhookController::class, 'validate'),
+            $this->route('integration-activate', 'POST', WebhookController::class, 'activate'),
+            $this->route('integration-disable', 'POST', WebhookController::class, 'disable'),
+            $this->route('integration-revoke', 'POST', WebhookController::class, 'revoke'),
+            $this->route('integration-replay', 'POST', WebhookController::class, 'replay'),
             $this->route('preferences', 'GET', PreferenceController::class, 'show'),
             $this->route('preferences', 'POST', PreferenceController::class, 'create'),
             $this->route('preferences-resolve', 'POST', PreferenceController::class, 'resolve'),
@@ -103,6 +113,7 @@ final class PlacementModule implements Module, ProvidesPortability, ProvidesPriv
             $this->nav('preferences', 'Preferences', 'placement.preferences.view', 60),
             $this->nav('wanted', 'Wanted', 'placement.wanted.view', 70),
             $this->nav('admin', 'Admin', 'portal.settings.manage', 80),
+            $this->nav('integrations', 'Integrations', 'portal.integrations.manage', 85),
             $this->nav('system', 'System', 'placement.system.view', 90),
             $this->nav('public', 'Public', 'portal.access', 100),
         ];

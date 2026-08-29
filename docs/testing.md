@@ -14,6 +14,11 @@ php tests/incident_boundary_contract.php
 php tests/legacy_backup_compatibility_contract.php
 php tests/worker_delivery_contract.php
 php tests/public_event_contract.php
+php tests/webhook_delivery_contract.php
+php tests/webhook_delivery_concurrency_contract.php
+php tests/webhook_revoke_completion_concurrency_contract.php
+php tests/webhook_capture_revoke_concurrency_contract.php
+php tests/webhook_receiver_example_contract.php
 php tests/postgres_connection_policy_contract.php
 php tests/postgres_tls_contract.php
 php tests/database_contract.php
@@ -55,6 +60,36 @@ dependencies in `tests/requirements-public-event-schema.txt` to register both
 URN resources and validate with a real Draft 2020-12 implementation. Missing
 tooling is a hard failure; the runtime and release application have no schema
 validator dependency.
+`tests/webhook_delivery_contract.php` is the signed per-subscription delivery
+gate. It runs against SQLite and a fresh dedicated PostgreSQL database and
+proves lifecycle/DB guards, no plaintext persistence or re-reveal, AES-GCM
+identity binding, exact raw-body signatures and rotation overlap, synthetic
+validation, transactional fanout rollback, endpoint isolation, per-subscription
+aggregate ordering, retry/dead-letter/replay attribution, stale-lease fencing,
+circuit/backpressure behavior, diagnostics redaction, and injected no-network
+SSRF/redirect/TLS/size/timeout classification. The fake transport is
+deterministic; the contract makes no hidden live endpoint request.
+`tests/webhook_delivery_concurrency_contract.php` releases two independent
+workers against one database. It proves a deep endpoint backlog cannot evade
+global endpoint/institution claim caps and that two simultaneous failure
+completions retain both counter increments and open the circuit. SQLite proves
+portable serialized behavior; CI and release also run a deterministic widened
+claim race against a fresh dedicated PostgreSQL database.
+`tests/webhook_revoke_completion_concurrency_contract.php` proves completion
+uses the same subscription-then-delivery lock order as revocation, so an
+in-flight acknowledgement cannot resurrect fenced work.
+`tests/webhook_capture_revoke_concurrency_contract.php` proves source-event
+capture takes an exclusive PostgreSQL subscription row lock before inserting a
+delivery. Its deterministic two-process gate requires revoke to wait behind
+that lock, then proves the committed delivery is fenced and cannot appear or
+deliver or be replayed after reactivation, while an ordinary future event on
+the same aggregate can progress. The SQLite path proves the same portable outcome.
+The contract also repeats `work(1)` over an older deep endpoint backlog and
+proves the persisted rank-first round-robin cursor advances both endpoints
+without exceeding endpoint/institution caps or changing aggregate order.
+`tests/webhook_receiver_example_contract.php` executes the dependency-light
+consumer's stream reader with a 2 MiB input and proves it consumes exactly the
+1 MiB plus one-byte rejection sentinel rather than buffering the remainder.
 `tests/postgres_connection_policy_contract.php` is a no-network parser and
 policy gate. It freezes the Cloud-compatible constructor and raw `fromUrl()`
 signatures while proving strict runtime TLS, pool-mode, timeout, redaction,
@@ -170,6 +205,29 @@ CI runs this against PostgreSQL 17. Locally, Apple Container is a good optional
 way to host disposable PostgreSQL while the app itself continues to run directly
 under PHP. It is not required for ordinary SQLite development.
 
+Run the webhook contract against its own fresh database because it installs and
+mutates subscription/delivery fixtures:
+
+```bash
+export CPE_DATABASE_URL='postgresql://USER:PASSWORD@127.0.0.1:5432/EMPTY_WEBHOOK_DATABASE?sslmode=disable'
+php tests/webhook_delivery_contract.php
+```
+
+Run the two-process claim/circuit contract against another fresh database:
+
+```bash
+export CPE_DATABASE_URL='postgresql://USER:PASSWORD@127.0.0.1:5432/EMPTY_WEBHOOK_CONCURRENCY_DATABASE?sslmode=disable'
+php tests/webhook_delivery_concurrency_contract.php
+```
+
+Run the two-process capture/revoke serialization and durable fairness contract
+against its own fresh database:
+
+```bash
+export CPE_DATABASE_URL='postgresql://USER:PASSWORD@127.0.0.1:5432/EMPTY_WEBHOOK_CAPTURE_REVOKE_DATABASE?sslmode=disable'
+php tests/webhook_capture_revoke_concurrency_contract.php
+```
+
 ## Real HTTP Gates
 
 Start the app in one terminal:
@@ -191,9 +249,10 @@ route, uses `curl_multi` when available, and otherwise uses PHP streams. Treat
 its local latency as a regression signal, not a hosted capacity guarantee.
 
 PHP `ext-curl` is optional for the default app but required when notification or
-domain-event HTTP delivery is configured. Those paths use it to pin a verified
+signed-webhook HTTP delivery is configured. Those paths use it to pin a verified
 destination address and are separate from the stream fallback in the read-only
-load probe.
+load probe. The deterministic contract proves policy and transport construction;
+a deployment-specific HTTPS certificate/DNS probe remains separate live proof.
 
 Check operations endpoints directly:
 

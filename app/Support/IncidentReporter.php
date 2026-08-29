@@ -31,6 +31,7 @@ final class IncidentReporter
             'session_warning_other', 'session_returned_false', 'session_threw', 'state_prepare',
             'state_permissions', 'session_fingerprint', 'state_write_prepare', 'state_write_io', 'state_sync',
             'callback',
+            'validation', 'delivery',
         ],
         'status' => ['failed'],
         'route' => [
@@ -42,6 +43,9 @@ final class IncidentReporter
             'admin-users', 'admin-password', 'admin-workflow', 'preferences', 'preferences-resolve',
             'wanted', 'wanted-resolve', 'system', 'system-clear-demo', 'advising',
             'advising-appointment', 'advising-status', 'advising-note', 'advising-task',
+            'integrations', 'integration-create', 'integration-secret-generate',
+            'integration-secret-rotate', 'integration-validate', 'integration-activate',
+            'integration-disable', 'integration-revoke', 'integration-replay',
         ],
         'operation' => [
             'placement.command', 'host_resolution', 'host_bootstrap', 'collection', 'probe', 'dispatch',
@@ -57,6 +61,9 @@ final class IncidentReporter
             'wanted.create', 'wanted.resolve', 'configuration.import', 'portability.import', 'privacy.erasure',
             'installation', 'database_restore.cleanup',
             'internal_event.observer',
+            'webhook.create', 'webhook.secret.generate', 'webhook.secret.rotate',
+            'webhook.validation', 'webhook.validate', 'webhook.activate', 'webhook.disable',
+            'webhook.revoke', 'webhook.replay', 'webhook.delivery',
         ],
     ];
 

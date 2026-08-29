@@ -64,6 +64,14 @@ final class EventDispatcher
                 ...($projection?->persistenceValues() ?? array_fill(0, 8, null)),
             ]);
             $eventId = Database::lastInsertId($this->pdo);
+            if ($projection !== null) {
+                $this->captureWebhookDeliveries(
+                    $eventId,
+                    $projection->eventType,
+                    $projection->schemaVersion,
+                    $event->occurredAt,
+                );
+            }
             if ($eligibleModuleKeys === []) {
                 return;
             }
@@ -114,6 +122,59 @@ final class EventDispatcher
             }
         }
         return $keys;
+    }
+
+    /**
+     * Capture endpoint eligibility inside the source event transaction. This
+     * method performs database work only; delivery and secret access are
+     * strictly post-commit worker concerns.
+     */
+    private function captureWebhookDeliveries(
+        int $eventId,
+        string $eventType,
+        int $schemaVersion,
+        string $occurredAt,
+    ): void {
+        $lock = strtolower((string) $this->pdo->getAttribute(PDO::ATTR_DRIVER_NAME)) === 'pgsql'
+            ? ' FOR UPDATE OF subscription'
+            : '';
+        $eligible = $this->pdo->prepare(
+            "SELECT subscription.id, subscription.endpoint_version
+             FROM webhook_subscriptions subscription
+             JOIN webhook_subscription_events selection
+               ON selection.subscription_id = subscription.id
+             JOIN domain_event_outbox event
+               ON event.id = ? AND event.institution_id = subscription.institution_id
+             WHERE subscription.lifecycle_state IN ('active', 'degraded')
+               AND selection.event_type = ? AND selection.schema_version = ?
+             ORDER BY subscription.id" . $lock,
+        );
+        $eligible->execute([$eventId, $eventType, $schemaVersion]);
+        $subscriptions = $eligible->fetchAll(PDO::FETCH_ASSOC);
+        if ($subscriptions === []) {
+            return;
+        }
+        $createdAt = cpe_now();
+        $retentionUntil = gmdate('Y-m-d H:i:s', time() + (90 * 86400));
+        $insert = $this->pdo->prepare(
+            "INSERT INTO webhook_deliveries
+             (public_id, subscription_id, event_id, endpoint_version, status, attempt_count,
+              available_at, lease_generation, last_error_code, last_failure_reference,
+              retention_until, created_at, updated_at)
+             VALUES (?, ?, ?, ?, 'pending', 0, ?, 0, '', '', ?, ?, ?)",
+        );
+        foreach ($subscriptions as $subscription) {
+            $insert->execute([
+                'whdel_' . bin2hex(random_bytes(16)),
+                (int) $subscription['id'],
+                $eventId,
+                (int) $subscription['endpoint_version'],
+                $occurredAt,
+                $retentionUntil,
+                $createdAt,
+                $createdAt,
+            ]);
+        }
     }
 
 }

@@ -79,6 +79,14 @@ created outside the live database. Apply the same retention policy to
 checksum sidecars prove file integrity, not confidentiality; use approved
 institutional encryption for retained or off-machine backups.
 
+Signed webhook delivery rows retain no request body. They reference the
+immutable governed public projection and are pruned in bounded batches 90 days
+after creation once succeeded or dead-lettered. Endpoint URLs and encrypted
+signing-secret metadata remain institution-local configuration and are excluded
+from portability exports. A downstream Connector is a separate data controller:
+its event-ID deduplication records, bodies, logs, and side effects require an
+institution-approved retention and erasure policy.
+
 ## Recommended Cycle-End Flow
 
 1. Run `php placement backup`.

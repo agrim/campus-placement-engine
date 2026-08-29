@@ -29,6 +29,7 @@ return [
             'placement.sensitive.view',
             'placement.accommodation.view',
             'placement.cross_company.view',
+            'portal.integrations.manage',
         ],
         'enabled_by_default' => true,
         'description' => 'Live placement workflows, scheduling, movement, offers, and reporting.',

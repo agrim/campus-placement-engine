@@ -20,6 +20,14 @@ Date: 2026-07-18
 > before that mechanical extraction; equivalent cross-repository contracts must
 > continue to pass.
 
+> Phase 2 integration update, 2026-08-30: the Engine now contains an
+> institution-local, database-backed signed webhook workflow for governed
+> `application.status_changed` v1 events. Subscription URLs, encrypted signing
+> material, event and aggregate identifiers, payloads, delivery state, and raw
+> diagnostics remain in each institution data plane. Cloud remains optional and
+> receives none of that data. Local PostgreSQL and live TLS endpoints remain
+> release-environment proof gates rather than claims made by this working tree.
+
 ## Implemented
 
 ### Career Services Portal Productization
@@ -69,6 +77,21 @@ Date: 2026-07-18
   immutable explicit outbox projections, per-application aggregate versions and
   ordering, exact audited dead-letter recovery, and no public Engine API or API
   scope. Internal `DomainEvent` payloads and module PHP APIs remain private.
+- Institution-facing signed webhook Integrations workflow with one-time secret
+  reveal, AES-256-GCM storage under an external versioned keyring, bounded
+  two-secret rotation overlap, explicit validation before activation, health,
+  disable/revoke, and administrator-attributed exact dead-letter replay.
+- Transactional per-subscription webhook fanout from immutable public event
+  projections, serialized with revoke on subscription rows; token-fenced
+  at-least-once workers isolate endpoints, preserve per-subscription aggregate
+  ordering without globally blocking unrelated aggregates, persist rank-first
+  round-robin progress across short runs, apply bounded jittered
+  retries/circuits/backpressure, and retain delivery metadata without
+  duplicating event bodies.
+- HTTPS-first webhook transport with fresh A/AAAA validation, public-egress
+  defaults, explicit self-hosted private-network opt-in, DNS-to-connection
+  pinning, no redirects or proxy inheritance, TLS verification, bounded headers
+  and bodies, and deterministic injected-transport coverage.
 - Bounded read-only HTTP load probe with optional `curl_multi` concurrency and a
   PHP streams fallback.
 - Hosted operations, disaster recovery, module development, security operations,

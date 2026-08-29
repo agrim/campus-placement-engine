@@ -4,7 +4,6 @@ declare(strict_types=1);
 
 namespace App\Core\Events;
 
-use App\Security\OutboundHttpPolicy;
 use App\Support\Database;
 use App\Support\IncidentReporter;
 use PDO;
@@ -214,10 +213,17 @@ final class DomainEventOutboxWorker
 
     private function deliver(array $row): string
     {
-        $path = trim((string) (getenv('CPE_DOMAIN_EVENT_OUTBOX_PATH') ?: ''));
+        $diagnosticPath = trim((string) (getenv('CPE_DOMAIN_EVENT_DIAGNOSTIC_OUTBOX_PATH') ?: ''));
+        $legacyPath = trim((string) (getenv('CPE_DOMAIN_EVENT_OUTBOX_PATH') ?: ''));
+        if ($diagnosticPath !== '' && $legacyPath !== '' && !hash_equals($diagnosticPath, $legacyPath)) {
+            throw new RuntimeException('Configure one domain-event diagnostic file path.');
+        }
+        $path = $diagnosticPath !== '' ? $diagnosticPath : $legacyPath;
         $url = trim((string) (getenv('CPE_DOMAIN_EVENT_WEBHOOK_URL') ?: ''));
-        if ($path !== '' && $url !== '') {
-            throw new RuntimeException('Configure one domain-event sink, not both file and webhook delivery.');
+        if ($url !== '') {
+            throw new RuntimeException(
+                'The legacy environment webhook sink is disabled. Configure a signed Integration in the administrator workflow.',
+            );
         }
         $envelope = PublicEventEnvelope::fromOutboxRow($row);
         if ($path !== '') {
@@ -230,37 +236,7 @@ final class DomainEventOutboxWorker
             }
             return 'file';
         }
-        if ($url !== '') {
-            return $this->deliverWebhook($url, $envelope->toArray());
-        }
         return 'internal';
-    }
-
-    private function deliverWebhook(string $url, array $envelope): string
-    {
-        $body = json_encode($envelope, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
-        $headers = [
-            'Content-Type: application/json',
-            'User-Agent: CareerServicesPortal/' . (string) cpe_config('app.version', '0.0.0'),
-            'X-CPE-Event-ID: ' . $envelope['event_id'],
-            'X-CPE-Idempotency-Key: ' . $envelope['event_id'],
-        ];
-        $secret = (string) (getenv('CPE_DOMAIN_EVENT_WEBHOOK_SECRET') ?: '');
-        if ($secret !== '') {
-            if (strlen($secret) < 32) {
-                throw new RuntimeException('CPE_DOMAIN_EVENT_WEBHOOK_SECRET must be at least 32 characters.');
-            }
-            $headers[] = 'X-CPE-Signature: sha256=' . hash_hmac('sha256', $body, $secret);
-        }
-        OutboundHttpPolicy::postJson(
-            $url,
-            $body,
-            $headers,
-            (int) (getenv('CPE_DOMAIN_EVENT_TIMEOUT') ?: 10),
-            'Domain-event webhook',
-            'CPE_DOMAIN_EVENT_ALLOW_HTTP',
-        );
-        return 'webhook';
     }
 
     private function markDelivered(int $id, string $token, string $destination): bool

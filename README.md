@@ -116,6 +116,11 @@ php placement setup --check
 php placement doctor
 php tests/run.php
 php tests/public_event_contract.php
+php tests/webhook_delivery_contract.php
+php tests/webhook_delivery_concurrency_contract.php
+php tests/webhook_revoke_completion_concurrency_contract.php
+php tests/webhook_capture_revoke_concurrency_contract.php
+php tests/webhook_receiver_example_contract.php
 php tests/install_concurrency_contract.php
 php tests/setup_authorization_contract.php
 ```
@@ -158,6 +163,8 @@ php placement package --target=dist --force
 php placement verify-package /path/to/campus-placement-engine-version.zip
 php placement deliver-notifications [--channel=file|webhook|email|sms|whatsapp] [--dry-run]
 php placement work-outbox [--limit=100]
+php placement work-integrations [--limit=100]
+php placement replay-webhook-delivery --delivery=whdel_ID --actor-user-id=USER_ID
 php placement replay-public-event --event=event_ID --actor-user-id=USER_ID
 php placement replay-internal-delivery --event=event_ID --subscription=internal.module.name.v1 --actor-user-id=USER_ID
 php placement replay-internal-fanout --event=event_ID --module=MODULE_KEY --actor-user-id=USER_ID
@@ -231,8 +238,11 @@ For module boundaries and extension rules, see
 Engine-contributor-only [docs/module-development.md](docs/module-development.md).
 For the event-only public integration contract, delivery semantics, and schema
 compatibility rules, see [docs/integrations/events.md](docs/integrations/events.md)
-and [docs/compatibility.md](docs/compatibility.md). `DomainEvent` and bundled
-module PHP interfaces remain private Engine implementation details.
+and [docs/compatibility.md](docs/compatibility.md). For the administrator
+workflow, one-time secrets, exact signing headers, Connector verification,
+retry/replay, SSRF policy, and worker operations, see
+[docs/integrations/webhooks.md](docs/integrations/webhooks.md). `DomainEvent`
+and bundled module PHP interfaces remain private Engine implementation details.
 For health, metrics,
 SSO, sessions, logs, and outbox operations, see
 [docs/security-operations.md](docs/security-operations.md).

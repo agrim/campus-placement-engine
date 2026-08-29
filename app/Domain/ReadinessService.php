@@ -9,6 +9,7 @@ use App\Core\Backup\BackupMetadata;
 use App\Core\Backup\DatabaseRestoreService;
 use App\Core\Http\UserVisibleException;
 use App\Install\SystemRequirements;
+use App\Integrations\Webhooks\WebhookHealthService;
 use App\Support\Database;
 use PDO;
 
@@ -46,6 +47,7 @@ final class ReadinessService
         $activeUsers = $this->count('SELECT COUNT(*) FROM users WHERE active = 1');
         $configurationFrozen = $this->setting('configuration_freeze') === '1';
         $workflowErrors = $this->workflow->validate();
+        $webhookHealth = (new WebhookHealthService($this->pdo))->snapshot();
 
         return [
             'checks' => [
@@ -127,6 +129,11 @@ final class ReadinessService
                     $gatewayCertification['message']
                 ),
                 $this->check(
+                    'Signed webhook integrations',
+                    $webhookHealth['status'],
+                    $webhookHealth['message'],
+                ),
+                $this->check(
                     'Active users',
                     $activeUsers > 0 ? 'ok' : 'fail',
                     $activeUsers > 0 ? "{$activeUsers} active user(s)." : 'No active users are available.'
@@ -142,6 +149,7 @@ final class ReadinessService
             'calendarWarnings' => $calendarWarnings,
             'notificationDeliveries' => $deliveryStatus,
             'notificationGatewayCertification' => $gatewayCertification,
+            'webhookIntegrations' => $webhookHealth,
             'activeUsers' => $activeUsers,
             'configurationFrozen' => $configurationFrozen,
         ];

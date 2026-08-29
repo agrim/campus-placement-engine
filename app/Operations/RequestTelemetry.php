@@ -17,7 +17,7 @@ final class RequestTelemetry
     public static function start(string $route, string $method): void
     {
         self::$startedAt = microtime(true);
-        self::$route = preg_match('/\A(?:bootstrap|unknown|login|sso|logout|portal|modules|public|student|board|move|return-to-idle|board-preferences|notifications|notification-acknowledge|candidate|records|records-candidate|records-company|records-round|records-schedule|records-panelist|records-slot-assignment|records-application|reports|import|import-rollback|admin|admin-user|admin-users|admin-password|admin-workflow|preferences|preferences-resolve|wanted|wanted-resolve|system|system-clear-demo|advising|advising-appointment|advising-status|advising-note|advising-task)\z/D', $route) === 1
+        self::$route = preg_match('/\A(?:bootstrap|unknown|login|sso|logout|portal|modules|public|student|board|move|return-to-idle|board-preferences|notifications|notification-acknowledge|candidate|records|records-candidate|records-company|records-round|records-schedule|records-panelist|records-slot-assignment|records-application|reports|import|import-rollback|admin|admin-user|admin-users|admin-password|admin-workflow|integrations|integration-create|integration-secret-generate|integration-secret-rotate|integration-validate|integration-activate|integration-disable|integration-revoke|integration-replay|preferences|preferences-resolve|wanted|wanted-resolve|system|system-clear-demo|advising|advising-appointment|advising-status|advising-note|advising-task)\z/D', $route) === 1
             ? $route
             : 'unknown';
         $normalizedMethod = strtoupper($method);

@@ -46,6 +46,11 @@ and fails closed when it is absent, so a lightweight artifact check is never
 reported as proof of standards-compliant reference resolution.
 
 Compatibility is a schema and behavior promise, not an uninterrupted stream
-promise. Delivery is at least once and ordered only within one application
-aggregate. Restores break stream continuity and require connector
-resynchronization as described in `docs/integrations/events.md`.
+promise. Signed webhook delivery is at least once and ordered only within one
+subscription and application aggregate. Webhook validation challenges use the
+separate `webhook.validation` type and are not catalog events. Signing-header,
+secret-overlap, retry, and network behavior is documented in
+`docs/integrations/webhooks.md`; changing it incompatibly requires an explicit
+delivery-contract review even when the JSON schema is unchanged. Restores break
+stream continuity and require Connector resynchronization as described in
+`docs/integrations/events.md`.

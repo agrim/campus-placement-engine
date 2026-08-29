@@ -387,8 +387,9 @@ php placement smoke-http --base-url=http://localhost:8000
 The smoke signs in with demo-style credentials unless `--email`, `--password`,
 `CPE_SMOKE_EMAIL`, or `CPE_SMOKE_PASSWORD` are supplied. When the install has a
 non-admin user available, add `--restricted-email` and
-`--restricted-password` so the same smoke also confirms sensitive pages redirect
-away from restricted roles.
+`--restricted-password` so the same smoke also confirms sensitive pages return
+exact HTTP 403 responses with the fixed `Access denied.` body for restricted
+roles.
 
 Company process fields such as room, tracker, process type, active cap, and
 ordered rounds can be maintained through `Records` or imported from CSV. See
@@ -409,7 +410,19 @@ tenant resolution. A production reverse proxy must pass the monitor's
 `Authorization` header and the intended tenant `Host` header unchanged to PHP.
 Query parameters, cookies, client IP, and `X-Forwarded-*` identity headers are
 not credentials. Configure the scheduler to run any enabled notification
-handoff and `php placement work-outbox`. See `security-operations.md`.
+handoff and `php placement work-outbox`. When an administrator has activated a
+signed webhook Integration, also run the isolated delivery worker every minute:
+
+```cron
+* * * * * cd /absolute/path/to/campus-placement-engine && /usr/bin/php placement work-integrations --limit=100
+```
+
+Use the host's actual PHP path and keep the cron environment restricted. It must
+receive the same database configuration and external webhook encryption keyring
+as the web process. Do not put endpoint URLs or signing secrets in the crontab,
+and do not run the worker in a busy loop. Managed schedulers use the same short
+command and tenant-local data-plane environment. See
+`docs/integrations/webhooks.md` and `security-operations.md`.
 
 Use `php placement export` after major placement-day milestones or before
 upgrades when a readable CSV audit trail is useful. See `docs/exports.md`.

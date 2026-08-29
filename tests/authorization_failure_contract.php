@@ -193,6 +193,48 @@ function authorization_stop_server(mixed &$process, array &$pipes): void
     $pipes = [];
 }
 
+/** @return array{0: int, 1: string, 2: string} */
+function authorization_run_smoke(string $projectRoot, int $port, string $databasePath): array
+{
+    $environment = getenv();
+    if (!is_array($environment)) {
+        $environment = [];
+    }
+    foreach (['CPE_DATABASE_URL', 'CPE_HOSTED_MODE', 'CPE_PLATFORM_BOOTSTRAP'] as $key) {
+        unset($environment[$key]);
+    }
+    $environment = array_merge($environment, [
+        'CPE_DB_DRIVER' => 'sqlite',
+        'CPE_DB_PATH' => $databasePath,
+        'CPE_SESSION_DRIVER' => 'files',
+        'CPE_SESSION_SECURE' => '0',
+    ]);
+    $process = proc_open(
+        [
+            PHP_BINARY,
+            $projectRoot . '/placement',
+            'smoke-http',
+            '--base-url=http://127.0.0.1:' . $port,
+            '--email=authorization@example.test',
+            '--password=Authorization-Test-Password-42',
+            '--restricted-email=atlas@example.test',
+            '--restricted-password=password123',
+        ],
+        [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+        $pipes,
+        $projectRoot,
+        $environment,
+    );
+    if (!is_resource($process)) {
+        throw new RuntimeException('Could not start restricted-role HTTP smoke integration process.');
+    }
+    $stdout = stream_get_contents($pipes[1]) ?: '';
+    $stderr = stream_get_contents($pipes[2]) ?: '';
+    fclose($pipes[1]);
+    fclose($pipes[2]);
+    return [proc_close($process), $stdout, $stderr];
+}
+
 /**
  * @param array<string, string> $headers
  * @return array{status: int, headers: array<string, list<string>>, body: string}
@@ -673,6 +715,19 @@ try {
     $moveFields = authorization_move_fields($board['body']);
     $applicationId = (int) $moveFields['application_id'];
     authorization_true($applicationId > 0, 'Board mutation fixture had no application.');
+
+    [$smokeExit, $smokeOutput, $smokeError] = authorization_run_smoke($projectRoot, $port, $databasePath);
+    authorization_same(0, $smokeExit, 'Restricted-role HTTP smoke integration failed: ' . $smokeError);
+    foreach (['records', 'reports', 'import', 'preferences', 'wanted', 'admin', 'integrations', 'system'] as $route) {
+        authorization_true(
+            str_contains($smokeOutput, 'OK restricted ' . $route . ' block'),
+            'Restricted-role HTTP smoke did not verify the ' . $route . ' boundary.',
+        );
+    }
+    authorization_true(
+        str_contains($smokeOutput, 'HTTP smoke passed:'),
+        'Restricted-role HTTP smoke did not report completion.',
+    );
     $beforeMutation = authorization_mutation_snapshot($database, $applicationId);
 
     $installedMarker = (string) $database

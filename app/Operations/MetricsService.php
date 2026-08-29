@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Operations;
 
+use App\Integrations\Webhooks\WebhookHealthService;
 use App\Support\Database;
 use PDO;
 
@@ -20,6 +21,7 @@ final class MetricsService
         foreach ($this->pdo->query('SELECT module_key, enabled FROM module_installations ORDER BY module_key')->fetchAll() as $row) {
             $modules[(string) $row['module_key']] = (int) $row['enabled'];
         }
+        $webhooks = (new WebhookHealthService($this->pdo))->snapshot();
         return [
             'app_version' => (string) cpe_config('app.version', '0.0.0'),
             'database_driver' => Database::driver(),
@@ -38,6 +40,11 @@ final class MetricsService
                 : 0,
             'notification_deliveries_queued' => $this->count("SELECT COUNT(*) FROM notification_deliveries WHERE status = 'queued'"),
             'notification_deliveries_failed' => $this->count("SELECT COUNT(*) FROM notification_deliveries WHERE status = 'failed'"),
+            'webhook_subscriptions_active' => (int) (($webhooks['states']['active'] ?? 0) + ($webhooks['states']['degraded'] ?? 0)),
+            'webhook_subscriptions_degraded' => (int) ($webhooks['states']['degraded'] ?? 0),
+            'webhook_deliveries_pending' => (int) $webhooks['pending'],
+            'webhook_deliveries_dead_lettered' => (int) $webhooks['dead_lettered'],
+            'webhook_worker_heartbeat_age_seconds' => $webhooks['worker_heartbeat_age_seconds'],
             'open_advising_tasks' => $this->tableExists('advising_tasks') ? $this->count("SELECT COUNT(*) FROM advising_tasks WHERE task_status = 'open'") : 0,
             'modules' => $modules,
         ];
@@ -56,6 +63,14 @@ final class MetricsService
             '# TYPE cpe_notification_deliveries gauge',
             'cpe_notification_deliveries{status="queued"} ' . $snapshot['notification_deliveries_queued'],
             'cpe_notification_deliveries{status="failed"} ' . $snapshot['notification_deliveries_failed'],
+            '# TYPE cpe_webhook_subscriptions gauge',
+            'cpe_webhook_subscriptions{status="active"} ' . $snapshot['webhook_subscriptions_active'],
+            'cpe_webhook_subscriptions{status="degraded"} ' . $snapshot['webhook_subscriptions_degraded'],
+            '# TYPE cpe_webhook_deliveries gauge',
+            'cpe_webhook_deliveries{status="pending"} ' . $snapshot['webhook_deliveries_pending'],
+            'cpe_webhook_deliveries{status="dead_lettered"} ' . $snapshot['webhook_deliveries_dead_lettered'],
+            '# TYPE cpe_webhook_worker_heartbeat_age_seconds gauge',
+            'cpe_webhook_worker_heartbeat_age_seconds ' . ($snapshot['webhook_worker_heartbeat_age_seconds'] ?? -1),
             '# TYPE cpe_advising_tasks_open gauge',
             'cpe_advising_tasks_open ' . $snapshot['open_advising_tasks'],
         ];

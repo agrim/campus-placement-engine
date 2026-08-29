@@ -26,6 +26,9 @@ use App\Core\Events\InternalEventDeliveryWorker;
 use App\Core\Events\InternalEventDeliveryReplayService;
 use App\Core\Events\InternalEventFanoutReplayService;
 use App\Core\Events\InternalEventFanoutWorker;
+use App\Integrations\Webhooks\WebhookDeliveryReplayService;
+use App\Integrations\Webhooks\WebhookDeliveryWorker;
+use App\Integrations\Webhooks\WebhookHealthService;
 use App\Domain\ConfigurationSnapshotService;
 use App\Domain\NotificationDeliveryService;
 use App\Domain\ReadinessService;
@@ -90,6 +93,8 @@ try {
         'verify-package' => verify_release_package($argv[2] ?? ''),
         'deliver-notifications' => deliver_notifications(array_slice($argv, 2)),
         'work-outbox' => work_outbox(array_slice($argv, 2)),
+        'work-integrations' => work_integrations(array_slice($argv, 2)),
+        'replay-webhook-delivery' => replay_webhook_delivery(array_slice($argv, 2)),
         'replay-public-event' => replay_public_event(array_slice($argv, 2)),
         'replay-internal-delivery' => replay_internal_delivery(array_slice($argv, 2)),
         'replay-internal-fanout' => replay_internal_fanout(array_slice($argv, 2)),
@@ -129,6 +134,15 @@ function doctor(): void
         echo ($check['ok'] ? 'OK' : 'ERROR') . " {$check['label']}: {$check['value']}\n";
     }
     echo "INFO installed: " . (Database::isInstalled() ? 'yes' : 'no') . "\n";
+    if (Database::isInstalled()) {
+        $webhooks = (new WebhookHealthService())->snapshot();
+        echo strtoupper($webhooks['status'] === 'fail' ? 'ERROR' : $webhooks['status'])
+            . ' signed webhooks: ' . $webhooks['message'] . "\n";
+        echo 'INFO webhook network policy: ' . $webhooks['network_policy'] . "\n";
+        echo 'INFO webhook encryption key version: '
+            . ($webhooks['encryption_key_active_version'] !== '' ? $webhooks['encryption_key_active_version'] : 'not configured')
+            . "\n";
+    }
     $requirements->assertReady();
 }
 
@@ -1201,6 +1215,22 @@ function verify_release_package(string $path): void
         'app/Core/Events/PublicEventDeadLetterReplayService.php',
         'app/Core/Events/ReplayOperatorAuthorization.php',
         'app/Modules/Placement/Application/ApplicationStatusWriter.php',
+        'app/Controllers/WebhookController.php',
+        'app/Integrations/Webhooks/CurlWebhookHttpTransport.php',
+        'app/Integrations/Webhooks/WebhookDeliveryReplayService.php',
+        'app/Integrations/Webhooks/WebhookDeliveryWorker.php',
+        'app/Integrations/Webhooks/WebhookHealthService.php',
+        'app/Integrations/Webhooks/WebhookHttpResult.php',
+        'app/Integrations/Webhooks/WebhookHttpTransport.php',
+        'app/Integrations/Webhooks/WebhookSecretCipher.php',
+        'app/Integrations/Webhooks/WebhookSigner.php',
+        'app/Integrations/Webhooks/WebhookSubscriptionService.php',
+        'app/Integrations/Webhooks/WebhookTransportException.php',
+        'app/Views/webhooks.php',
+        'database/migrations/050_signed_webhook_integrations.sql',
+        'database/migrations/051_webhook_claim_cursor.sql',
+        'database/migrations/pgsql/014_signed_webhook_integrations.sql',
+        'database/migrations/pgsql/015_webhook_claim_cursor.sql',
         'contracts/public-integration.v1.json',
         'contracts/schemas/public-event-envelope.v1.schema.json',
         'contracts/schemas/application.status_changed.v1.schema.json',
@@ -1208,9 +1238,19 @@ function verify_release_package(string $path): void
         'contracts/fixtures/application.status_changed.v1.consumer.json',
         'contracts/fixtures/application.status_changed.v1.future-optional.consumer.json',
         'docs/integrations/events.md',
+        'docs/integrations/webhooks.md',
         'docs/compatibility.md',
         'docs/security/integration-threat-model.md',
+        'examples/integrations/verify-webhook.php',
         'tests/public_event_contract.php',
+        'tests/webhook_delivery_contract.php',
+        'tests/webhook_delivery_concurrency_contract.php',
+        'tests/webhook_delivery_concurrency_worker.php',
+        'tests/webhook_revoke_completion_concurrency_contract.php',
+        'tests/webhook_revoke_completion_concurrency_worker.php',
+        'tests/webhook_capture_revoke_concurrency_contract.php',
+        'tests/webhook_capture_revoke_concurrency_worker.php',
+        'tests/webhook_receiver_example_contract.php',
         'tests/validate_public_event_schemas.py',
         'tests/requirements-public-event-schema.txt',
         'tests/authorization_failure_contract.php',
@@ -1403,6 +1443,48 @@ function work_outbox(array $args): void
             'One or more domain events or internal observers could not be delivered. Review the incident references above.',
         );
     }
+}
+
+function work_integrations(array $args): void
+{
+    if (!Database::hasInstalledMarkerStrict()) {
+        throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
+    }
+    Database::migrate();
+    $options = cli_options($args);
+    $limit = max(1, min(1000, (int) ($options['limit'] ?? 100)));
+    $result = (new WebhookDeliveryWorker())->work($limit);
+    echo "Webhook deliveries claimed: {$result['claimed']}\n";
+    echo "Succeeded: {$result['succeeded']}\n";
+    echo "Retrying: {$result['retrying']}\n";
+    echo "Dead-lettered: {$result['dead_lettered']}\n";
+    echo "Claim lost: {$result['claim_lost']}\n";
+    foreach ($result['rows'] as $row) {
+        echo "{$row['delivery_id']},{$row['status']}";
+        if ($row['failure_reference'] !== '') {
+            echo ',' . $row['failure_reference'];
+        }
+        echo "\n";
+    }
+    if ($result['retrying'] > 0 || $result['dead_lettered'] > 0 || $result['claim_lost'] > 0) {
+        throw new UserVisibleException(
+            'CLI_WEBHOOK_DELIVERY_DEGRADED',
+            'One or more webhook deliveries need retry or administrator review. See the redacted references above.',
+        );
+    }
+}
+
+function replay_webhook_delivery(array $args): void
+{
+    if (!Database::hasInstalledMarkerStrict()) {
+        throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
+    }
+    Database::migrate();
+    $options = cli_options($args);
+    $deliveryPublicId = trim((string) ($options['delivery'] ?? ''));
+    $actorUserId = replay_actor_user_id($options, ReplayOperatorAuthorization::PUBLIC_EVENT);
+    $result = (new WebhookDeliveryReplayService())->replay($deliveryPublicId, $actorUserId);
+    echo "Webhook delivery replay {$result['status']}: {$deliveryPublicId}\n";
 }
 
 function replay_internal_delivery(array $args): void
@@ -1663,16 +1745,16 @@ function smoke_http(array $args): void
             'restricted preferences block' => '/?r=preferences',
             'restricted wanted block' => '/?r=wanted',
             'restricted admin block' => '/?r=admin',
+            'restricted integrations block' => '/?r=integrations',
             'restricted system block' => '/?r=system',
         ];
         foreach ($restrictedForbidden as $label => $path) {
             $response = http_smoke_request('GET', $baseUrl . $path, [], $restrictedCookies, $timeout);
-            if (!in_array($response['status'], [302, 303], true)) {
-                throw new RuntimeException("HTTP smoke failed for {$label}: expected a redirect, received HTTP " . (int) $response['status'] . '.');
+            if ($response['status'] !== 403) {
+                throw new RuntimeException("HTTP smoke failed for {$label}: expected HTTP 403, received HTTP " . (int) $response['status'] . '.');
             }
-            $location = http_smoke_header($response['headers'], 'Location');
-            if ($location !== '/') {
-                throw new RuntimeException("HTTP smoke failed for {$label}: expected redirect to /, received " . ($location === '' ? 'no Location header' : $location) . '.');
+            if ($response['body'] !== "Access denied.\n") {
+                throw new RuntimeException("HTTP smoke failed for {$label}: the fixed access-denied response changed.");
             }
             echo "OK {$label}\n";
             $checks++;
@@ -2155,10 +2237,14 @@ function publication_check(): void
         'database/migrations/047_internal_event_deliveries.sql',
         'database/migrations/048_module_enabled_constraint.sql',
         'database/migrations/049_public_event_projection.sql',
+        'database/migrations/050_signed_webhook_integrations.sql',
+        'database/migrations/051_webhook_claim_cursor.sql',
         'database/migrations/pgsql/001_portal_baseline.sql',
         'database/migrations/pgsql/011_internal_event_deliveries.sql',
         'database/migrations/pgsql/012_module_enabled_constraint.sql',
         'database/migrations/pgsql/013_public_event_projection.sql',
+        'database/migrations/pgsql/014_signed_webhook_integrations.sql',
+        'database/migrations/pgsql/015_webhook_claim_cursor.sql',
         'contracts/public-integration.v1.json',
         'contracts/schemas/public-event-envelope.v1.schema.json',
         'contracts/schemas/application.status_changed.v1.schema.json',
@@ -2168,6 +2254,7 @@ function publication_check(): void
         'tests/.htaccess',
         'docs/environment.md',
         'docs/integrations/events.md',
+        'docs/integrations/webhooks.md',
         'docs/compatibility.md',
         'docs/security/integration-threat-model.md',
         'docs/release-checklist.md',
@@ -2181,6 +2268,18 @@ function publication_check(): void
         'app/Core/Events/InternalEventSubscription.php',
         'app/Core/Events/PublicEventDeadLetterReplayService.php',
         'app/Core/Events/ReplayOperatorAuthorization.php',
+        'app/Controllers/WebhookController.php',
+        'app/Integrations/Webhooks/CurlWebhookHttpTransport.php',
+        'app/Integrations/Webhooks/WebhookDeliveryReplayService.php',
+        'app/Integrations/Webhooks/WebhookDeliveryWorker.php',
+        'app/Integrations/Webhooks/WebhookHealthService.php',
+        'app/Integrations/Webhooks/WebhookHttpResult.php',
+        'app/Integrations/Webhooks/WebhookHttpTransport.php',
+        'app/Integrations/Webhooks/WebhookSecretCipher.php',
+        'app/Integrations/Webhooks/WebhookSigner.php',
+        'app/Integrations/Webhooks/WebhookSubscriptionService.php',
+        'app/Integrations/Webhooks/WebhookTransportException.php',
+        'app/Views/webhooks.php',
         'app/Core/Modules/ModuleVersionIntegrity.php',
         'app/Core/Persistence/DatabaseConnectionInvalidException.php',
         'app/Core/Security/AuthorizationUnavailable.php',
@@ -2202,6 +2301,14 @@ function publication_check(): void
         'tests/legacy_backup_compatibility_contract.php',
         'tests/internal_event_delivery_contract.php',
         'tests/public_event_contract.php',
+        'tests/webhook_delivery_contract.php',
+        'tests/webhook_delivery_concurrency_contract.php',
+        'tests/webhook_delivery_concurrency_worker.php',
+        'tests/webhook_revoke_completion_concurrency_contract.php',
+        'tests/webhook_revoke_completion_concurrency_worker.php',
+        'tests/webhook_capture_revoke_concurrency_contract.php',
+        'tests/webhook_capture_revoke_concurrency_worker.php',
+        'tests/webhook_receiver_example_contract.php',
         'tests/validate_public_event_schemas.py',
         'tests/requirements-public-event-schema.txt',
         'tests/authorized_setup_recovery_fixture.php',
@@ -2209,6 +2316,7 @@ function publication_check(): void
         'tests/setup_authorization_contract.php',
         'tests/hosted_install_contract.php',
         'tests/managed_hosting_contract.php',
+        'examples/integrations/verify-webhook.php',
         'examples/env/local.env.example',
         'examples/deployment/apache-vhost.conf',
         'examples/deployment/nginx-server.conf',
@@ -2778,6 +2886,8 @@ function help(): void
     echo "  php placement verify-package /path/to/campus-placement-engine-version.tar.gz|.zip\n";
     echo "  php placement deliver-notifications [--channel=file|webhook|email|sms|whatsapp] [--limit=100] [--dry-run]\n";
     echo "  php placement work-outbox [--limit=100]\n";
+    echo "  php placement work-integrations [--limit=100]\n";
+    echo "  php placement replay-webhook-delivery --delivery=whdel_ID --actor-user-id=USER_ID\n";
     echo "  php placement replay-public-event --event=event_ID --actor-user-id=USER_ID\n";
     echo "  php placement replay-internal-delivery --event=event_ID --subscription=internal.module.name.v1 --actor-user-id=USER_ID\n";
     echo "  php placement replay-internal-fanout --event=event_ID --module=MODULE_KEY --actor-user-id=USER_ID\n";

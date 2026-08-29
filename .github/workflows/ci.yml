@@ -110,6 +110,11 @@ jobs:
           php tests/legacy_backup_compatibility_contract.php
           php tests/worker_delivery_contract.php
           php tests/public_event_contract.php
+          php tests/webhook_delivery_contract.php
+          php tests/webhook_delivery_concurrency_contract.php
+          php tests/webhook_revoke_completion_concurrency_contract.php
+          php tests/webhook_capture_revoke_concurrency_contract.php
+          php tests/webhook_receiver_example_contract.php
           php tests/postgres_connection_policy_contract.php
           php tests/postgres_tls_contract.php
           php tests/database_contract.php
@@ -138,6 +143,43 @@ jobs:
         run: |
           psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_public_event_contract'
           php tests/public_event_contract.php
+
+      - name: Run PostgreSQL signed webhook delivery contract
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_webhook_delivery_contract?sslmode=disable
+          CPE_WEBHOOK_TEST_PRIVILEGED_HEALTH: "1"
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_webhook_delivery_contract'
+          php tests/webhook_delivery_contract.php
+
+      - name: Run PostgreSQL signed webhook concurrency contract
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_webhook_delivery_concurrency_contract?sslmode=disable
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_webhook_delivery_concurrency_contract'
+          php tests/webhook_delivery_concurrency_contract.php
+
+      - name: Run PostgreSQL webhook revoke/completion concurrency contract
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_webhook_revoke_completion_concurrency_contract?sslmode=disable
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_webhook_revoke_completion_concurrency_contract'
+          php tests/webhook_revoke_completion_concurrency_contract.php
+
+      - name: Run PostgreSQL webhook capture/revoke concurrency contract
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_webhook_capture_revoke_concurrency_contract?sslmode=disable
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_webhook_capture_revoke_concurrency_contract'
+          php tests/webhook_capture_revoke_concurrency_contract.php
 
       - name: Run PostgreSQL authorization and internal observer contracts
         env:
@@ -279,6 +321,7 @@ jobs:
           php placement deliver-notifications --channel=sms --dry-run
           php placement deliver-notifications --channel=whatsapp --dry-run
           CPE_DOMAIN_EVENT_OUTBOX_PATH="$RUNNER_TEMP/cpe-domain-events.jsonl" php placement work-outbox
+          php placement work-integrations
           CPE_NOTIFICATION_SMS_TO=ci-sms-route CPE_NOTIFICATION_SMS_OUTBOX_PATH="$RUNNER_TEMP/cpe-sms-cert.jsonl" php placement certify-notifications --channel=sms
           CPE_NOTIFICATION_WHATSAPP_TO=ci-whatsapp-route CPE_NOTIFICATION_WHATSAPP_OUTBOX_PATH="$RUNNER_TEMP/cpe-whatsapp-cert.jsonl" php placement certify-notifications --channel=whatsapp
           php placement seed-large-demo 40 6

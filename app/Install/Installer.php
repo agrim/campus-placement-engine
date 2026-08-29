@@ -82,9 +82,16 @@ final class Installer
             );
         }
 
+        // Reject a capability replayed against a different configured target,
+        // then classify it while a missing SQLite target can still be proven
+        // fresh without creating it. The same target is classified again under
+        // the installation lock, where the result is authoritative for
+        // concurrent installers.
+        $recoveryAuthority?->assertCurrentTarget();
+        if ($recoveryAuthority !== null) {
+            $this->claimInstallTarget($recoveryAuthority);
+        }
         (new SystemRequirements())->assertReady();
-        $claimedState = $this->claimInstallTarget($recoveryAuthority);
-        Database::migrate(false);
         $pdo = Database::connection();
         $driver = strtolower((string) $pdo->getAttribute(PDO::ATTR_DRIVER_NAME));
         $institutionPublicId = $tenantPublicId ?? 'inst_' . bin2hex(random_bytes(16));
@@ -94,19 +101,37 @@ final class Installer
                 $pdo,
                 self::LOCK_NAMESPACE,
                 function (?string $lockBackendPid) use (
-                $pdo,
-                $driver,
-                $input,
-                $tenantPublicId,
-                $institutionPublicId,
-                $college,
-                $timezone,
-                $name,
-                $email,
-                $password,
-                $claimedState,
-                $recoveryAuthority,
+                    $pdo,
+                    $driver,
+                    $input,
+                    $tenantPublicId,
+                    $institutionPublicId,
+                    $college,
+                    $timezone,
+                    $name,
+                    $email,
+                    $password,
+                    $recoveryAuthority,
                 ): int {
+                // Serialize the complete fresh-target classification, migration,
+                // and marker commit. Otherwise a second installer can observe the
+                // exact Engine-owned markerless window created by its winner and
+                // return an ambiguous setup-state error instead of the stable
+                // already-installed conflict.
+                $claimedState = $this->claimInstallTarget($recoveryAuthority);
+                if ($driver === 'pgsql') {
+                    if ($lockBackendPid === null) {
+                        throw DatabaseLockException::sessionChanged();
+                    }
+                    DatabaseLock::assertPostgresSession($pdo, $lockBackendPid);
+                }
+                Database::migrate(false);
+                if (Database::connection() !== $pdo) {
+                    throw DatabaseLockException::sessionChanged();
+                }
+                if ($driver === 'pgsql') {
+                    DatabaseLock::assertPostgresSession($pdo, (string) $lockBackendPid);
+                }
                 $this->assertClaimedInstallAvailable($claimedState, $recoveryAuthority);
                 $started = false;
                 try {
