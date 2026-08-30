@@ -43,6 +43,16 @@ jobs:
           extensions: mbstring, pdo_sqlite, sqlite3, pdo_pgsql, curl
           coverage: none
 
+      - name: Validate public schemas with pinned Draft 2020-12 tooling
+        shell: bash
+        run: |
+          python3 -m venv "$RUNNER_TEMP/cpe-public-schema-validator"
+          "$RUNNER_TEMP/cpe-public-schema-validator/bin/python" -m pip install --disable-pip-version-check --requirement tests/requirements-public-event-schema.txt
+          "$RUNNER_TEMP/cpe-public-schema-validator/bin/python" tests/validate_public_event_schemas.py
+          "$RUNNER_TEMP/cpe-public-schema-validator/bin/python" tests/validate_public_api_contracts.py
+          echo "CPE_TEST_SCHEMA_PYTHON=$RUNNER_TEMP/cpe-public-schema-validator/bin/python" >> "$GITHUB_ENV"
+          echo "$RUNNER_TEMP/cpe-public-schema-validator/bin" >> "$GITHUB_PATH"
+
       - name: Install PostgreSQL 17 client
         shell: bash
         run: |
@@ -90,11 +100,30 @@ jobs:
       - name: Run test suite
         run: |
           php tests/run.php
+          php tests/authorization_failure_contract.php
+          php tests/authorization_state_contract.php
+          php tests/installation_state_contract.php
+          php tests/internal_module_boundary_contract.php
+          php tests/internal_event_delivery_contract.php
           php tests/backup_restore_contract.php
           php tests/database_connection_cleanup_contract.php
           php tests/incident_boundary_contract.php
           php tests/legacy_backup_compatibility_contract.php
           php tests/worker_delivery_contract.php
+          php tests/public_event_contract.php
+          php tests/webhook_delivery_contract.php
+          php tests/webhook_delivery_concurrency_contract.php
+          php tests/webhook_revoke_completion_concurrency_contract.php
+          php tests/webhook_capture_revoke_concurrency_contract.php
+          php tests/webhook_receiver_example_contract.php
+          php tests/operator_simplicity_contract.php
+          php tests/api_identity_contract.php
+          php tests/api_identity_rotation_concurrency_contract.php
+          php tests/api_http_contract.php
+          php tests/application_transition_boundary_contract.php
+          php tests/api_application_transition_input_contract.php
+          php tests/api_application_transition_command_contract.php
+          php tests/api_application_transition_command_concurrency_contract.php
           php tests/postgres_connection_policy_contract.php
           php tests/postgres_tls_contract.php
           php tests/database_contract.php
@@ -114,6 +143,127 @@ jobs:
           CPE_DB_DRIVER: pgsql
           CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_contract?sslmode=disable
         run: php tests/database_contract.php
+
+      - name: Run PostgreSQL public event contract
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_public_event_contract?sslmode=disable
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_public_event_contract'
+          php tests/public_event_contract.php
+
+      - name: Run PostgreSQL signed webhook delivery contract
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_webhook_delivery_contract?sslmode=disable
+          CPE_WEBHOOK_TEST_PRIVILEGED_HEALTH: "1"
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_webhook_delivery_contract'
+          php tests/webhook_delivery_contract.php
+
+      - name: Run PostgreSQL operator simplicity contract
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_operator_simplicity_contract?sslmode=disable
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_operator_simplicity_contract'
+          php tests/operator_simplicity_contract.php
+
+      - name: Run PostgreSQL signed webhook concurrency contract
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_webhook_delivery_concurrency_contract?sslmode=disable
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_webhook_delivery_concurrency_contract'
+          php tests/webhook_delivery_concurrency_contract.php
+
+      - name: Run PostgreSQL webhook revoke/completion concurrency contract
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_webhook_revoke_completion_concurrency_contract?sslmode=disable
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_webhook_revoke_completion_concurrency_contract'
+          php tests/webhook_revoke_completion_concurrency_contract.php
+
+      - name: Run PostgreSQL webhook capture/revoke concurrency contract
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_webhook_capture_revoke_concurrency_contract?sslmode=disable
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_webhook_capture_revoke_concurrency_contract'
+          php tests/webhook_capture_revoke_concurrency_contract.php
+
+      - name: Run PostgreSQL authorization and internal observer contracts
+        env:
+          CPE_DB_DRIVER: pgsql
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_authorization_state_contract'
+          CPE_DATABASE_URL='postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_authorization_state_contract?sslmode=disable' php tests/authorization_state_contract.php
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_installation_state_contract'
+          CPE_DATABASE_URL='postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_installation_state_contract?sslmode=disable' php tests/installation_state_contract.php
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_internal_event_contract'
+          CPE_DATABASE_URL='postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_internal_event_contract?sslmode=disable' php tests/internal_event_delivery_contract.php
+
+      - name: Run PostgreSQL API identity contract
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_api_identity_contract?sslmode=disable
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_api_identity_contract'
+          php tests/api_identity_contract.php
+
+      - name: Run PostgreSQL public API HTTP contract
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_api_http_contract?sslmode=disable
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_api_http_contract'
+          php tests/api_http_contract.php
+
+      - name: Run PostgreSQL application transition boundary contract
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_application_transition_boundary_contract?sslmode=disable
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_application_transition_boundary_contract'
+          php tests/application_transition_boundary_contract.php
+
+      - name: Run PostgreSQL API application transition command contract
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_api_application_transition_command_contract?sslmode=disable
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_api_application_transition_command_contract'
+          php tests/api_application_transition_command_contract.php
+
+      - name: Run PostgreSQL API application transition command concurrency
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_api_application_transition_command_concurrency_contract?sslmode=disable
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_api_application_transition_command_concurrency_contract'
+          php tests/api_application_transition_command_concurrency_contract.php
+
+      - name: Run PostgreSQL API rotation concurrency contract
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_api_rotation_concurrency_contract?sslmode=disable
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_api_rotation_concurrency_contract'
+          php tests/api_identity_rotation_concurrency_contract.php
 
       - name: Run PostgreSQL mutation concurrency contract
         env:
@@ -243,6 +393,7 @@ jobs:
           php placement deliver-notifications --channel=sms --dry-run
           php placement deliver-notifications --channel=whatsapp --dry-run
           CPE_DOMAIN_EVENT_OUTBOX_PATH="$RUNNER_TEMP/cpe-domain-events.jsonl" php placement work-outbox
+          php placement work-integrations
           CPE_NOTIFICATION_SMS_TO=ci-sms-route CPE_NOTIFICATION_SMS_OUTBOX_PATH="$RUNNER_TEMP/cpe-sms-cert.jsonl" php placement certify-notifications --channel=sms
           CPE_NOTIFICATION_WHATSAPP_TO=ci-whatsapp-route CPE_NOTIFICATION_WHATSAPP_OUTBOX_PATH="$RUNNER_TEMP/cpe-whatsapp-cert.jsonl" php placement certify-notifications --channel=whatsapp
           php placement seed-large-demo 40 6

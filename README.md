@@ -30,8 +30,8 @@ This modernization is intentionally dependency-light:
 - SQLite by default; PostgreSQL is supported for hosted and larger deployments.
 - Server-rendered HTML.
 - Vanilla CSS and tiny vanilla JavaScript.
-- No framework, Node build, Redis, external queue service, image assets, or
-  database server required for the default self-hosted install.
+- No framework, Node build, Redis, Kafka, RabbitMQ, container runtime, Cloud,
+  image assets, or database server required for the default self-hosted install.
 
 ## Requirements and manual local start
 
@@ -115,6 +115,16 @@ testing.
 php placement setup --check
 php placement doctor
 php tests/run.php
+php tests/public_event_contract.php
+php tests/webhook_delivery_contract.php
+php tests/webhook_delivery_concurrency_contract.php
+php tests/webhook_revoke_completion_concurrency_contract.php
+php tests/webhook_capture_revoke_concurrency_contract.php
+php tests/webhook_receiver_example_contract.php
+php tests/operator_simplicity_contract.php
+php tests/api_identity_contract.php
+php tests/api_identity_rotation_concurrency_contract.php
+php tests/api_http_contract.php
 php tests/install_concurrency_contract.php
 php tests/setup_authorization_contract.php
 ```
@@ -137,6 +147,14 @@ php placement seed-demo
 php placement seed-large-demo [candidate-count] [company-count]
 php placement readiness
 php placement metrics
+php placement support-report
+php placement api-status
+php placement api-service-account-create --name=NAME --scopes=opportunities.read,applications.read,applications.transition --actor-user-id=USER_ID
+php placement api-token-rotate --service-account=apisa_ID --actor-user-id=USER_ID
+php placement api-token-revoke --token-id=LOOKUP_ID --actor-user-id=USER_ID
+php placement api-enable --actor-user-id=USER_ID
+php placement api-disable --actor-user-id=USER_ID
+php placement api-prune --actor-user-id=USER_ID
 php placement placement-report
 php placement privacy-report
 php placement anonymize-candidate C001 --confirm=C001
@@ -157,6 +175,11 @@ php placement package --target=dist --force
 php placement verify-package /path/to/campus-placement-engine-version.zip
 php placement deliver-notifications [--channel=file|webhook|email|sms|whatsapp] [--dry-run]
 php placement work-outbox [--limit=100]
+php placement work-integrations [--limit=100]
+php placement replay-webhook-delivery --delivery=whdel_ID --actor-user-id=USER_ID
+php placement replay-public-event --event=event_ID --actor-user-id=USER_ID
+php placement replay-internal-delivery --event=event_ID --subscription=internal.module.name.v1 --actor-user-id=USER_ID
+php placement replay-internal-fanout --event=event_ID --module=MODULE_KEY --actor-user-id=USER_ID
 php placement certify-notifications --channel=sms|whatsapp [--require-live]
 php placement smoke-http [--base-url=http://127.0.0.1:8000] [--restricted-email=atlas@example.test]
 php placement load-smoke [--base-url=http://127.0.0.1:8000] [--requests=50] [--concurrency=5]
@@ -195,6 +218,14 @@ placement decisions. `configuration_freeze` blocks settings, workflow override
 edits, and `config-import`; `placement_freeze` blocks non-admin placement
 decisions.
 
+The authenticated **Candidate opportunities** workspace reconciles candidate
+coverage gaps, missing eligibility evidence, configured process cut-offs,
+interview/assessment clashes, attendance follow-up, repeated no-progress
+signals, zero-link opportunities, and permitted Career Advising tasks without
+creating a second workflow or eligibility store. Its evidence and deliberate
+limitations are documented in
+[docs/operations/university-workspace.md](docs/operations/university-workspace.md).
+
 ## Project Shape
 
 - `public/` - web entrypoints and tiny static assets.
@@ -203,6 +234,7 @@ decisions.
 - `app/Hosted/` - managed-hosting integration contract and tenant-bound runtime context.
 - `app/` - controllers, domain logic, installer, imports, and security helpers.
 - `config/` - default app and workflow configuration.
+- `contracts/` - governed institution-facing integration declarations, schemas, examples, and consumer fixtures.
 - `database/` - SQLite/PostgreSQL institution data-plane migrations.
 - `examples/config-templates/` - portable starter configuration JSON files.
 - `data/` - local runtime database files, ignored by Git.
@@ -222,7 +254,27 @@ tenant provisioning, billing, infrastructure, entitlements, and fleet operations
 are intentionally not part of this public repository. For tested backup and
 restore procedures, see [docs/disaster-recovery.md](docs/disaster-recovery.md).
 For module boundaries and extension rules, see
-[docs/module-development.md](docs/module-development.md). For health, metrics,
+[docs/architecture/extensions.md](docs/architecture/extensions.md) and the
+Engine-contributor-only [docs/module-development.md](docs/module-development.md).
+For the public integration contract, event delivery semantics, and schema
+compatibility rules, see [docs/integrations/events.md](docs/integrations/events.md)
+and [docs/compatibility.md](docs/compatibility.md). For the administrator
+workflow, one-time secrets, exact signing headers, Connector verification,
+retry/replay, SSRF policy, and worker operations, see
+[docs/integrations/webhooks.md](docs/integrations/webhooks.md). `DomainEvent`
+and bundled module PHP interfaces remain private Engine implementation details.
+For scheduler attestation and backlog triage, see
+[docs/operations/integration-worker.md](docs/operations/integration-worker.md).
+For the bounded JSON allowlist produced by `php placement support-report`, see
+[docs/operations/support-report.md](docs/operations/support-report.md).
+The disabled-by-default institution-local service-account/token boundary is
+documented in [docs/api/authentication.md](docs/api/authentication.md). The
+opportunity/application read API and its one controlled application-status
+transition command, privacy allowlists, ETags, idempotency, cursor recovery,
+errors, rate limits, OpenAPI, and self-host/managed parity are in
+[docs/api/v1.md](docs/api/v1.md). There are no candidate or other command/write
+API endpoints, and Cloud does not proxy ordinary institution API traffic.
+For health, metrics,
 SSO, sessions, logs, and outbox operations, see
 [docs/security-operations.md](docs/security-operations.md).
 For the extracted product shape, see [docs/functional-spec.md](docs/functional-spec.md),

@@ -14,6 +14,7 @@ $serverPipes = [];
 
 define('CPE_SKIP_HTTP_BOOTSTRAP', true);
 require __DIR__ . '/../app/bootstrap.php';
+require __DIR__ . '/authorized_setup_recovery_fixture.php';
 
 use App\Hosted\HostedBootstrap;
 use App\Hosted\HostedContext;
@@ -280,6 +281,36 @@ try {
 
     $provider = new SqliteConnectionProvider($databasePath);
     Database::useProvider($provider);
+    $preinstallTenant = new ResolvedTenant([
+        'tenant_id' => 1,
+        'tenant_public_id' => 'tenant_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        'slug' => 'alpha-college',
+        'entitlements' => ['placement' => true, 'advising' => false],
+    ], $provider, null);
+    HostedBootstrap::registerResolver(new ContractTenantResolver($preinstallTenant));
+    HostedBootstrap::resolveHost('alpha.example.test');
+    contract_assert(
+        HostedContext::current()->publicId() === 'tenant_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        'A legitimately uninstalled hosted data plane did not resolve for provisioning.',
+    );
+    HostedBootstrap::resetResolver();
+    HostedContext::reset();
+
+    Database::connection()->exec('CREATE TABLE ambiguous_hosted_partial (value TEXT NOT NULL)');
+    HostedBootstrap::registerResolver(new ContractTenantResolver($preinstallTenant));
+    try {
+        HostedBootstrap::resolveHost('alpha.example.test');
+        throw new RuntimeException('Hosted resolution treated a nonempty schema without settings as fresh.');
+    } catch (HostedResolutionException $e) {
+        contract_assert($e->httpStatus() === 503, 'Ambiguous hosted schema did not fail with 503.');
+        contract_assert($e->getMessage() === 'Tenant installation state is unavailable.', 'Ambiguous hosted schema did not use the fixed message.');
+        contract_assert($e->getPrevious() === null, 'Ambiguous hosted schema retained its raw failure.');
+    } finally {
+        HostedBootstrap::resetResolver();
+        HostedContext::reset();
+    }
+    Database::connection()->exec('DROP TABLE ambiguous_hosted_partial');
+
     Database::migrate();
     contract_assert(
         str_starts_with(
@@ -288,6 +319,44 @@ try {
         ),
         'Pre-migrated hosted data planes must remain explicitly unbound.',
     );
+    HostedBootstrap::registerResolver(new ContractTenantResolver($preinstallTenant));
+    try {
+        HostedBootstrap::resolveHost('alpha.example.test');
+        throw new RuntimeException('Hosted resolution treated a markerless migrated schema as fresh.');
+    } catch (HostedResolutionException $e) {
+        contract_assert($e->httpStatus() === 503, 'Markerless hosted schema did not fail with 503.');
+        contract_assert($e->getMessage() === 'Tenant installation state is unavailable.', 'Markerless hosted schema did not use the fixed message.');
+        contract_assert($e->getPrevious() === null, 'Markerless hosted schema retained its raw failure.');
+    } finally {
+        HostedBootstrap::resetResolver();
+        HostedContext::reset();
+    }
+
+    $hostedMarkerSentinel = 'hosted_installed_at_password_dsn_candidate_secret';
+    $markerInsert = Database::connection()->prepare(
+        "INSERT INTO settings (key, value) VALUES ('installed_at', ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    );
+    $markerInsert->execute([$hostedMarkerSentinel]);
+    HostedBootstrap::registerResolver(new ContractTenantResolver($preinstallTenant));
+    try {
+        HostedBootstrap::resolveHost('alpha.example.test');
+        throw new RuntimeException('Hosted resolution skipped identity behind a malformed installation marker.');
+    } catch (HostedResolutionException $e) {
+        contract_assert($e->httpStatus() === 503, 'Malformed hosted installation state did not return 503.');
+        contract_assert(
+            $e->getMessage() === 'Tenant installation state is unavailable.',
+            'Malformed hosted installation state did not use its fixed message.',
+        );
+        contract_assert(
+            !str_contains($e->getMessage(), $hostedMarkerSentinel) && $e->getPrevious() === null,
+            'Malformed hosted installation state retained or exposed its durable value.',
+        );
+    } finally {
+        HostedBootstrap::resetResolver();
+        HostedContext::reset();
+    }
+    Database::connection()->exec("DELETE FROM settings WHERE key = 'installed_at'");
+
     (new Installer())->installHosted([
         'college_name' => 'Alpha College',
         'site_name' => 'Alpha Placement Desk',
@@ -298,8 +367,16 @@ try {
         'admin_email' => 'admin@alpha.example.test',
         'admin_password' => 'contract-password-123',
         'seed_demo' => '',
-    ], 'tenant_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+    ], 'tenant_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', test_authorized_setup_recovery_authority());
     HostedBootstrap::assertDataPlaneIdentity('tenant_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa');
+    HostedBootstrap::registerResolver(new ContractTenantResolver($preinstallTenant));
+    HostedBootstrap::resolveHost('alpha.example.test');
+    contract_assert(
+        HostedContext::current()->publicId() === 'tenant_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        'A canonical installed hosted data plane did not pass strict resolution and identity binding.',
+    );
+    HostedBootstrap::resetResolver();
+    HostedContext::reset();
     Database::reset();
 
     $tenant = new ResolvedTenant([

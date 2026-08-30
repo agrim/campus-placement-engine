@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Support;
 
+use App\Core\Install\InstallationState;
+use App\Core\Install\InstallationStateUnavailable;
 use App\Core\Install\PortalKernelSynchronizer;
 use App\Core\Persistence\DatabaseOwnership;
 use App\Core\Persistence\DatabaseLockException;
@@ -11,6 +13,7 @@ use App\Core\Persistence\DatabaseConnectionInvalidException;
 use App\Core\Persistence\SqlMigrationRunner;
 use App\Core\Persistence\ConnectionProvider;
 use App\Infrastructure\Persistence\SqliteConnectionProvider;
+use App\Security\SetupRecoveryAuthority;
 use App\Infrastructure\Persistence\PostgresConnectionProvider;
 use App\Modules\Placement\Install\LegacyDomainSynchronizer;
 use App\Modules\Placement\Workflow\WorkflowPublisher;
@@ -127,57 +130,174 @@ final class Database
 
     /**
      * Strict read-only probe used before installation may claim ownership or
-     * apply migrations. A missing settings relation means an install may
-     * proceed; every other probe failure is allowed to escape and fail closed.
+     * apply migrations. Only an absent or empty target is fresh; ambiguous or
+     * damaged schema state is allowed to escape and fail closed.
      */
     public static function hasInstalledMarkerStrict(): bool
     {
-        $driver = self::driver();
-        if ($driver === 'sqlite') {
-            $identifier = self::path();
-            if ($identifier !== ':memory:'
-                && !str_starts_with($identifier, 'file:')
-                && !is_file($identifier)) {
-                return false;
+        return self::installationStateStrict() === InstallationState::INSTALLED;
+    }
+
+    public static function installationStateStrict(): string
+    {
+        return self::installationState(false);
+    }
+
+    /**
+     * Authorized setup may recover only an exact Engine-owned target whose
+     * installation marker was never committed. Callers must establish setup
+     * authorization (or an explicit local CLI setup boundary) first.
+     */
+    public static function installationStateForAuthorizedSetupStrict(
+        SetupRecoveryAuthority $authority,
+    ): string
+    {
+        $authority->assertCurrentTarget();
+        $state = self::installationState(true);
+        if ($state !== InstallationState::RECOVERABLE) {
+            throw InstallationStateUnavailable::state();
+        }
+        return $state;
+    }
+
+    /**
+     * Internal continuation check for one Installer call that began against a
+     * genuinely empty target. This grants no recovery capability and is not an
+     * entry classification: Installer must first have observed FRESH locally.
+     *
+     * @internal
+     */
+    public static function freshInstallContinuationStateStrict(): string
+    {
+        $state = self::installationState(true);
+        if (!in_array($state, [InstallationState::RECOVERABLE, InstallationState::INSTALLED], true)) {
+            throw InstallationStateUnavailable::state();
+        }
+        return $state;
+    }
+
+    /**
+     * Pre-session setup routing probe. It exposes no recovery capability: an
+     * exact Engine-owned markerless target is merely allowed to remain
+     * concealed until authorization, while every ambiguous target fails.
+     */
+    public static function assertSetupEntryTargetSafeStrict(): void
+    {
+        try {
+            self::installationState(false);
+            return;
+        } catch (InstallationStateUnavailable) {
+            $state = self::installationState(true);
+            if ($state !== InstallationState::RECOVERABLE) {
+                throw InstallationStateUnavailable::state();
+            }
+        }
+    }
+
+    private static function installationState(bool $allowOwnedRecovery): string
+    {
+        try {
+            $driver = self::driver();
+            if ($driver === 'sqlite') {
+                $identifier = self::path();
+                if ($identifier !== ':memory:'
+                    && !str_starts_with($identifier, 'file:')
+                    && !is_file($identifier)) {
+                    return InstallationState::FRESH;
+                }
             }
             $pdo = self::connection();
-            $relations = $pdo->query(
-                "SELECT type FROM sqlite_master WHERE name = 'settings' ORDER BY type",
-            )->fetchAll(PDO::FETCH_COLUMN);
-            if ($relations === []) {
-                return false;
+            if (DatabaseOwnership::targetIsEmptyStrict($pdo)) {
+                return InstallationState::FRESH;
             }
-            if (count($relations) !== 1 || !in_array($relations[0], ['table', 'view'], true)) {
-                throw new \RuntimeException('SQLite settings relation is invalid for installation preflight.');
+
+            $installed = match ($driver) {
+                'sqlite' => self::sqliteInstalledMarker($pdo),
+                'pgsql' => self::postgresInstalledMarker($pdo),
+                default => throw new \RuntimeException('Unsupported database driver for installation preflight.'),
+            };
+            if ($installed === true) {
+                DatabaseOwnership::assertOwnedByReadOnlyStrict(
+                    $pdo,
+                    DatabaseOwnership::OWNER_ENGINE_INSTITUTION,
+                );
+                DatabaseOwnership::strictInstalledEngineIdentity($pdo);
+                return InstallationState::INSTALLED;
             }
-            return $pdo->query("SELECT 1 FROM settings WHERE key = 'installed_at' LIMIT 1")->fetchColumn() !== false;
+            if ($installed === false && $allowOwnedRecovery) {
+                DatabaseOwnership::assertOwnedByReadOnlyStrict(
+                    $pdo,
+                    DatabaseOwnership::OWNER_ENGINE_INSTITUTION,
+                );
+                return InstallationState::RECOVERABLE;
+            }
+            throw InstallationStateUnavailable::state();
+        } catch (InstallationStateUnavailable $failure) {
+            throw $failure;
+        } catch (Throwable) {
+            throw InstallationStateUnavailable::state();
         }
-        if ($driver === 'pgsql') {
-            $pdo = self::connection();
-            $schema = trim((string) $pdo->query('SELECT current_schema()')->fetchColumn());
-            if ($schema === '' || in_array(strtolower($schema), ['pg_catalog', 'information_schema'], true)) {
-                throw new \RuntimeException('PostgreSQL application schema is unavailable for installation preflight.');
-            }
-            $relation = $pdo->prepare(
-                "SELECT c.relkind
-                 FROM pg_catalog.pg_class c
-                 JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
-                 WHERE n.nspname = CAST(? AS TEXT) AND c.relname = 'settings'",
-            );
-            $relation->execute([$schema]);
-            $relations = $relation->fetchAll(PDO::FETCH_COLUMN);
-            if ($relations === []) {
-                return false;
-            }
-            if (count($relations) !== 1) {
-                throw new \RuntimeException('PostgreSQL settings relation is ambiguous for installation preflight.');
-            }
-            $qualifiedSettings = '"' . str_replace('"', '""', $schema) . '"."settings"';
-            return $pdo->query(
-                "SELECT 1 FROM {$qualifiedSettings} WHERE key = 'installed_at' LIMIT 1",
-            )->fetchColumn() !== false;
+    }
+
+    /** null means the required settings relation itself is absent. */
+    private static function sqliteInstalledMarker(PDO $pdo): ?bool
+    {
+        $relations = $pdo->query(
+            "SELECT type FROM sqlite_master WHERE name = 'settings' ORDER BY type",
+        )->fetchAll(PDO::FETCH_COLUMN);
+        if ($relations === []) {
+            return null;
         }
-        throw new \RuntimeException('Unsupported database driver for installation preflight.');
+        if (count($relations) !== 1 || !in_array($relations[0], ['table', 'view'], true)) {
+            throw new \RuntimeException('SQLite settings relation is invalid for installation preflight.');
+        }
+        return self::hasCanonicalInstalledMarker($pdo, 'settings');
+    }
+
+    /** null means the required settings relation itself is absent. */
+    private static function postgresInstalledMarker(PDO $pdo): ?bool
+    {
+        $schema = trim((string) $pdo->query('SELECT current_schema()')->fetchColumn());
+        if ($schema === '' || in_array(strtolower($schema), ['pg_catalog', 'information_schema'], true)) {
+            throw new \RuntimeException('PostgreSQL application schema is unavailable for installation preflight.');
+        }
+        $relation = $pdo->prepare(
+            "SELECT c.relkind
+             FROM pg_catalog.pg_class c
+             JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace
+             WHERE n.nspname = CAST(? AS TEXT) AND c.relname = 'settings'",
+        );
+        $relation->execute([$schema]);
+        $relations = $relation->fetchAll(PDO::FETCH_COLUMN);
+        if ($relations === []) {
+            return null;
+        }
+        if (count($relations) !== 1 || !in_array($relations[0], ['r', 'p', 'v'], true)) {
+            throw new \RuntimeException('PostgreSQL settings relation is invalid for installation preflight.');
+        }
+        $qualifiedSettings = '"' . str_replace('"', '""', $schema) . '"."settings"';
+        return self::hasCanonicalInstalledMarker($pdo, $qualifiedSettings);
+    }
+
+    private static function hasCanonicalInstalledMarker(PDO $pdo, string $settingsRelation): bool
+    {
+        $values = $pdo->query(
+            "SELECT value FROM {$settingsRelation} WHERE key = 'installed_at'",
+        )->fetchAll(PDO::FETCH_COLUMN);
+        if ($values === []) {
+            return false;
+        }
+        if (count($values) !== 1 || !is_string($values[0])) {
+            throw new \RuntimeException('Installation marker is invalid.');
+        }
+        $value = $values[0];
+        $timestamp = preg_match('/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/D', $value) === 1
+            ? \DateTimeImmutable::createFromFormat('!Y-m-d H:i:s', $value, new \DateTimeZone('UTC'))
+            : false;
+        if ($timestamp === false || $timestamp->format('Y-m-d H:i:s') !== $value) {
+            throw new \RuntimeException('Installation marker is invalid.');
+        }
+        return true;
     }
 
     public static function isInstalled(): bool

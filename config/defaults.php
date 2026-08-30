@@ -3,7 +3,7 @@
 return [
     'app' => [
         'name' => 'Campus Placement Engine',
-        'version' => '0.1.0-alpha.3',
+        'version' => '0.1.0-alpha.4',
     ],
     'database' => [
         'path' => __DIR__ . '/../data/app.sqlite',
@@ -31,6 +31,8 @@ return [
         'calendar_non_operating_weekdays' => '',
         'calendar_non_operating_dates' => '',
         'audit_request_metadata' => 'none',
+        // Local operational switch. Intentionally excluded from configuration and portability exports.
+        'api_enabled' => '0',
         'configuration_freeze' => '0',
         'terminology_candidate_label' => 'Candidate',
         'terminology_candidates_label' => 'Candidates',

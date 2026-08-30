@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Modules\Placement;
 
 use App\Controllers\AdminController;
+use App\Controllers\ApiAccessController;
 use App\Controllers\BoardController;
 use App\Controllers\CandidateController;
 use App\Controllers\ImportController;
@@ -15,6 +16,7 @@ use App\Controllers\RecordsController;
 use App\Controllers\ReportsController;
 use App\Controllers\SystemController;
 use App\Controllers\WantedController;
+use App\Controllers\WebhookController;
 use App\Core\Modules\Module;
 use App\Core\Modules\ModuleManifest;
 use App\Core\Modules\ModulePortabilityHandler;
@@ -26,14 +28,19 @@ use App\Modules\Placement\Privacy\PlacementPrivacyHandler;
 
 final class PlacementModule implements Module, ProvidesPortability, ProvidesPrivacy
 {
+    public const CPE_MODULE_KEY = 'placement';
+    public const CPE_MODULE_VERSION = '0.1.0';
+
     public function key(): string
     {
-        return 'placement';
+        return self::CPE_MODULE_KEY;
     }
 
     public function manifest(): ModuleManifest
     {
-        return ModuleManifest::fromArray($this->key(), cpe_config('modules.' . $this->key(), []));
+        $definition = (array) cpe_config('modules.' . self::CPE_MODULE_KEY, []);
+        $definition['version'] = self::CPE_MODULE_VERSION;
+        return ModuleManifest::fromArray(self::CPE_MODULE_KEY, $definition);
     }
 
     public function portabilityHandler(): ModulePortabilityHandler
@@ -66,6 +73,7 @@ final class PlacementModule implements Module, ProvidesPortability, ProvidesPriv
             $this->route('records-panelist', 'POST', RecordsController::class, 'savePanelist'),
             $this->route('records-slot-assignment', 'POST', RecordsController::class, 'saveSlotAssignment'),
             $this->route('records-application', 'POST', RecordsController::class, 'saveApplication'),
+            $this->route('operations', 'GET', ReportsController::class, 'operations'),
             $this->route('reports', 'GET', ReportsController::class, 'show'),
             $this->route('import', 'GET', ImportController::class, 'show'),
             $this->route('import', 'POST', ImportController::class, 'run'),
@@ -76,6 +84,24 @@ final class PlacementModule implements Module, ProvidesPortability, ProvidesPriv
             $this->route('admin-users', 'POST', AdminController::class, 'updateUsers'),
             $this->route('admin-password', 'POST', AdminController::class, 'resetPassword'),
             $this->route('admin-workflow', 'POST', AdminController::class, 'updateWorkflow'),
+            $this->route('integrations', 'GET', WebhookController::class, 'show'),
+            $this->route('integration-create', 'POST', WebhookController::class, 'create'),
+            $this->route('integration-secret-generate', 'POST', WebhookController::class, 'generateSecret'),
+            $this->route('integration-secret-rotate', 'POST', WebhookController::class, 'rotateSecret'),
+            $this->route('integration-validate', 'POST', WebhookController::class, 'validate'),
+            $this->route('integration-activate', 'POST', WebhookController::class, 'activate'),
+            $this->route('integration-disable', 'POST', WebhookController::class, 'disable'),
+            $this->route('integration-revoke', 'POST', WebhookController::class, 'revoke'),
+            $this->route('integration-replay', 'POST', WebhookController::class, 'replay'),
+            $this->route('api-access', 'GET', ApiAccessController::class, 'show'),
+            $this->route('api-service-account-create', 'POST', ApiAccessController::class, 'create'),
+            $this->route('api-token-rotate', 'POST', ApiAccessController::class, 'rotate'),
+            $this->route('api-token-revoke', 'POST', ApiAccessController::class, 'revokeToken'),
+            $this->route('api-service-account-enable', 'POST', ApiAccessController::class, 'enableAccount'),
+            $this->route('api-service-account-disable', 'POST', ApiAccessController::class, 'disableAccount'),
+            $this->route('api-service-account-revoke', 'POST', ApiAccessController::class, 'revokeAccount'),
+            $this->route('api-enable', 'POST', ApiAccessController::class, 'enableApi'),
+            $this->route('api-disable', 'POST', ApiAccessController::class, 'disableApi'),
             $this->route('preferences', 'GET', PreferenceController::class, 'show'),
             $this->route('preferences', 'POST', PreferenceController::class, 'create'),
             $this->route('preferences-resolve', 'POST', PreferenceController::class, 'resolve'),
@@ -90,6 +116,12 @@ final class PlacementModule implements Module, ProvidesPortability, ProvidesPriv
     public function navigation(): array
     {
         return [
+            $this->nav(
+                'operations',
+                'Candidate opportunities',
+                ['placement.reports.view', 'placement.sensitive.view'],
+                5,
+            ),
             $this->nav('board', 'Board', 'placement.board.view', 10, '/'),
             $this->nav('records', 'Records', 'placement.records.view', 20),
             $this->nav('reports', 'Reports', 'placement.reports.view', 30),
@@ -98,6 +130,8 @@ final class PlacementModule implements Module, ProvidesPortability, ProvidesPriv
             $this->nav('preferences', 'Preferences', 'placement.preferences.view', 60),
             $this->nav('wanted', 'Wanted', 'placement.wanted.view', 70),
             $this->nav('admin', 'Admin', 'portal.settings.manage', 80),
+            $this->nav('integrations', 'Integrations', 'portal.integrations.manage', 85),
+            $this->nav('api-access', 'API Access', 'portal.integrations.manage', 86),
             $this->nav('system', 'System', 'placement.system.view', 90),
             $this->nav('public', 'Public', 'portal.access', 100),
         ];
@@ -108,8 +142,18 @@ final class PlacementModule implements Module, ProvidesPortability, ProvidesPriv
         return compact('name', 'method', 'controller', 'action');
     }
 
-    private function nav(string $route, string $label, string $capability, int $order, ?string $href = null): array
+    /** @param string|list<string> $capability */
+    private function nav(string $route, string $label, string|array $capability, int $order, ?string $href = null): array
     {
+        if (is_array($capability)) {
+            return [
+                'route' => $route,
+                'label' => $label,
+                'capabilities' => $capability,
+                'order' => $order,
+                'href' => $href,
+            ];
+        }
         return compact('route', 'label', 'capability', 'order', 'href');
     }
 }

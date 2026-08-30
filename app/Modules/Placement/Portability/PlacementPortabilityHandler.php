@@ -70,7 +70,8 @@ final class PlacementPortabilityHandler implements ModulePortabilityHandler
             ),
             'applications' => $this->rows(
                 "SELECT a.public_id, c.external_id AS candidate_external_id, co.code AS company_code,
-                        a.current_status, COALESCE(pc.code, '') AS previous_company_code,
+                        a.current_status, a.aggregate_version,
+                        COALESCE(pc.code, '') AS previous_company_code,
                         COALESCE(nc.code, '') AS next_company_code, a.waitlist_rank,
                         wv.checksum AS workflow_checksum, wi.public_id AS workflow_instance_public_id,
                         a.created_at, a.updated_at
@@ -204,12 +205,21 @@ final class PlacementPortabilityHandler implements ModulePortabilityHandler
                 throw new RuntimeException('Placement portability payload is missing: ' . $required);
             }
         }
+        $this->assertCanonicalPublicIds($payload['companies'], 'company', 'company');
+        $this->assertCanonicalPublicIds($payload['candidates'], 'candidate', 'candidate');
+        $this->assertCanonicalPublicIds($payload['applications'], 'application', 'application');
         $this->assertUnique($payload['companies'], 'code', 'company code');
         $this->assertUnique($payload['companies'], 'public_id', 'company public id');
         $this->assertUnique($payload['candidates'], 'external_id', 'candidate external id');
         $this->assertUnique($payload['candidates'], 'public_id', 'candidate public id');
         $this->assertUnique($payload['applications'], fn (array $row): string => (string) ($row['candidate_external_id'] ?? '') . '|' . (string) ($row['company_code'] ?? ''), 'application');
         $this->assertUnique($payload['applications'], 'public_id', 'application public id');
+        foreach ($payload['applications'] as $row) {
+            if (array_key_exists('aggregate_version', $row)
+                && (!is_int($row['aggregate_version']) || $row['aggregate_version'] < 1)) {
+                throw new RuntimeException('Application aggregate version must be a positive integer.');
+            }
+        }
         $this->assertUnique(
             $payload['workflows'],
             fn (array $row): string => (string) ($row['workflow_key'] ?? '') . '|' . (string) ($row['checksum'] ?? ''),
@@ -248,7 +258,7 @@ final class PlacementPortabilityHandler implements ModulePortabilityHandler
             $service = new PlacementService($this->pdo);
             $companyIds = $this->importCompanies($payload['companies'], $service);
             $candidateIds = $this->importCandidates($payload['candidates'], $service);
-            $applicationIds = $this->importApplications($payload['applications'], $candidateIds, $companyIds, $versionIds, $service);
+            $applicationIds = $this->importApplications($payload['applications'], $candidateIds, $companyIds, $versionIds);
             $this->importOperationalTables($payload, $companyIds, $candidateIds, $applicationIds);
             (new LegacyDomainSynchronizer())->synchronize($this->pdo);
             $this->restoreDurablePublicIds($payload, $candidateIds, $companyIds);
@@ -325,29 +335,45 @@ final class PlacementPortabilityHandler implements ModulePortabilityHandler
         array $candidateIds,
         array $companyIds,
         array $versionIds,
-        PlacementService $service
     ): array {
         $ids = [];
+        $insert = $this->pdo->prepare(
+            'INSERT INTO applications
+             (candidate_id, company_id, current_status, waitlist_rank, public_id,
+              aggregate_version, workflow_version_id, created_at, updated_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+        );
+        $repository = new WorkflowRepository($this->pdo);
         foreach ($rows as $row) {
             $candidateId = $candidateIds[(string) $row['candidate_external_id']] ?? 0;
             $companyId = $companyIds[(string) $row['company_code']] ?? 0;
             if ($candidateId <= 0 || $companyId <= 0) {
                 throw new RuntimeException('Application references an unknown candidate or company.');
             }
-            $service->saveApplication($candidateId, $companyId, (string) $row['current_status'], $row['waitlist_rank'] === null ? null : (int) $row['waitlist_rank'], null);
-            $lookup = $this->pdo->prepare('SELECT id FROM applications WHERE candidate_id = ? AND company_id = ?');
-            $lookup->execute([$candidateId, $companyId]);
-            $id = (int) $lookup->fetchColumn();
-            $ids[(string) $row['public_id']] = $id;
             $previousId = $row['previous_company_code'] !== '' ? ($companyIds[(string) $row['previous_company_code']] ?? null) : null;
             $nextId = $row['next_company_code'] !== '' ? ($companyIds[(string) $row['next_company_code']] ?? null) : null;
             $versionId = $versionIds[(string) ($row['workflow_checksum'] ?? '')] ?? null;
-            $stmt = $this->pdo->prepare(
-                'UPDATE applications
-                 SET public_id = ?, previous_company_id = ?, next_company_id = ?, workflow_version_id = ?, created_at = ?, updated_at = ?
-                 WHERE id = ?'
+            $aggregateVersion = array_key_exists('aggregate_version', $row)
+                ? (int) $row['aggregate_version']
+                : 1;
+            $insert->execute([
+                $candidateId,
+                $companyId,
+                (string) $row['current_status'],
+                $row['waitlist_rank'] === null ? null : (int) $row['waitlist_rank'],
+                (string) $row['public_id'],
+                $aggregateVersion,
+                $versionId,
+                (string) $row['created_at'],
+                (string) $row['updated_at'],
+            ]);
+            $id = Database::lastInsertId($this->pdo);
+            $ids[(string) $row['public_id']] = $id;
+            $links = $this->pdo->prepare(
+                'UPDATE applications SET previous_company_id = ?, next_company_id = ? WHERE id = ?',
             );
-            $stmt->execute([(string) $row['public_id'], $previousId, $nextId, $versionId, (string) $row['created_at'], (string) $row['updated_at'], $id]);
+            $links->execute([$previousId, $nextId, $id]);
+            $repository->ensureApplicationInstance($id);
             $instance = $this->pdo->prepare(
                 'UPDATE workflow_instances
                  SET public_id = ?, workflow_version_id = COALESCE(?, workflow_version_id), current_state_key = ?, started_at = ?, updated_at = ?
@@ -589,6 +615,17 @@ final class PlacementPortabilityHandler implements ModulePortabilityHandler
                 throw new RuntimeException('Placement portability payload has an empty or duplicate ' . $label . ': ' . $value);
             }
             $seen[$value] = true;
+        }
+    }
+
+    private function assertCanonicalPublicIds(array $rows, string $prefix, string $label): void
+    {
+        $pattern = '/^' . preg_quote($prefix, '/') . '_[a-f0-9]{32}$/D';
+        foreach ($rows as $row) {
+            $publicId = is_array($row) ? ($row['public_id'] ?? null) : null;
+            if (!is_string($publicId) || preg_match($pattern, $publicId) !== 1) {
+                throw new RuntimeException('Placement portability payload has an invalid ' . $label . ' public id.');
+            }
         }
     }
 

@@ -227,8 +227,12 @@ final class WorkflowRepository
         string $actorRole,
         string $reason,
         string $note,
-        array $context = []
+        array $context = [],
+        ?int $actorServiceAccountId = null,
     ): void {
+        if ($actorId !== null && $actorServiceAccountId !== null) {
+            throw new RuntimeException('Workflow transition actor attribution must be exclusive.');
+        }
         $instanceId = $this->ensureApplicationInstance($applicationId);
         $workflow = $this->workflowForApplication($applicationId);
         if ($workflow === null) {
@@ -249,8 +253,9 @@ final class WorkflowRepository
         $insert = $this->pdo->prepare(
             'INSERT INTO workflow_transition_events
              (public_id, workflow_instance_id, application_id, workflow_version_id, workflow_transition_id,
-              transition_key, from_state_key, to_state_key, actor_user_id, actor_role, reason, note, context_json, occurred_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
+              transition_key, from_state_key, to_state_key, actor_user_id, actor_service_account_id,
+              actor_role, reason, note, context_json, occurred_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
         );
         $insert->execute([
             $this->publicId('workflow_event'),
@@ -262,6 +267,7 @@ final class WorkflowRepository
             (string) $transition['from'],
             $toState,
             $actorId,
+            $actorServiceAccountId,
             $actorRole,
             $reason,
             $note,

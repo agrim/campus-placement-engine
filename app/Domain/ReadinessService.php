@@ -4,11 +4,13 @@ declare(strict_types=1);
 
 namespace App\Domain;
 
+use App\Api\Operations\ApiHealthService;
 use App\Core\Backup\DatabaseBackupService;
 use App\Core\Backup\BackupMetadata;
 use App\Core\Backup\DatabaseRestoreService;
 use App\Core\Http\UserVisibleException;
 use App\Install\SystemRequirements;
+use App\Integrations\Webhooks\WebhookHealthService;
 use App\Support\Database;
 use PDO;
 
@@ -46,6 +48,8 @@ final class ReadinessService
         $activeUsers = $this->count('SELECT COUNT(*) FROM users WHERE active = 1');
         $configurationFrozen = $this->setting('configuration_freeze') === '1';
         $workflowErrors = $this->workflow->validate();
+        $webhookHealth = (new WebhookHealthService($this->pdo))->snapshot();
+        $apiHealth = (new ApiHealthService($this->pdo))->snapshot();
 
         return [
             'checks' => [
@@ -127,6 +131,67 @@ final class ReadinessService
                     $gatewayCertification['message']
                 ),
                 $this->check(
+                    'Signed webhook integrations',
+                    $webhookHealth['status'],
+                    $webhookHealth['message'],
+                ),
+                $this->check(
+                    'Integration worker schedule',
+                    !$webhookHealth['worker_required']
+                        || ($webhookHealth['worker_configured']
+                            && $webhookHealth['scheduler_freshness'] === 'fresh'
+                            && $webhookHealth['worker_status'] === 'ok')
+                            ? 'ok'
+                            : 'warn',
+                    !$webhookHealth['worker_required']
+                        ? 'No active integration currently requires the delivery worker.'
+                        : 'Configured: ' . ($webhookHealth['worker_configured'] ? 'yes' : 'no')
+                            . '; heartbeat: ' . $webhookHealth['scheduler_freshness']
+                            . '; last run: ' . $webhookHealth['worker_status']
+                            . ($webhookHealth['worker_heartbeat_age_seconds'] === null
+                                ? '.'
+                                : '; age ' . $webhookHealth['worker_heartbeat_age_seconds'] . ' second(s).'),
+                ),
+                $this->check(
+                    'Integration delivery backlog',
+                    $webhookHealth['dead_lettered'] > 0
+                        || (($webhookHealth['oldest_pending_age_seconds'] ?? 0) > 900)
+                            ? 'warn'
+                            : 'ok',
+                    $webhookHealth['pending'] . ' pending; '
+                        . $webhookHealth['dead_lettered'] . ' dead-lettered; oldest pending age '
+                        . ($webhookHealth['oldest_pending_age_seconds'] === null
+                            ? 'none'
+                            : $webhookHealth['oldest_pending_age_seconds'] . ' second(s)') . '.',
+                ),
+                $this->check(
+                    'Webhook TLS policy',
+                    'ok',
+                    $webhookHealth['tls_policy_message'],
+                ),
+                $this->check(
+                    'Integration secret encryption',
+                    $webhookHealth['worker_required'] && !$webhookHealth['encryption_key_present']
+                        ? 'fail'
+                        : (!$webhookHealth['encryption_key_references_ready']
+                            ? ($webhookHealth['worker_required'] ? 'fail' : 'warn')
+                            : 'ok'),
+                    'External key present: ' . ($webhookHealth['encryption_key_present'] ? 'yes' : 'no')
+                        . '; referenced key versions ready: '
+                        . ($webhookHealth['encryption_key_references_ready'] ? 'yes' : 'no') . '.',
+                ),
+                $this->check(
+                    'Integration database driver',
+                    $webhookHealth['database_driver_ready'] ? 'ok' : 'fail',
+                    $webhookHealth['database_driver'] . ' driver '
+                        . ($webhookHealth['database_driver_ready'] ? 'is ready.' : 'is unavailable.'),
+                ),
+                $this->check(
+                    'Institution-local API identity',
+                    $apiHealth['status'],
+                    $apiHealth['message'],
+                ),
+                $this->check(
                     'Active users',
                     $activeUsers > 0 ? 'ok' : 'fail',
                     $activeUsers > 0 ? "{$activeUsers} active user(s)." : 'No active users are available.'
@@ -142,6 +207,8 @@ final class ReadinessService
             'calendarWarnings' => $calendarWarnings,
             'notificationDeliveries' => $deliveryStatus,
             'notificationGatewayCertification' => $gatewayCertification,
+            'webhookIntegrations' => $webhookHealth,
+            'apiIdentity' => $apiHealth,
             'activeUsers' => $activeUsers,
             'configurationFrozen' => $configurationFrozen,
         ];
@@ -152,7 +219,7 @@ final class ReadinessService
         try {
             return (new NotificationDeliveryService($this->pdo))->deliveryStatus();
         } catch (\Throwable) {
-            return ['queued' => 0, 'failed' => 0, 'delivered' => 0];
+            return ['queued' => 0, 'failed' => 0, 'dead-lettered' => 0, 'delivered' => 0];
         }
     }
 

@@ -282,6 +282,20 @@ final class SetupAuthorization
         $this->runAuthorized(static fn (): null => null);
     }
 
+    public function issueRecoveryAuthority(): SetupRecoveryAuthority
+    {
+        return SetupRecoveryAuthority::afterSetupAuthorization($this);
+    }
+
+    /** @internal Used only to mint a target-bound SetupRecoveryAuthority. */
+    public function recoveryAuthorityTargetKey(): string
+    {
+        if (($this->accessState()['state'] ?? '') !== self::ACCESS_AUTHORIZED) {
+            throw new SetupAuthorizationDenied(SetupAuthorizationDenied::NOT_AUTHORIZED);
+        }
+        return $this->targetKey;
+    }
+
     /** Clears only the caller's session grant. The global lease is untouched. */
     public function clear(): void
     {

@@ -125,6 +125,7 @@ reviewed proxy and use `php placement sso-link` for explicit subject links.
 |---|---|
 | `CPE_LOG_PATH` | Optional JSONL structured log path. PHP error logging is the fallback. |
 | `CPE_METRICS_TOKEN` | Bearer token of at least 24 characters for `public/metrics.php` and managed-hosting readiness. |
+| `CPE_ENGINE_ARTIFACT_SHA256` | Optional 64-character SHA-256 of the deployed release archive for the privacy-safe support report. It may use a `sha256:` prefix; malformed values are omitted. |
 
 `public/health.php` liveness needs no token and does not load a platform adapter,
 tenant, session, or database. Readiness is selected with `?ready=1`. It remains
@@ -133,24 +134,61 @@ or `CPE_PLATFORM_BOOTSTRAP` is non-empty it requires the same exact
 `Authorization: Bearer ...` header as metrics. Query parameters, cookies,
 forwarded identity headers, and source addresses never supply this credential.
 
-## Domain Event Outbox
+## Signed Webhook Integrations
 
-Configure at most one sink:
+The administrator **Integrations** page owns endpoint URLs, selected events,
+lifecycle, validation, and signing-secret rotation. These process variables own
+only deployer-controlled cryptography and outbound policy:
 
 | Variable | Purpose |
 |---|---|
-| `CPE_DOMAIN_EVENT_OUTBOX_PATH` | Local JSONL event sink. |
-| `CPE_DOMAIN_EVENT_WEBHOOK_URL` | HTTPS event webhook. |
-| `CPE_DOMAIN_EVENT_WEBHOOK_SECRET` | Optional 32+ character HMAC signing secret. |
-| `CPE_DOMAIN_EVENT_ALLOW_HTTP` | Allows HTTP only for localhost webhook testing. |
-| `CPE_OUTBOUND_ALLOW_PRIVATE_NETWORK` | Allows reviewed notification/domain-event delivery to private networks. Off by default; expands the SSRF trust boundary. |
-| `CPE_DOMAIN_EVENT_TIMEOUT` | Webhook timeout seconds, bounded from 1 to 30. |
-| `CPE_DOMAIN_EVENT_LOCK_SECONDS` | Stale claim threshold, default 300. |
-| `CPE_DOMAIN_EVENT_MAX_ATTEMPTS` | Attempts before dead letter, default 10. |
+| `CPE_WEBHOOK_ENCRYPTION_KEYS` | One to eight semicolon-separated `version=key` entries. Each key is exactly 32 bytes in canonical unpadded base64url. Keep it outside the database. |
+| `CPE_WEBHOOK_ACTIVE_KEY_VERSION` | Version used for new AES-256-GCM ciphertext. It must name one keyring entry. |
+| `CPE_INTEGRATION_WORKER_CONFIGURED` | Set to `1` only after `php placement work-integrations` is installed in cron or the hosted scheduler. This attests configuration; the durable heartbeat proves a run. |
+| `CPE_WEBHOOK_ALLOWED_PORTS` | Comma-separated approved ports, at most 16. Defaults to `443`. |
+| `CPE_WEBHOOK_ALLOW_HTTP` | Self-hosted-only HTTP opt-in. The subscription must also explicitly allow a private-network endpoint and its port must be approved. Managed mode ignores this and remains public-egress only. |
+| `CPE_WEBHOOK_LEASE_SECONDS` | Stale delivery-claim threshold, clamped to 30-3600 seconds; default 300. |
+| `CPE_WEBHOOK_MAX_ATTEMPTS` | Attempts before dead letter, clamped to 1-20; default 10. |
+| `CPE_WEBHOOK_ENDPOINT_CONCURRENCY` | Per-endpoint in-flight claim cap, clamped to 1-10; default 1. |
+| `CPE_WEBHOOK_INSTITUTION_CONCURRENCY` | Per-institution in-flight claim cap, clamped to 1-100; default 5. |
 
-Run `php placement work-outbox` from cron or the hosted scheduler. With no
-external sink, the command acknowledges events as internal after in-process
-module subscribers have run.
+Run `php placement work-integrations` every minute from cron or the hosted
+scheduler, then set `CPE_INTEGRATION_WORKER_CONFIGURED=1` consistently for web,
+CLI, and scheduler processes. The same database and keyring must reach the web and worker
+processes. Missing encryption keys do not break a base Engine install, but an
+active integration whose referenced key is unavailable makes readiness fail
+closed. See `docs/operations/integration-worker.md` and
+`docs/integrations/webhooks.md` for scheduling, readiness, the exact keyring
+grammar, signing contract, network policy, and retry behavior.
+
+`CPE_DOMAIN_EVENT_DIAGNOSTIC_OUTBOX_PATH` is an optional institution-local
+JSONL diagnostic export of governed public envelopes. The older
+`CPE_DOMAIN_EVENT_OUTBOX_PATH` name is accepted as a diagnostics-only alias.
+Configure at most one of those paths. The legacy
+`CPE_DOMAIN_EVENT_WEBHOOK_URL`, `CPE_DOMAIN_EVENT_WEBHOOK_SECRET`, and
+`CPE_DOMAIN_EVENT_ALLOW_HTTP` production sink is disabled; configure signed
+webhooks in the administrator workflow instead.
+
+`CPE_DOMAIN_EVENT_LOCK_SECONDS`, `CPE_DOMAIN_EVENT_MAX_ATTEMPTS`, and
+`CPE_DOMAIN_EVENT_FANOUT_MAX_ATTEMPTS` continue to govern `work-outbox` source
+and internal-module processing. `CPE_OUTBOUND_ALLOW_PRIVATE_NETWORK` applies to
+legacy notification gateways, not signed Integration subscriptions.
+
+## Public API identity and cursor keyring
+
+The public API is institution-local and remains disabled by default until an
+administrator enables it. Its root keys are separate from webhook encryption
+and every other bearer credential.
+
+| Variable | Purpose |
+|---|---|
+| `CPE_API_KEYRING` | One to eight semicolon-separated `version=key` entries. Every key is exactly 32 bytes in canonical unpadded base64url and remains external to the database. |
+| `CPE_API_ACTIVE_KEY_VERSION` | Version used to derive verifiers for newly issued API tokens and newly signed cursors. It must name one keyring entry. |
+
+An absent keyring is acceptable while the foundation is disabled and no usable
+token references exist. A missing referenced version fails readiness. See
+`docs/api/authentication.md` for rotation, lifecycle, CLI, audit, and retention
+rules and `docs/api/v1.md` for the read contract and pagination recovery.
 
 ## Managed-hosting adapter
 

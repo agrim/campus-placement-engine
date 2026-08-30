@@ -6,7 +6,9 @@ define('CPE_SKIP_HTTP_BOOTSTRAP', true);
 require __DIR__ . '/../app/bootstrap.php';
 
 use App\Hosted\HostedBootstrap;
+use App\Api\Operations\ApiHealthService;
 use App\Install\SystemRequirements;
+use App\Integrations\Webhooks\WebhookHealthService;
 use App\Security\OperationalBearerAuthorization;
 use App\Support\Database;
 use App\Support\IncidentReporter;
@@ -48,6 +50,16 @@ if ($ready) {
         $checks['database'] = 'ok';
         $checks['migrations'] = Database::pendingMigrations() === [] ? 'ok' : 'pending';
         if ($checks['migrations'] !== 'ok') {
+            $status = 'unavailable';
+        }
+        $webhooks = (new WebhookHealthService(Database::connection()))->snapshot();
+        $checks['webhooks'] = $webhooks['status'] === 'fail' ? 'unavailable' : $webhooks['status'];
+        if ($checks['webhooks'] === 'unavailable') {
+            $status = 'unavailable';
+        }
+        $api = (new ApiHealthService(Database::connection()))->snapshot();
+        $checks['api_identity'] = $api['status'] === 'fail' ? 'unavailable' : $api['status'];
+        if ($checks['api_identity'] === 'unavailable') {
             $status = 'unavailable';
         }
     } catch (Throwable $e) {

@@ -26,13 +26,22 @@ final class WriteTransaction
     /** @template T @param callable(): T $operation @return T */
     public static function run(PDO $pdo, callable $operation): mixed
     {
-        if (self::sqliteOwned($pdo) || $pdo->inTransaction()) {
+        if (self::isActive($pdo)) {
             return $operation();
         }
 
         return (string) $pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'sqlite'
             ? self::runSqlite($pdo, $operation)
             : self::runPdo($pdo, $operation);
+    }
+
+    /**
+     * Includes SQLite BEGIN IMMEDIATE ownership, which PDO::inTransaction()
+     * does not expose when the transaction was opened with SQL.
+     */
+    public static function isActive(PDO $pdo): bool
+    {
+        return self::sqliteOwned($pdo) || $pdo->inTransaction();
     }
 
     /** @template T @param callable(): T $operation @return T */

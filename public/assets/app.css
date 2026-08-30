@@ -53,6 +53,23 @@ h1, h2, h3 { margin: 0 0 8px; line-height: 1.2; }
   background: #eef3fb;
 }
 .grid-stats { display: flex; gap: 10px; flex-wrap: wrap; }
+.section-head {
+  display: flex;
+  justify-content: space-between;
+  gap: 16px;
+  align-items: start;
+}
+.section-head > strong {
+  min-width: 2.25rem;
+  padding: 3px 7px;
+  border: 1px solid var(--border);
+  text-align: center;
+}
+.two-col {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr));
+  gap: 14px;
+}
 .stat {
   background: var(--panel);
   border: 1px solid var(--border);

@@ -13,6 +13,16 @@ php tests/database_connection_cleanup_contract.php
 php tests/incident_boundary_contract.php
 php tests/legacy_backup_compatibility_contract.php
 php tests/worker_delivery_contract.php
+php tests/public_event_contract.php
+php tests/webhook_delivery_contract.php
+php tests/webhook_delivery_concurrency_contract.php
+php tests/webhook_revoke_completion_concurrency_contract.php
+php tests/webhook_capture_revoke_concurrency_contract.php
+php tests/webhook_receiver_example_contract.php
+php tests/operator_simplicity_contract.php
+php tests/api_identity_contract.php
+php tests/api_identity_rotation_concurrency_contract.php
+php tests/api_http_contract.php
 php tests/postgres_connection_policy_contract.php
 php tests/postgres_tls_contract.php
 php tests/database_contract.php
@@ -43,6 +53,81 @@ It runs two independent workers against one queue, verifies token-fenced
 acknowledgement and failure mutations, stale-claim recovery, stable idempotency
 keys, dead-letter thresholds, dry-run immutability, and destination concealment.
 CI runs it against both SQLite and PostgreSQL.
+`tests/public_event_contract.php` is the portable governed-integration gate. It
+runs against SQLite and a fresh dedicated PostgreSQL database, proves the public
+catalog/schema and exact envelope, all application status writers, aggregate
+CAS/rollback behavior, private-row exclusion, per-aggregate ordering, retry
+identity, audited exact-event dead-letter replay and ordered resume, portability
+behavior, and frozen-consumer tolerance. It invokes
+`tests/validate_public_event_schemas.py`, which uses the pinned CI-only
+dependencies in `tests/requirements-public-event-schema.txt` to register both
+URN resources and validate with a real Draft 2020-12 implementation. Missing
+tooling is a hard failure; the runtime and release application have no schema
+validator dependency.
+`tests/webhook_delivery_contract.php` is the signed per-subscription delivery
+gate. It runs against SQLite and a fresh dedicated PostgreSQL database and
+proves lifecycle/DB guards, no plaintext persistence or re-reveal, AES-GCM
+identity binding, exact raw-body signatures and rotation overlap, synthetic
+validation, transactional fanout rollback, endpoint isolation, per-subscription
+aggregate ordering, retry/dead-letter/replay attribution, stale-lease fencing,
+circuit/backpressure behavior, diagnostics redaction, and injected no-network
+SSRF/redirect/TLS/size/timeout classification. The fake transport is
+deterministic; the contract makes no hidden live endpoint request.
+`tests/webhook_delivery_concurrency_contract.php` releases two independent
+workers against one database. It proves a deep endpoint backlog cannot evade
+global endpoint/institution claim caps and that two simultaneous failure
+completions retain both counter increments and open the circuit. SQLite proves
+portable serialized behavior; CI and release also run a deterministic widened
+claim race against a fresh dedicated PostgreSQL database.
+`tests/webhook_revoke_completion_concurrency_contract.php` proves completion
+uses the same subscription-then-delivery lock order as revocation, so an
+in-flight acknowledgement cannot resurrect fenced work.
+`tests/webhook_capture_revoke_concurrency_contract.php` proves source-event
+capture takes an exclusive PostgreSQL subscription row lock before inserting a
+delivery. Its deterministic two-process gate requires revoke to wait behind
+that lock, then proves the committed delivery is fenced and cannot appear or
+deliver or be replayed after reactivation, while an ordinary future event on
+the same aggregate can progress. The SQLite path proves the same portable outcome.
+The contract also repeats `work(1)` over an older deep endpoint backlog and
+proves the persisted rank-first round-robin cursor advances both endpoints
+without exceeding endpoint/institution caps or changing aggregate order.
+`tests/webhook_receiver_example_contract.php` executes the dependency-light
+consumer's stream reader with a 2 MiB input and proves it consumes exactly the
+1 MiB plus one-byte rejection sentinel rather than buffering the remainder.
+`tests/operator_simplicity_contract.php` installs a minimal fixture on SQLite or
+a fresh dedicated PostgreSQL database. A database-enforced read-only boundary
+proves the university opportunity workspace and support report create no domain
+state. The contract covers the outcome queues and their evidence limits,
+reports-plus-sensitive access control, the five Integration states, worker and
+backlog readiness, the exact support-report allowlist, CLI JSON, and sentinel
+exclusion for placement records, endpoints, credentials, payloads, database
+URLs, and filesystem paths.
+`tests/api_identity_contract.php` runs against SQLite and a fresh dedicated
+PostgreSQL database. It proves paired migration/default parity, external-key
+grammar and HKDF binding, verifier-only one-time token storage, exact
+scope/capability checks, expiry/rotation/revoke/disable lifecycle, missing-key
+readiness, transactional rollback, keyed rate limiting, redacted audit and
+retention, aggregate diagnostics, and exact public API scope declarations.
+`tests/api_identity_rotation_concurrency_contract.php` releases two independent
+rotators against one account and proves serialized lifecycle state: three total
+historical rows, exactly two unrevoked tokens, one current token, one grace
+token, and an unusable original. CI and release run both contracts against
+separate fresh PostgreSQL databases as well as SQLite.
+`tests/api_http_contract.php` is the real loopback producer/consumer gate. It
+runs with PHP's clean-path router against SQLite and a fresh PostgreSQL 17
+database and proves sessionless/no-cookie/no-CORS routing, exact Bearer and
+scope states, institution joins, privacy allowlists, collections/items,
+GET/HEAD/ETag/304, cursor snapshot and tamper bindings, the one strict
+application-transition POST, ETag preconditions, exact idempotent replay,
+service attribution, post-commit audit behavior, bounded input, fixed errors,
+atomic rate limiting, direct-peer/redacted audit, and missing-key readiness. It invokes
+`tests/validate_public_api_contracts.py` with the same pinned Draft 2020-12
+dependencies to validate OpenAPI 3.1 structure, schema reference resolution,
+examples, frozen consumers, and strict producer rejection of undeclared fields.
+`tests/api_application_transition_command_concurrency_contract.php` additionally
+releases two independent workers against the same key and application on SQLite
+and a fresh PostgreSQL database, proving one mutation/evidence set plus one
+exact replay and no durable pending command.
 `tests/postgres_connection_policy_contract.php` is a no-network parser and
 policy gate. It freezes the Cloud-compatible constructor and raw `fromUrl()`
 signatures while proving strict runtime TLS, pool-mode, timeout, redaction,
@@ -158,6 +243,37 @@ CI runs this against PostgreSQL 17. Locally, Apple Container is a good optional
 way to host disposable PostgreSQL while the app itself continues to run directly
 under PHP. It is not required for ordinary SQLite development.
 
+Run the webhook contract against its own fresh database because it installs and
+mutates subscription/delivery fixtures:
+
+```bash
+export CPE_DATABASE_URL='postgresql://USER:PASSWORD@127.0.0.1:5432/EMPTY_WEBHOOK_DATABASE?sslmode=disable'
+php tests/webhook_delivery_contract.php
+```
+
+Run the operator simplicity contract against another fresh database because it
+installs its own coverage, schedule, advising, and Integration fixtures:
+
+```bash
+export CPE_DATABASE_URL='postgresql://USER:PASSWORD@127.0.0.1:5432/EMPTY_OPERATOR_DATABASE?sslmode=disable'
+php tests/operator_simplicity_contract.php
+```
+
+Run the two-process claim/circuit contract against another fresh database:
+
+```bash
+export CPE_DATABASE_URL='postgresql://USER:PASSWORD@127.0.0.1:5432/EMPTY_WEBHOOK_CONCURRENCY_DATABASE?sslmode=disable'
+php tests/webhook_delivery_concurrency_contract.php
+```
+
+Run the two-process capture/revoke serialization and durable fairness contract
+against its own fresh database:
+
+```bash
+export CPE_DATABASE_URL='postgresql://USER:PASSWORD@127.0.0.1:5432/EMPTY_WEBHOOK_CAPTURE_REVOKE_DATABASE?sslmode=disable'
+php tests/webhook_capture_revoke_concurrency_contract.php
+```
+
 ## Real HTTP Gates
 
 Start the app in one terminal:
@@ -179,9 +295,10 @@ route, uses `curl_multi` when available, and otherwise uses PHP streams. Treat
 its local latency as a regression signal, not a hosted capacity guarantee.
 
 PHP `ext-curl` is optional for the default app but required when notification or
-domain-event HTTP delivery is configured. Those paths use it to pin a verified
+signed-webhook HTTP delivery is configured. Those paths use it to pin a verified
 destination address and are separate from the stream fallback in the read-only
-load probe.
+load probe. The deterministic contract proves policy and transport construction;
+a deployment-specific HTTPS certificate/DNS probe remains separate live proof.
 
 Check operations endpoints directly:
 
@@ -227,8 +344,8 @@ and runs readiness plus HTTP smoke. See `disaster-recovery.md`.
 
 ```bash
 php placement package --target=dist --force
-php placement verify-package dist/campus-placement-engine-0.1.0-alpha.3.tar.gz
-php placement verify-package dist/campus-placement-engine-0.1.0-alpha.3.zip
+php placement verify-package dist/campus-placement-engine-0.1.0-alpha.4.tar.gz
+php placement verify-package dist/campus-placement-engine-0.1.0-alpha.4.zip
 ```
 
 Extract the package into a clean directory, run `php placement

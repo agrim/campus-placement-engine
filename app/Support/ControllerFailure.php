@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Support;
 
 use App\Core\Http\UserVisibleException;
+use App\Core\Security\AuthorizationUnavailable;
 use Throwable;
 
 /**
@@ -17,6 +18,9 @@ final class ControllerFailure
 {
     public static function flash(Throwable $exception, string $diagnosticCode, string $operation): void
     {
+        if ($exception instanceof AuthorizationUnavailable) {
+            throw $exception;
+        }
         if ($exception instanceof UserVisibleException) {
             Flash::add('error', $exception->publicMessage());
             return;

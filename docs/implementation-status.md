@@ -20,6 +20,43 @@ Date: 2026-07-18
 > before that mechanical extraction; equivalent cross-repository contracts must
 > continue to pass.
 
+> Phase 2 integration update, 2026-08-30: the Engine now contains an
+> institution-local, database-backed signed webhook workflow for governed
+> `application.status_changed` v1 events. Subscription URLs, encrypted signing
+> material, event and aggregate identifiers, payloads, delivery state, and raw
+> diagnostics remain in each institution data plane. Cloud remains optional and
+> receives none of that data. Local PostgreSQL and live TLS endpoints remain
+> release-environment proof gates rather than claims made by this working tree.
+
+> Phase 3A API identity update, 2026-08-30: the Engine now contains a
+> disabled-by-default institution-local service-account and verifier-only token
+> foundation with exact scopes, bounded rotation, aggregate readiness,
+> rate-limit state, and redacted request audit. At that completed foundation
+> gate no `/api/v1` resource or public API scope was exposed. PostgreSQL
+> execution and production TLS remain release-environment
+> proof gates rather than claims made by this working tree.
+
+> Phase 3B API update, 2026-08-30: at that gate the Engine exposed five sessionless,
+> GET/HEAD-only `/api/v1` routes for exact opportunity and application read
+> projections. Authentication, scopes, rate limits, redacted audit, institution
+> joins, signed cursor pagination, ETags, fixed JSON errors, OpenAPI 3.1, and
+> strict Draft 2020-12 contracts were governed together.
+
+> Phase 4C API update, 2026-08-30: API v1 now adds exactly one controlled
+> `POST /api/v1/applications/{public_id}/transitions` command with exact
+> service-account scope, shared browser domain policy, strong ETag precondition,
+> 48-hour hashed idempotency, atomic service attribution/outbox/replay evidence,
+> and strict input/OpenAPI contracts. Candidate and all other command/write APIs
+> remain absent; Cloud does not proxy institution API data.
+
+> Operator simplicity update, 2026-08-30: Engine now reconciles existing
+> placement, schedule, workflow, and permitted advising evidence into one
+> university opportunity workspace; standardizes the administrator Integration
+> workflow and five visible states; expands truthful worker/backlog/TLS/key/
+> driver readiness; and provides a bounded privacy-safe JSON support report.
+> Formal eligibility, application-close deadlines, response, rescheduling owner,
+> contact, and escalation state remain deferred where no durable source exists.
+
 ## Implemented
 
 ### Career Services Portal Productization
@@ -60,8 +97,60 @@ Date: 2026-07-18
 - JSONL structured request logs with request IDs and common-secret redaction;
   liveness, readiness, token-protected metrics, outbox backlog, and dead-letter
   gauges.
-- Transactional domain-event outbox worker with portable claims, retry backoff,
-  dead letters, JSONL or signed HTTPS delivery, and stable event IDs.
+- Transactional domain-event outbox with immutable per-module eligibility,
+  post-commit declaration expansion and isolated callbacks, token-fenced retry,
+  dead-letter and audited replay state, plus the existing JSONL or signed HTTPS
+  delivery with stable event IDs.
+- Governed public integration contract v1 with
+  `application.status_changed` schema 1, strict privacy-minimized envelopes,
+  immutable explicit outbox projections, per-application aggregate versions and
+  ordering, exact audited dead-letter recovery, plus Engine API v1 and its three
+  exact scopes. Internal `DomainEvent` payloads and module PHP APIs
+  remain private.
+- Institution-local API identity/control foundation with a nonportable disabled
+  default, administrator capability plus CSRF management, exact
+  `opportunities.read`, `applications.read`, and `applications.transition`
+  grants, external bounded
+  versioned keyring, verifier-only one-time tokens, mandatory expiry, 24-hour
+  rotation grace, revoke/disable controls, transactional keyed rate limits,
+  redacted 90-day request audit, bounded pruning, and aggregate-only
+  health/metrics/doctor output.
+- Sessionless GET/HEAD API routes for the service descriptor, opportunities,
+  and applications plus one application-transition POST; exact privacy allowlists and
+  current-institution joins; default-50/max-100 signed cursor pagination bound
+  to institution/route/filter/snapshot/tuple; item ETags and `304`; fixed
+  no-store JSON failures; direct-peer atomic throttling; OpenAPI 3.1, strict
+  Draft 2020-12 schemas, examples, and consumer fixtures. The command uses the
+  shared transition boundary, strong ETag, 48-hour hashed idempotency, exclusive
+  service attribution, and atomic replay evidence. No candidate or other
+  command/write endpoint exists.
+- Institution-facing signed webhook Integrations workflow with one-time secret
+  reveal, AES-256-GCM storage under an external versioned keyring, bounded
+  two-secret rotation overlap, explicit validation before activation, health,
+  disable/revoke, and administrator-attributed exact dead-letter replay.
+- Transactional per-subscription webhook fanout from immutable public event
+  projections, serialized with revoke on subscription rows; token-fenced
+  at-least-once workers isolate endpoints, preserve per-subscription aggregate
+  ordering without globally blocking unrelated aggregates, persist rank-first
+  round-robin progress across short runs, apply bounded jittered
+  retries/circuits/backpressure, and retain delivery metadata without
+  duplicating event bodies.
+- HTTPS-first webhook transport with fresh A/AAAA validation, public-egress
+  defaults, explicit self-hosted private-network opt-in, DNS-to-connection
+  pinning, no redirects or proxy inheritance, TLS verification, bounded headers
+  and bodies, and deterministic injected-transport coverage.
+- Read-only university opportunity workspace for coverage gaps, eligibility
+  evidence review, configured process cut-offs, schedule clashes, assignment
+  follow-up, repeated no-progress signals, zero-link opportunities, and
+  capability-gated adviser tasks, with explicit evidence limits and no duplicate
+  domain state.
+- Doctor, readiness, and System Integration operations status for scheduler
+  attestation/heartbeat, pending and oldest delivery, dead letters, webhook TLS
+  policy, external key presence, referenced key versions, and PDO-driver
+  readiness.
+- Bounded JSON/CLI support report with an exact metadata allowlist and sentinel
+  tests excluding placement records, names, endpoints, credentials, payloads,
+  database URLs, filesystem paths, and logs.
 - Bounded read-only HTTP load probe with optional `curl_multi` concurrency and a
   PHP streams fallback.
 - Hosted operations, disaster recovery, module development, security operations,

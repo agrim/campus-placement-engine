@@ -341,8 +341,9 @@ final class SnapshotExporter
                           ORDER BY c.external_id, cuw.schedule_day, cuw.starts_at, cuw.ends_at, cuw.id',
             ],
             'applications' => [
-                'headers' => ['id', 'candidate_external_id', 'company_code', 'current_status', 'previous_company_code', 'next_company_code', 'waitlist_rank', 'created_at', 'updated_at'],
-                'sql' => 'SELECT a.id, c.external_id AS candidate_external_id, co.code AS company_code, a.current_status,
+                'headers' => ['id', 'candidate_external_id', 'company_code', 'current_status', 'aggregate_version', 'previous_company_code', 'next_company_code', 'waitlist_rank', 'created_at', 'updated_at'],
+                'sql' => 'SELECT a.id, c.external_id AS candidate_external_id, co.code AS company_code,
+                                 a.current_status, a.aggregate_version,
                                  COALESCE(pc.code, \'\') AS previous_company_code, COALESCE(nc.code, \'\') AS next_company_code,
                                  a.waitlist_rank, a.created_at, a.updated_at
                           FROM applications a

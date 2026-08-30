@@ -566,24 +566,40 @@ try {
     incident_true(stream_wrapper_register('incidentfail', IncidentFailStream::class), 'Could not register worker failure stream.');
     $streamRegistered = true;
     $pdo = Database::connection();
-    $institutionId = (int) $pdo->query("SELECT id FROM institutions WHERE slug = 'default'")->fetchColumn();
+    $boundInstanceId = 'inst_' . bin2hex(random_bytes(16));
+    $bindInstitution = $pdo->prepare("UPDATE institutions SET public_id = ? WHERE slug = 'default'");
+    $bindInstitution->execute([$boundInstanceId]);
+    $institution = $pdo->query("SELECT id, public_id FROM institutions WHERE slug = 'default'")->fetch();
+    $institutionId = (int) $institution['id'];
+    $instanceId = (string) $institution['public_id'];
     $eventPublicId = 'event_' . bin2hex(random_bytes(16));
+    $applicationPublicId = 'application_' . bin2hex(random_bytes(16));
     $eventInsert = $pdo->prepare(
         'INSERT INTO domain_event_outbox
          (public_id, event_name, aggregate_type, aggregate_public_id, institution_id, module_key,
-          payload_json, occurred_at, available_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
+          payload_json, occurred_at, available_at,
+          public_event_type, public_schema_version, public_instance_id, public_aggregate_type,
+          public_aggregate_id, public_aggregate_version, public_payload_json, public_correlation_id)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)'
     );
     $eventInsert->execute([
         $eventPublicId,
         'placement.contract.failed',
-        'contract',
-        'contract_' . bin2hex(random_bytes(8)),
+        'placement_application',
+        $applicationPublicId,
         $institutionId,
         'placement',
         '{}',
         cpe_now(),
         cpe_now(),
+        'application.status_changed',
+        1,
+        $instanceId,
+        'application',
+        $applicationPublicId,
+        2,
+        '{"from_status":"requested","to_status":"scheduled"}',
+        'req_' . bin2hex(random_bytes(12)),
     ]);
     putenv('CPE_DOMAIN_EVENT_OUTBOX_PATH=incidentfail://outbox/domain-event');
     putenv('CPE_DOMAIN_EVENT_MAX_ATTEMPTS=1');

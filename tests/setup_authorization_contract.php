@@ -9,7 +9,9 @@ use App\Security\SetupAuthorization;
 use App\Security\SetupAuthorizationDenied;
 use App\Security\SetupAuthorizationStageFailure;
 use App\Security\SetupHttp;
+use App\Security\SetupRecoveryAuthority;
 use App\Security\SetupSessionRotationFailure;
+use App\Core\Install\InstallationStateUnavailable;
 
 function setup_b64(string $bytes): string
 {
@@ -553,6 +555,27 @@ setup_true(
     $defaultTarget instanceof SetupAuthorization,
     'Default construction must derive a stable target from the current connection provider',
 );
+setup_denied(
+    static fn (): SetupRecoveryAuthority => $defaultTarget->issueRecoveryAuthority(),
+    SetupAuthorizationDenied::NOT_AUTHORIZED,
+    'A locked setup authorization must not mint recovery authority',
+);
+setup_true(
+    (new ReflectionClass(SetupRecoveryAuthority::class))->getConstructor()?->isPrivate() === true,
+    'Setup recovery authority must not be directly constructible.',
+);
+$originalScriptFilename = $_SERVER['SCRIPT_FILENAME'] ?? null;
+$_SERVER['SCRIPT_FILENAME'] = cpe_path('placement');
+setup_true(
+    !method_exists(SetupRecoveryAuthority::class, 'forTrustedCliEntrypoint')
+        && !method_exists(SetupRecoveryAuthority::class, 'forFreshTarget'),
+    'Mutable process metadata or fresh state still exposes a recovery-authority factory.',
+);
+if ($originalScriptFilename === null) {
+    unset($_SERVER['SCRIPT_FILENAME']);
+} else {
+    $_SERVER['SCRIPT_FILENAME'] = $originalScriptFilename;
+}
 foreach ([[], true, 123, '', str_repeat('A', 42), str_repeat('A', 129), $token . '=', ' ' . $token] as $invalidProvided) {
     setup_denied(
         static fn (): array => $validation->unlockWithEnvironmentToken($invalidProvided),
@@ -602,6 +625,16 @@ $authorization = setup_auth(
     $csrfRotations,
 );
 $grantState = $authorization->unlockWithEnvironmentToken($token);
+try {
+    $authorization->issueRecoveryAuthority();
+    throw new RuntimeException('Mismatched setup target minted recovery authority.');
+} catch (InstallationStateUnavailable $failure) {
+    setup_same(
+        'Installation state is temporarily unavailable.',
+        $failure->getMessage(),
+        'Mismatched setup target did not fail with the fixed typed error.',
+    );
+}
 setup_same($grantState['state'], SetupAuthorization::ACCESS_AUTHORIZED, 'A correct environment token should authorize setup');
 setup_same($grantState['mode'], SetupAuthorization::MODE_ENVIRONMENT_TOKEN, 'The grant must record its authorization mode');
 setup_same($grantState['issued'], 1000, 'The grant must record its absolute issue time');
@@ -1124,6 +1157,71 @@ setup_true(str_contains($unsafeSetupError, 'unsupported'), 'Rejected wildcard se
 setup_same($localCheckCode, 0, 'Loopback setup check must remain available: ' . $localCheckError);
 setup_true(str_contains($localCheckOutput, 'Setup check complete'), 'Loopback setup check must remain non-mutating');
 
+// Corrupt or unrelated nonempty targets fail before setup creates a session.
+foreach (['unrelated', 'malformed-marker'] as $unsafeSetupCase) {
+    $unsafeDatabase = sys_get_temp_dir()
+        . '/cpe-setup-http-unsafe-' . $unsafeSetupCase . '-' . bin2hex(random_bytes(5)) . '.sqlite';
+    $unsafeLog = sys_get_temp_dir()
+        . '/cpe-setup-http-unsafe-' . $unsafeSetupCase . '-' . bin2hex(random_bytes(5)) . '.log';
+    $unsafeStatePath = setup_default_state_path($unsafeDatabase);
+    $unsafeSentinel = 'unsafe-installed-marker-session-sentinel';
+    if ($unsafeSetupCase === 'unrelated') {
+        $unsafePdo = new PDO('sqlite:' . $unsafeDatabase);
+        $unsafePdo->exec('CREATE TABLE unrelated_setup_target (secret_value TEXT NOT NULL)');
+    } else {
+        [$unsafeMigrateCode, $unsafeMigrateOutput, $unsafeMigrateError] = setup_run_cli(['migrate'], [
+            'CPE_DB_DRIVER' => 'sqlite',
+            'CPE_DATABASE_URL' => '',
+            'CPE_DB_PATH' => $unsafeDatabase,
+        ]);
+        setup_same(
+            $unsafeMigrateCode,
+            0,
+            'Could not create malformed setup target: ' . $unsafeMigrateOutput . $unsafeMigrateError,
+        );
+        $unsafePdo = new PDO('sqlite:' . $unsafeDatabase);
+        $unsafePdo->prepare("INSERT INTO settings (key, value) VALUES ('installed_at', ?)")
+            ->execute([$unsafeSentinel]);
+    }
+    $unsafePdo = null;
+    $unsafeProcess = null;
+    $unsafePipes = [];
+    try {
+        [$unsafeProcess, $unsafePipes, $unsafePort] = setup_start_server([
+            'CPE_DB_PATH' => $unsafeDatabase,
+            'CPE_SETUP_TOKEN' => setup_b64(random_bytes(32)),
+            'CPE_LOG_PATH' => $unsafeLog . '.jsonl',
+        ], $unsafeLog);
+        $unsafeResponse = setup_http_request(
+            $unsafePort,
+            'GET',
+            '/install.php',
+            '127.0.0.1:' . $unsafePort,
+        );
+        setup_same($unsafeResponse['status'], 503, 'Unsafe setup target did not fail before unlock UI: ' . $unsafeSetupCase);
+        setup_true(
+            preg_match('/^Setup state temporarily unavailable\. Reference: inc_[a-f0-9]{32}\n$/D', $unsafeResponse['body']) === 1,
+            'Unsafe setup target did not return the fixed opaque response: ' . $unsafeSetupCase,
+        );
+        setup_true(
+            !isset($unsafeResponse['headers']['set-cookie']),
+            'Unsafe setup target created a setup session cookie: ' . $unsafeSetupCase,
+        );
+        setup_true(!is_file($unsafeStatePath), 'Unsafe setup target created setup authorization state: ' . $unsafeSetupCase);
+        setup_true(
+            !str_contains($unsafeResponse['body'], $unsafeSentinel),
+            'Unsafe setup target exposed its stored value: ' . $unsafeSetupCase,
+        );
+    } finally {
+        setup_stop_server($unsafeProcess, $unsafePipes);
+        foreach ([$unsafeDatabase, $unsafeLog, $unsafeLog . '.jsonl', $unsafeStatePath] as $unsafePath) {
+            if (is_file($unsafePath)) {
+                unlink($unsafePath);
+            }
+        }
+    }
+}
+
 // Real HTTP: no configured source is concealed and cannot reach installation.
 $noAuthDatabase = sys_get_temp_dir() . '/cpe-setup-http-no-auth-' . bin2hex(random_bytes(5)) . '.sqlite';
 $noAuthLog = sys_get_temp_dir() . '/cpe-setup-http-no-auth-' . bin2hex(random_bytes(5)) . '.log';
@@ -1330,6 +1428,32 @@ try {
             && !str_contains($preAuthorizationRetry['body'], 'name="admin_email"'),
         'The pre-rotation session received the setup authorization grant',
     );
+
+    [$recoveryMigrateExit, $recoveryMigrateOutput, $recoveryMigrateError] = setup_run_cli(['migrate'], [
+        'CPE_DB_DRIVER' => 'sqlite',
+        'CPE_DATABASE_URL' => '',
+        'CPE_DB_PATH' => $httpDatabase,
+    ]);
+    setup_same(
+        0,
+        $recoveryMigrateExit,
+        'Could not create the markerless Engine-owned setup recovery fixture: '
+            . $recoveryMigrateOutput
+            . $recoveryMigrateError,
+    );
+    $recoveryPdo = new PDO('sqlite:' . $httpDatabase);
+    $recoveryPdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+    setup_same(
+        1,
+        (int) $recoveryPdo->query("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'settings'")->fetchColumn(),
+        'The setup recovery fixture did not create the owned settings relation.',
+    );
+    setup_same(
+        0,
+        (int) $recoveryPdo->query("SELECT COUNT(*) FROM settings WHERE key = 'installed_at'")->fetchColumn(),
+        'The setup recovery fixture unexpectedly marked the target installed.',
+    );
+    $recoveryPdo = null;
 
     $installForm = setup_http_request(
         $httpPort,
@@ -1719,7 +1843,8 @@ try {
     setup_stop_server($unresolvedHostedProcess, $unresolvedHostedPipes);
 }
 
-// Trusted CLI install paths remain independent from HTTP authorization.
+// Fresh CLI install paths remain independent from HTTP authorization, while a
+// markerless recovery target requires the browser SetupAuthorization flow.
 $cliDatabase = sys_get_temp_dir() . '/cpe-setup-cli-install-' . bin2hex(random_bytes(5)) . '.sqlite';
 [$cliInstallCode, $cliInstallOutput, $cliInstallError] = setup_run_cli([
     'install',
@@ -1732,8 +1857,40 @@ $cliDatabase = sys_get_temp_dir() . '/cpe-setup-cli-install-' . bin2hex(random_b
     'CPE_DB_PATH' => $cliDatabase,
     'CPE_ADMIN_PASSWORD' => 'contract-password-123',
 ]);
-setup_same($cliInstallCode, 0, 'Trusted CLI install must remain independent from HTTP authorization: ' . $cliInstallError);
-setup_true(str_contains($cliInstallOutput, 'Installed app.'), 'Trusted CLI install must complete normally');
+setup_same($cliInstallCode, 0, 'Fresh CLI install must remain available: ' . $cliInstallError);
+setup_true(str_contains($cliInstallOutput, 'Installed app.'), 'Fresh CLI install must complete normally');
+
+$cliRecoveryDatabase = sys_get_temp_dir() . '/cpe-setup-cli-recovery-' . bin2hex(random_bytes(5)) . '.sqlite';
+[$cliMigrateCode, $cliMigrateOutput, $cliMigrateError] = setup_run_cli(['migrate'], [
+    'CPE_DB_DRIVER' => 'sqlite',
+    'CPE_DATABASE_URL' => '',
+    'CPE_DB_PATH' => $cliRecoveryDatabase,
+]);
+setup_same(
+    $cliMigrateCode,
+    0,
+    'Could not create the rejected CLI markerless recovery fixture: '
+        . $cliMigrateOutput
+        . $cliMigrateError,
+);
+[$cliRecoveryCode, $cliRecoveryOutput, $cliRecoveryError] = setup_run_cli([
+    'install',
+    '--college=CLI Recovery Bypass College',
+    '--timezone=UTC',
+    '--admin-name=CLI Recovery Bypass Admin',
+    '--admin-email=cli-recovery-bypass@example.test',
+], [
+    'CPE_DB_PATH' => $cliRecoveryDatabase,
+    'CPE_ADMIN_PASSWORD' => 'contract-password-123',
+]);
+setup_true($cliRecoveryCode !== 0, 'Unauthenticated CLI markerless recovery unexpectedly succeeded.');
+$cliRecoveryPdo = new PDO('sqlite:' . $cliRecoveryDatabase);
+setup_same(
+    0,
+    (int) $cliRecoveryPdo->query("SELECT COUNT(*) FROM settings WHERE key = 'installed_at'")->fetchColumn(),
+    'Rejected CLI markerless recovery wrote the installation marker.',
+);
+$cliRecoveryPdo = null;
 $cliDemoDatabase = sys_get_temp_dir() . '/cpe-setup-cli-demo-' . bin2hex(random_bytes(5)) . '.sqlite';
 [$cliDemoCode, $cliDemoOutput, $cliDemoError] = setup_run_cli(['install-demo'], ['CPE_DB_PATH' => $cliDemoDatabase]);
 setup_same($cliDemoCode, 0, 'Trusted CLI demo install must remain independent from HTTP authorization: ' . $cliDemoError);

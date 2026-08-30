@@ -12,6 +12,7 @@ putenv('CPE_CONFIG_SNAPSHOT_DIR=' . $configTmp);
 putenv('CPE_PRIVACY_SNAPSHOT_DIR=' . $privacyTmp);
 
 require __DIR__ . '/../app/bootstrap.php';
+require __DIR__ . '/authorized_setup_recovery_fixture.php';
 
 use App\Domain\PlacementService;
 use App\Domain\ConfigurationSnapshotService;
@@ -27,6 +28,9 @@ use App\Core\Backup\DatabaseBackupService;
 use App\Core\Backup\DatabaseRestoreService;
 use App\Core\Events\DomainEvent;
 use App\Core\Events\DomainEventOutboxWorker;
+use App\Core\Events\InternalEventDeliveryWorker;
+use App\Core\Events\InternalEventFanoutWorker;
+use App\Core\Events\PublicEventProjection;
 use App\Core\Http\AuthorizationException;
 use App\Core\Http\UserVisibleException;
 use App\Core\Persistence\DatabaseConnectionInvalidException;
@@ -144,6 +148,33 @@ function run_cli_from(string $root, array $args, array $env = []): array
     fclose($pipes[2]);
     $exitCode = proc_close($process);
     return [$exitCode, $stdout, $stderr];
+}
+
+function run_php_from(string $root, string $relative, array $env = []): array
+{
+    $processEnv = $_ENV;
+    foreach (['CPE_DB_PATH', 'CPE_DB_DRIVER', 'CPE_DATABASE_URL', 'CPE_TEST_SCHEMA_PYTHON'] as $key) {
+        $value = getenv($key);
+        if ($value !== false) {
+            $processEnv[$key] = $value;
+        }
+    }
+    $processEnv = array_merge($processEnv, $env);
+    $process = proc_open(
+        [PHP_BINARY, $root . '/' . $relative],
+        [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+        $pipes,
+        $root,
+        $processEnv,
+    );
+    if (!is_resource($process)) {
+        throw new RuntimeException('Could not start PHP contract process.');
+    }
+    $stdout = stream_get_contents($pipes[1]) ?: '';
+    $stderr = stream_get_contents($pipes[2]) ?: '';
+    fclose($pipes[1]);
+    fclose($pipes[2]);
+    return [proc_close($process), $stdout, $stderr];
 }
 
 function render_layout_for_test(array $vars): string
@@ -349,6 +380,7 @@ test_case('installer creates database, admin, settings, and demo data', function
     }
 
     Database::migrate();
+    $recoveryAuthority = test_authorized_setup_recovery_authority();
     $pdo = Database::connection();
     try {
         (new Installer())->install([
@@ -358,7 +390,7 @@ test_case('installer creates database, admin, settings, and demo data', function
             'admin_name' => 'Partial Admin',
             'admin_email' => 'partial-admin@example.test',
             'admin_password' => 'password123',
-        ]);
+        ], $recoveryAuthority);
         throw new RuntimeException('Expected mid-install validation failure.');
     } catch (RuntimeException $e) {
         assert_true(str_contains($e->getMessage(), 'unknown weekday'), 'Atomic installer test should fail after beginning setup writes');
@@ -373,7 +405,7 @@ test_case('installer creates database, admin, settings, and demo data', function
         'admin_email' => 'admin@test.local',
         'admin_password' => 'password123',
         'seed_demo' => '1',
-    ]);
+    ], $recoveryAuthority);
     assert_true($adminId > 0, 'Admin id should be created');
     assert_true(Database::isInstalled(), 'Database should be installed');
     $pdo = Database::connection();
@@ -581,6 +613,7 @@ test_case('placement module owns its routes and capability-filtered navigation',
 
     assert_true(in_array('board', $routeNames, true), 'Placement module should register the board route');
     assert_true(in_array('records', $routeNames, true), 'Placement module should register the records route');
+    assert_true(in_array('operations', $routeNames, true), 'Placement module should register the university operations route');
     assert_same(count($routes), count(array_unique(array_map(
         fn (array $route): string => strtoupper((string) $route['method']) . ' ' . (string) $route['name'],
         $routes
@@ -704,6 +737,14 @@ test_case('career advising proves module lifecycle events privacy and independen
     );
     cpe_context()->events()->dispatch($event);
     cpe_context()->events()->dispatch($event);
+    assert_same(0, (int) $pdo->query("SELECT COUNT(*) FROM advising_tasks WHERE task_type = 'offer_outcome_followup'")->fetchColumn(), 'Advising observer must not run in the publishing transaction');
+    assert_same(2, (int) $pdo->query("SELECT COUNT(*) FROM domain_event_module_fanout WHERE module_key = 'advising'")->fetchColumn(), 'Each event should persist durable Advising eligibility');
+    assert_same(0, (int) $pdo->query("SELECT COUNT(*) FROM domain_event_deliveries WHERE subscription_id = 'internal.advising.offer_follow_up.v1'")->fetchColumn(), 'Publishing must not construct Advising declarations');
+    $fanoutResult = (new InternalEventFanoutWorker($pdo))->work(10);
+    assert_same(2, $fanoutResult['expanded'], 'Post-commit fanout should expand both Advising declarations');
+    assert_same(2, (int) $pdo->query("SELECT COUNT(*) FROM domain_event_deliveries WHERE subscription_id = 'internal.advising.offer_follow_up.v1'")->fetchColumn(), 'Each event should expand to one stable Advising delivery');
+    $observerResult = (new InternalEventDeliveryWorker($pdo))->work(10);
+    assert_same(2, $observerResult['delivered'], 'Post-commit worker should deliver both Advising observations');
     assert_same(1, (int) $pdo->query("SELECT COUNT(*) FROM advising_tasks WHERE task_type = 'offer_outcome_followup'")->fetchColumn(), 'Advising event subscriber should be idempotent');
     assert_same($studentId, (int) $pdo->query("SELECT student_profile_id FROM advising_tasks WHERE task_type = 'offer_outcome_followup'")->fetchColumn(), 'Event subject should resolve through the core person reference bridge');
 
@@ -717,6 +758,7 @@ test_case('career advising proves module lifecycle events privacy and independen
 test_case('domain event outbox claims delivers retries and dead letters without duplicate delivery', function (): void {
     $pdo = Database::connection();
     $pdo->exec('DELETE FROM domain_event_outbox');
+    $instanceId = (string) $pdo->query("SELECT public_id FROM institutions WHERE slug = 'default'")->fetchColumn();
     $outbox = sys_get_temp_dir() . '/cpe-domain-events-' . bin2hex(random_bytes(4)) . '.jsonl';
     $blocker = sys_get_temp_dir() . '/cpe-domain-events-blocker-' . bin2hex(random_bytes(4));
     file_put_contents($blocker, 'not a directory');
@@ -728,6 +770,14 @@ test_case('domain event outbox claims delivers retries and dead letters without 
             'placement',
             ['contract' => true],
             cpe_now(),
+            PublicEventProjection::applicationStatusChanged(
+                $instanceId,
+                'application_' . str_repeat('c', 32),
+                2,
+                'requested',
+                'scheduled',
+                StructuredLogger::requestId(),
+            ),
         );
         $publicId = cpe_context()->events()->dispatch($event);
         putenv('CPE_DOMAIN_EVENT_OUTBOX_PATH=' . $outbox);
@@ -748,6 +798,14 @@ test_case('domain event outbox claims delivers retries and dead letters without 
             'placement',
             ['contract' => false],
             cpe_now(),
+            PublicEventProjection::applicationStatusChanged(
+                $instanceId,
+                'application_' . str_repeat('d', 32),
+                2,
+                'scheduled',
+                'intransit',
+                StructuredLogger::requestId(),
+            ),
         ));
         putenv('CPE_DOMAIN_EVENT_OUTBOX_PATH=' . $blocker . '/events.jsonl');
         putenv('CPE_DOMAIN_EVENT_MAX_ATTEMPTS=1');
@@ -765,6 +823,185 @@ test_case('domain event outbox claims delivers retries and dead letters without 
             unlink($blocker);
         }
         $pdo->exec('DELETE FROM domain_event_outbox');
+    }
+});
+
+test_case('public dead-letter replay CLI targets one exact event and audits idempotently', function (): void {
+    $db = sys_get_temp_dir() . '/cpe-public-replay-cli-' . bin2hex(random_bytes(4)) . '.sqlite';
+    try {
+        [$installStatus, , $installError] = run_cli(['install-demo'], ['CPE_DB_PATH' => $db]);
+        assert_same(0, $installStatus, 'Public replay CLI fixture install should succeed: ' . $installError);
+        $fixture = (static function (string $path): array {
+            $pdo = new PDO('sqlite:' . $path);
+            $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+            $pdo->setAttribute(PDO::ATTR_DEFAULT_FETCH_MODE, PDO::FETCH_ASSOC);
+            $institution = $pdo->query(
+                "SELECT id, public_id FROM institutions WHERE slug = 'default'",
+            )->fetch();
+            $applicationPublicId = (string) $pdo->query(
+                'SELECT public_id FROM applications ORDER BY id LIMIT 1',
+            )->fetchColumn();
+            assert_true(is_array($institution), 'Public replay CLI fixture institution is missing');
+            assert_true($applicationPublicId !== '', 'Public replay CLI fixture application is missing');
+            $adminId = (int) $pdo->query(
+                "SELECT id FROM users WHERE active = 1 AND role = 'admin' ORDER BY id LIMIT 1",
+            )->fetchColumn();
+            $restrictedActorId = (int) $pdo->query(
+                "SELECT id FROM users WHERE active = 1 AND role <> 'admin' ORDER BY id LIMIT 1",
+            )->fetchColumn();
+            assert_true($adminId > 0, 'Public replay CLI fixture administrator is missing');
+            assert_true($restrictedActorId > 0, 'Public replay CLI fixture restricted user is missing');
+            $inactiveEmail = 'inactive-cli-replay-' . bin2hex(random_bytes(4)) . '@example.test';
+            $inactive = $pdo->prepare(
+                "INSERT INTO users (name, email, password_hash, role, active, created_at)
+                 VALUES (?, ?, ?, 'admin', 0, ?)",
+            );
+            $inactive->execute([
+                'Inactive CLI Replay Administrator',
+                $inactiveEmail,
+                password_hash('inactive-cli-replay-password', PASSWORD_DEFAULT),
+                cpe_now(),
+            ]);
+            $inactiveQuery = $pdo->prepare('SELECT id FROM users WHERE email = ?');
+            $inactiveQuery->execute([$inactiveEmail]);
+            $inactiveAdminId = (int) $inactiveQuery->fetchColumn();
+            assert_true($inactiveAdminId > 0, 'Public replay CLI fixture inactive administrator is missing');
+            $eventPublicId = 'event_' . bin2hex(random_bytes(16));
+            $now = cpe_now();
+            $insert = $pdo->prepare(
+                'INSERT INTO domain_event_outbox
+                 (public_id, event_name, aggregate_type, aggregate_public_id, institution_id,
+                  module_key, payload_json, occurred_at, processed_at, attempts, available_at,
+                  delivered_to, failed_at, locked_at, lock_token,
+                  public_event_type, public_schema_version, public_instance_id,
+                  public_aggregate_type, public_aggregate_id, public_aggregate_version,
+                  public_payload_json, public_correlation_id)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, 10, ?, ?, ?, NULL, NULL,
+                         ?, ?, ?, ?, ?, ?, ?, ?)',
+            );
+            $insert->execute([
+                $eventPublicId,
+                'placement.application.transitioned',
+                'placement_application',
+                $applicationPublicId,
+                (int) $institution['id'],
+                'placement',
+                '{"private":"not-for-audit-or-delivery"}',
+                $now,
+                $now,
+                '',
+                $now,
+                'application.status_changed',
+                1,
+                (string) $institution['public_id'],
+                'application',
+                $applicationPublicId,
+                2,
+                '{"from_status":"idle","to_status":"scheduled"}',
+                'req_' . bin2hex(random_bytes(12)),
+            ]);
+            return [
+                'event_public_id' => $eventPublicId,
+                'admin_id' => $adminId,
+                'restricted_actor_id' => $restrictedActorId,
+                'inactive_admin_id' => $inactiveAdminId,
+            ];
+        })($db);
+        $eventPublicId = (string) $fixture['event_public_id'];
+        $actorFailure = 'Error: An active administrator user ID is required.' . "\n";
+        foreach ([
+            'active restricted' => ['--actor-user-id=' . (int) $fixture['restricted_actor_id']],
+            'inactive administrator' => ['--actor-user-id=' . (int) $fixture['inactive_admin_id']],
+            'missing' => [],
+            'unknown' => ['--actor-user-id=2147483647'],
+        ] as $actorLabel => $actorArguments) {
+            [$deniedStatus, $deniedOut, $deniedError] = run_cli([
+                'replay-public-event',
+                '--event=' . $eventPublicId,
+                ...$actorArguments,
+            ], ['CPE_DB_PATH' => $db]);
+            assert_same(1, $deniedStatus, ucfirst($actorLabel) . ' actor should be rejected by public replay CLI');
+            assert_same('', $deniedOut, 'Denied public replay CLI should not report a state transition');
+            assert_same($actorFailure, $deniedError, 'Denied public replay CLI should use one stable redacted actor message');
+        }
+        $deniedProof = (static function (string $path, string $publicId): array {
+            $pdo = new PDO('sqlite:' . $path);
+            $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+            return [
+                'dead_lettered' => (int) $pdo->query(
+                    'SELECT COUNT(*) FROM domain_event_outbox
+                     WHERE public_id = ' . $pdo->quote($publicId) . ' AND failed_at IS NOT NULL',
+                )->fetchColumn(),
+                'audits' => (int) $pdo->query(
+                    "SELECT COUNT(*) FROM audit_logs WHERE action = 'public_event.dead_letter_replay'",
+                )->fetchColumn(),
+            ];
+        })($db, $eventPublicId);
+        assert_same(1, $deniedProof['dead_lettered'], 'Denied public replay CLI changed dead-letter state');
+        assert_same(0, $deniedProof['audits'], 'Denied public replay CLI wrote false attribution');
+
+        [$status, $stdout, $stderr] = run_cli([
+            'replay-public-event',
+            '--event=' . $eventPublicId,
+            '--actor-user-id=' . (int) $fixture['admin_id'],
+        ], ['CPE_DB_PATH' => $db]);
+        assert_same(0, $status, 'Public replay CLI should requeue an exact dead letter: ' . $stderr);
+        assert_same(
+            'Public event replay replayed: ' . $eventPublicId . "\n",
+            $stdout,
+            'Public replay CLI should report only the exact event identity and outcome',
+        );
+
+        $proof = (static function (string $path, string $publicId): array {
+            $pdo = new PDO('sqlite:' . $path);
+            $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+            $event = $pdo->query(
+                'SELECT attempts, failed_at, locked_at, lock_token
+                 FROM domain_event_outbox WHERE public_id = ' . $pdo->quote($publicId),
+            )->fetch(PDO::FETCH_ASSOC);
+            $audit = $pdo->query(
+                "SELECT actor_user_id, subject_type, detail
+                 FROM audit_logs WHERE action = 'public_event.dead_letter_replay'",
+            )->fetchAll(PDO::FETCH_ASSOC);
+            return ['event' => $event, 'audit' => $audit];
+        })($db, $eventPublicId);
+        assert_same(0, (int) $proof['event']['attempts'], 'Public replay CLI should reset attempts');
+        assert_same(null, $proof['event']['failed_at'], 'Public replay CLI should clear dead-letter state');
+        assert_same(null, $proof['event']['locked_at'], 'Public replay CLI should clear stale lock time');
+        assert_same(null, $proof['event']['lock_token'], 'Public replay CLI should clear stale lock token');
+        assert_same(1, count($proof['audit']), 'Public replay CLI should write one audit row');
+        assert_same((int) $fixture['admin_id'], (int) $proof['audit'][0]['actor_user_id'], 'Public replay CLI audit should record the active administrator');
+        assert_same('public_event', (string) $proof['audit'][0]['subject_type'], 'Public replay CLI audit subject differs');
+        assert_same(
+            'Dead-lettered public event requeued for delivery.',
+            (string) $proof['audit'][0]['detail'],
+            'Public replay CLI audit must remain fixed and payload-free',
+        );
+
+        [$repeatStatus, $repeatOut, $repeatError] = run_cli([
+            'replay-public-event',
+            '--event=' . $eventPublicId,
+            '--actor-user-id=' . (int) $fixture['admin_id'],
+        ], ['CPE_DB_PATH' => $db]);
+        assert_same(0, $repeatStatus, 'Repeated public replay CLI should be idempotent: ' . $repeatError);
+        assert_same(
+            'Public event replay already-replayed: ' . $eventPublicId . "\n",
+            $repeatOut,
+            'Repeated public replay CLI outcome differs',
+        );
+        $auditCount = (static function (string $path): int {
+            $pdo = new PDO('sqlite:' . $path);
+            return (int) $pdo->query(
+                "SELECT COUNT(*) FROM audit_logs WHERE action = 'public_event.dead_letter_replay'",
+            )->fetchColumn();
+        })($db);
+        assert_same(1, $auditCount, 'Repeated public replay CLI should not duplicate the audit marker');
+    } finally {
+        foreach ([$db, $db . '-wal', $db . '-shm'] as $path) {
+            if (is_file($path)) {
+                unlink($path);
+            }
+        }
     }
 });
 
@@ -849,6 +1086,52 @@ test_case('logical portability bundle round trips placement data and rejects tam
         assert_true(!str_contains($bundleText, '"password_hash":'), 'Bundle should exclude password hash fields');
         assert_true(!str_contains($bundleText, '$2y$'), 'Bundle should exclude bcrypt password values');
 
+        $placementPath = $bundle . '/modules/placement.json';
+        $manifestPath = $bundle . '/manifest.json';
+        $originalPlacementJson = (string) file_get_contents($placementPath);
+        $originalManifestJson = (string) file_get_contents($manifestPath);
+        $assertPublicIdTamperRejected = static function (
+            string $collection,
+            string $invalidPublicId,
+            string $label,
+        ) use ($placementPath, $manifestPath, $originalPlacementJson, $originalManifestJson, $sourcePdo, $bundle): void {
+            $payload = json_decode($originalPlacementJson, true, 512, JSON_THROW_ON_ERROR);
+            assert_true(is_array($payload[$collection] ?? null) && isset($payload[$collection][0]), 'Tamper fixture lacks ' . $collection);
+            $payload[$collection][0]['public_id'] = $invalidPublicId;
+            $tamperedJson = json_encode(
+                $payload,
+                JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR,
+            ) . "\n";
+            file_put_contents($placementPath, $tamperedJson);
+            $manifest = json_decode($originalManifestJson, true, 64, JSON_THROW_ON_ERROR);
+            foreach ($manifest['files'] as &$file) {
+                if (($file['path'] ?? null) === 'modules/placement.json') {
+                    $file['bytes'] = strlen($tamperedJson);
+                    $file['sha256'] = hash('sha256', $tamperedJson);
+                }
+            }
+            unset($file);
+            file_put_contents(
+                $manifestPath,
+                json_encode($manifest, JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n",
+            );
+            try {
+                (new PortalPortabilityService($sourcePdo))->validate($bundle);
+                throw new RuntimeException('Tampered ' . $label . ' public id was accepted.');
+            } catch (RuntimeException $e) {
+                assert_true(
+                    str_contains($e->getMessage(), 'invalid ' . $label . ' public id'),
+                    'Tampered ' . $label . ' public id did not fail at canonical-id validation',
+                );
+            } finally {
+                file_put_contents($placementPath, $originalPlacementJson);
+                file_put_contents($manifestPath, $originalManifestJson);
+            }
+        };
+        $assertPublicIdTamperRejected('applications', 'application_' . str_repeat('g', 32), 'application');
+        $assertPublicIdTamperRejected('candidates', 'candidate_' . str_repeat('a', 31), 'candidate');
+        $assertPublicIdTamperRejected('companies', 'company_' . str_repeat('A', 32), 'company');
+
         Database::useProvider(new SqliteConnectionProvider($targetDb));
         (new Installer())->install([
             'college_name' => 'Empty Target College',
@@ -894,6 +1177,40 @@ test_case('logical portability bundle round trips placement data and rejects tam
         );
         assert_true(Auth::attempt('target-admin@test.local', 'target-password-123'), 'Target administrator should remain local to the target installation');
 
+        $transitionApplication = $targetPdo->query(
+            "SELECT id, public_id, current_status, aggregate_version
+             FROM applications
+             WHERE current_status NOT IN ('placed', 'rejected')
+             ORDER BY CASE WHEN current_status = 'idle' THEN 0 ELSE 1 END, id
+             LIMIT 1",
+        )->fetch(PDO::FETCH_ASSOC);
+        assert_true(is_array($transitionApplication), 'Imported portability data has no transitionable application');
+        $publicEventsBeforeTransition = (int) $targetPdo->query(
+            'SELECT COUNT(*) FROM domain_event_outbox WHERE public_event_type IS NOT NULL',
+        )->fetchColumn();
+        (new PlacementService($targetPdo))->moveNext(
+            (int) $transitionApplication['id'],
+            1,
+            'admin',
+            'Post-portability public event contract',
+            (string) $transitionApplication['current_status'],
+        );
+        assert_same(
+            (int) $transitionApplication['aggregate_version'] + 1,
+            (int) $targetPdo->query(
+                'SELECT aggregate_version FROM applications WHERE id = ' . (int) $transitionApplication['id'],
+            )->fetchColumn(),
+            'Imported application aggregate version did not advance after a real status change',
+        );
+        $restoredProjection = $targetPdo->query(
+            'SELECT public_aggregate_id, public_aggregate_version
+             FROM domain_event_outbox WHERE public_event_type IS NOT NULL ORDER BY id DESC LIMIT 1',
+        )->fetch(PDO::FETCH_ASSOC);
+        assert_true(is_array($restoredProjection), 'Imported application status change did not publish a public event');
+        assert_same($transitionApplication['public_id'], $restoredProjection['public_aggregate_id'], 'Restored application published a noncanonical aggregate id');
+        assert_same((int) $transitionApplication['aggregate_version'] + 1, (int) $restoredProjection['public_aggregate_version'], 'Restored application published the wrong aggregate version');
+        assert_same($publicEventsBeforeTransition + 1, (int) $targetPdo->query('SELECT COUNT(*) FROM domain_event_outbox WHERE public_event_type IS NOT NULL')->fetchColumn(), 'Post-portability transition did not emit exactly one public event');
+
         Database::useProvider(new SqliteConnectionProvider($hostedTargetDb));
         (new Installer())->installHosted([
             'college_name' => 'Hosted Target College',
@@ -934,6 +1251,58 @@ test_case('logical portability bundle round trips placement data and rejects tam
     } finally {
         putenv('CPE_BACKUP_DIR');
         Database::useProvider($sourceProvider);
+        Portal::reset();
+        remove_tree($root);
+    }
+});
+
+test_case('hosted portability wrapper validates and round trips one exact tenant identity', function (): void {
+    $originalProvider = Database::provider();
+    $root = sys_get_temp_dir() . '/cpe-hosted-portability-' . bin2hex(random_bytes(4));
+    $sourceDb = $root . '/source.sqlite';
+    $targetDb = $root . '/target.sqlite';
+    $bundle = $root . '/bundle';
+    $backupDir = $root . '/backups';
+    $tenantPublicId = 'tenant_' . str_repeat('e', 32);
+    mkdir($root, 0775, true);
+    try {
+        Database::useProvider(new SqliteConnectionProvider($sourceDb));
+        (new Installer())->installHosted([
+            'college_name' => 'Hosted Portability Source',
+            'timezone' => 'UTC',
+            'admin_name' => 'Hosted Source Administrator',
+            'admin_email' => 'hosted-source@example.test',
+            'admin_password' => 'hosted-source-password-123',
+            'seed_demo' => '1',
+        ], $tenantPublicId);
+        $sourcePdo = Database::connection();
+        $sourceApplications = $sourcePdo->query(
+            'SELECT public_id, aggregate_version FROM applications ORDER BY public_id',
+        )->fetchAll(PDO::FETCH_ASSOC);
+        $export = (new PortalPortabilityService($sourcePdo))->export($bundle);
+
+        Database::useProvider(new SqliteConnectionProvider($targetDb));
+        (new Installer())->installHosted([
+            'college_name' => 'Hosted Portability Target',
+            'timezone' => 'UTC',
+            'admin_name' => 'Hosted Target Administrator',
+            'admin_email' => 'hosted-target-roundtrip@example.test',
+            'admin_password' => 'hosted-target-roundtrip-password-123',
+            'seed_demo' => '0',
+        ], $tenantPublicId);
+        putenv('CPE_BACKUP_DIR=' . $backupDir);
+        $targetPdo = Database::connection();
+        $portability = new PortalPortabilityService($targetPdo);
+        $validation = $portability->validate($bundle);
+        assert_same($export['bundle_id'], $validation['bundle_id'], 'Hosted wrapper validation changed the bundle id');
+        assert_same($tenantPublicId, $validation['institution_public_id'], 'Hosted wrapper validation changed tenant identity');
+        $portability->import($bundle);
+        assert_same($tenantPublicId, (string) $targetPdo->query("SELECT public_id FROM institutions WHERE slug = 'default'")->fetchColumn(), 'Hosted portability changed target tenant identity');
+        assert_same($sourceApplications, $targetPdo->query('SELECT public_id, aggregate_version FROM applications ORDER BY public_id')->fetchAll(PDO::FETCH_ASSOC), 'Hosted wrapper roundtrip changed application public ids or aggregate versions');
+        assert_same(0, (int) $targetPdo->query('SELECT COUNT(*) FROM domain_event_outbox')->fetchColumn(), 'Hosted portability synthesized event rows');
+    } finally {
+        putenv('CPE_BACKUP_DIR');
+        Database::useProvider($originalProvider);
         Portal::reset();
         remove_tree($root);
     }
@@ -1705,7 +2074,7 @@ test_case('starter configuration templates validate for every workflow', functio
 
 test_case('open-source release governance files and ignore protections exist', function (): void {
     $root = dirname(__DIR__);
-    assert_same('0.1.0-alpha.3', cpe_config('app.version'), 'Release package version');
+    assert_same('0.1.0-alpha.4', cpe_config('app.version'), 'Release package version');
     foreach ([
         'README.md',
         'LICENSE',
@@ -1723,6 +2092,12 @@ test_case('open-source release governance files and ignore protections exist', f
         'docs/workflow-transition-matrix.md',
         'docs/glossary.md',
         'docs/environment.md',
+        'docs/integrations/webhooks.md',
+        'docs/operations/integration-worker.md',
+        'docs/operations/support-report.md',
+        'docs/operations/university-workspace.md',
+        'docs/api/authentication.md',
+        'docs/api/v1.md',
         'docs/configuration-architecture.md',
         'docs/indian-college-template-notes.md',
         'docs/migration-from-legacy.md',
@@ -1731,6 +2106,7 @@ test_case('open-source release governance files and ignore protections exist', f
         'docs/releases/v0.1.0-alpha.1.md',
         'docs/releases/v0.1.0-alpha.2.md',
         'docs/releases/v0.1.0-alpha.3.md',
+        'docs/releases/v0.1.0-alpha.4.md',
         'INSTALL.md',
         'examples/csv-templates/README.md',
         'examples/csv-templates/candidate_unavailability_windows.csv',
@@ -1742,6 +2118,7 @@ test_case('open-source release governance files and ignore protections exist', f
         'examples/config-templates/virtual-interview-process.json',
         'examples/config-templates/walk-in-job-fair.json',
         'examples/env/local.env.example',
+        'examples/integrations/verify-webhook.php',
         'examples/deployment/apache-vhost.conf',
         'examples/deployment/nginx-server.conf',
         'app/Core/Backup/BackupArtifact.php',
@@ -1752,6 +2129,25 @@ test_case('open-source release governance files and ignore protections exist', f
         'tests/backup_restore_contract.php',
         'tests/database_connection_cleanup_contract.php',
         'tests/legacy_backup_compatibility_contract.php',
+        'tests/webhook_delivery_contract.php',
+        'tests/webhook_delivery_concurrency_contract.php',
+        'tests/webhook_delivery_concurrency_worker.php',
+        'tests/webhook_revoke_completion_concurrency_contract.php',
+        'tests/webhook_revoke_completion_concurrency_worker.php',
+        'tests/webhook_receiver_example_contract.php',
+        'tests/operator_simplicity_contract.php',
+        'tests/api_identity_contract.php',
+        'tests/api_identity_rotation_concurrency_contract.php',
+        'tests/api_identity_rotation_concurrency_worker.php',
+        'tests/api_http_contract.php',
+        'tests/application_transition_boundary_contract.php',
+        'tests/api_application_transition_command_contract.php',
+        'tests/api_application_transition_command_concurrency_contract.php',
+        'tests/api_application_transition_command_concurrency_worker.php',
+        'tests/api_application_transition_input_contract.php',
+        'tests/validate_public_api_contracts.py',
+        'contracts/openapi.v1.json',
+        'public/router.php',
         '.github/workflows/ci.yml',
         '.github/workflows/release.yml',
         '.github/ISSUE_TEMPLATE/bug_report.md',
@@ -1760,7 +2156,7 @@ test_case('open-source release governance files and ignore protections exist', f
         assert_true(is_file($root . '/' . $path), "Missing release governance file: {$path}");
     }
     $ci = (string) file_get_contents($root . '/.github/workflows/ci.yml');
-    foreach (['php tests/run.php', 'php tests/alpha1_release_acceptance.php', 'php tests/backup_restore_contract.php', 'php tests/database_connection_cleanup_contract.php', 'php tests/incident_boundary_contract.php', 'php tests/legacy_backup_compatibility_contract.php', 'php tests/worker_delivery_contract.php', 'php tests/database_ownership_contract.php', 'php tests/migration_lock_contract.php', 'php tests/database_lock_release_contract.php', 'php tests/install_concurrency_contract.php', 'php tests/hosted_install_atomicity_contract.php', 'php tests/hosted_install_preflight_contract.php', 'php tests/setup_authorization_contract.php', 'php tests/hosted_install_contract.php', 'php tests/managed_hosting_contract.php', 'php placement publication-check', 'php placement package', 'php placement verify-package', 'php placement install', 'php placement upgrade', 'php placement setup --check', 'php placement serve --help', 'php placement install-demo', 'php placement seed-large-demo', 'php placement browser-qa-plan', 'php placement smoke-http', 'php placement readiness', 'php placement metrics', 'php placement placement-report', 'php placement privacy-report', 'php placement export', 'php placement rollback-import', 'php placement config-export', 'php placement config-validate', 'php placement config-import', 'php placement deliver-notifications', 'php placement certify-notifications', 'php placement optimize-slots', 'php placement assign-optimized-slots', 'php -l placement'] as $command) {
+    foreach (['php tests/run.php', 'php tests/alpha1_release_acceptance.php', 'php tests/backup_restore_contract.php', 'php tests/database_connection_cleanup_contract.php', 'php tests/incident_boundary_contract.php', 'php tests/legacy_backup_compatibility_contract.php', 'php tests/worker_delivery_contract.php', 'php tests/public_event_contract.php', 'php tests/webhook_delivery_contract.php', 'php tests/webhook_delivery_concurrency_contract.php', 'php tests/webhook_revoke_completion_concurrency_contract.php', 'php tests/webhook_receiver_example_contract.php', 'php tests/operator_simplicity_contract.php', 'php tests/api_identity_contract.php', 'php tests/api_identity_rotation_concurrency_contract.php', 'php tests/api_http_contract.php', 'php tests/application_transition_boundary_contract.php', 'php tests/api_application_transition_input_contract.php', 'php tests/api_application_transition_command_contract.php', 'php tests/api_application_transition_command_concurrency_contract.php', 'php tests/database_ownership_contract.php', 'php tests/migration_lock_contract.php', 'php tests/database_lock_release_contract.php', 'php tests/install_concurrency_contract.php', 'php tests/hosted_install_atomicity_contract.php', 'php tests/hosted_install_preflight_contract.php', 'php tests/setup_authorization_contract.php', 'php tests/hosted_install_contract.php', 'php tests/managed_hosting_contract.php', 'php placement publication-check', 'php placement package', 'php placement verify-package', 'php placement install', 'php placement upgrade', 'php placement setup --check', 'php placement serve --help', 'php placement install-demo', 'php placement seed-large-demo', 'php placement browser-qa-plan', 'php placement smoke-http', 'php placement readiness', 'php placement metrics', 'php placement placement-report', 'php placement privacy-report', 'php placement export', 'php placement rollback-import', 'php placement config-export', 'php placement config-validate', 'php placement config-import', 'php placement deliver-notifications', 'php placement work-integrations', 'php placement certify-notifications', 'php placement optimize-slots', 'php placement assign-optimized-slots', 'php -l placement'] as $command) {
         assert_true(str_contains($ci, $command), "Missing CI command: {$command}");
     }
     $releaseWorkflow = (string) file_get_contents($root . '/.github/workflows/release.yml');
@@ -1792,6 +2188,13 @@ YAML;
     }
     foreach ([$ci, $releaseWorkflow] as $workflow) {
         assert_true(
+            str_contains(
+                $workflow,
+                'echo "CPE_TEST_SCHEMA_PYTHON=$RUNNER_TEMP/cpe-public-schema-validator/bin/python" >> "$GITHUB_ENV"',
+            ) && str_contains($workflow, 'tests/validate_public_api_contracts.py'),
+            'CI and release must persist the exact pinned schema-validator interpreter for extracted-package subprocesses.',
+        );
+        assert_true(
             str_contains($workflow, 'git archive --format=tar v0.1.0-alpha.1')
                 && str_contains($workflow, 'CPE_ALPHA1_DATABASE_FIXTURE=')
                 && str_contains($workflow, 'CPE_ALPHA1_BACKUP_FIXTURE=')
@@ -1818,7 +2221,95 @@ YAML;
                 && str_contains($workflow, 'php tests/database_connection_cleanup_contract.php'),
             'CI and release must run invalid-connection cleanup against a fresh dedicated PostgreSQL database.',
         );
+        assert_true(
+            str_contains($workflow, 'cpe_public_event_contract')
+                && str_contains($workflow, 'php tests/public_event_contract.php'),
+            'CI and release must run the public event contract against a fresh dedicated PostgreSQL database.',
+        );
+        assert_true(
+            str_contains($workflow, 'cpe_webhook_delivery_contract')
+                && str_contains($workflow, 'php tests/webhook_delivery_contract.php'),
+            'CI and release must run the signed webhook delivery contract against a fresh dedicated PostgreSQL database.',
+        );
+        assert_true(
+            str_contains($workflow, 'cpe_operator_simplicity_contract')
+                && str_contains($workflow, 'php tests/operator_simplicity_contract.php'),
+            'CI and release must run the operator simplicity contract against SQLite and a fresh PostgreSQL database.',
+        );
+        assert_true(
+            str_contains($workflow, 'cpe_webhook_delivery_concurrency_contract')
+                && str_contains($workflow, 'php tests/webhook_delivery_concurrency_contract.php'),
+            'CI and release must run two-process webhook claim and circuit concurrency against a fresh PostgreSQL database.',
+        );
+        assert_true(
+            str_contains($workflow, 'cpe_webhook_revoke_completion_concurrency_contract')
+                && str_contains($workflow, 'php tests/webhook_revoke_completion_concurrency_contract.php'),
+            'CI and release must run revoke/completion lock-order concurrency against a fresh PostgreSQL database.',
+        );
+        assert_true(
+            str_contains($workflow, 'cpe_webhook_capture_revoke_concurrency_contract')
+                && str_contains($workflow, 'php tests/webhook_capture_revoke_concurrency_contract.php'),
+            'CI and release must run capture/revoke serialization and durable fairness against a fresh PostgreSQL database.',
+        );
+        assert_true(
+            str_contains($workflow, 'cpe_api_identity_contract')
+                && str_contains($workflow, 'php tests/api_identity_contract.php'),
+            'CI and release must run API identity lifecycle parity against a fresh PostgreSQL database.',
+        );
+        assert_true(
+            str_contains($workflow, 'cpe_application_transition_boundary_contract')
+                && str_contains($workflow, 'php tests/application_transition_boundary_contract.php'),
+            'CI and release must run the application transition boundary against a fresh PostgreSQL database.',
+        );
+        assert_true(
+            str_contains($workflow, 'cpe_api_application_transition_command_contract')
+                && str_contains($workflow, 'php tests/api_application_transition_command_contract.php'),
+            'CI and release must run API command persistence parity against a fresh PostgreSQL database.',
+        );
+        assert_true(
+            str_contains($workflow, 'cpe_api_application_transition_command_concurrency_contract')
+                && str_contains($workflow, 'php tests/api_application_transition_command_concurrency_contract.php'),
+            'CI and release must run API command same-key concurrency against a fresh PostgreSQL database.',
+        );
+        assert_true(
+            str_contains($workflow, 'cpe_api_http_contract')
+                && str_contains($workflow, 'php tests/api_http_contract.php'),
+            'CI and release must run the public API HTTP contract against a fresh PostgreSQL database.',
+        );
+        assert_true(
+            str_contains($workflow, 'cpe_api_rotation_concurrency_contract')
+                && str_contains($workflow, 'php tests/api_identity_rotation_concurrency_contract.php'),
+            'CI and release must run API token rotation concurrency against a fresh PostgreSQL database.',
+        );
+        assert_true(
+            str_contains($workflow, 'CPE_WEBHOOK_TEST_PRIVILEGED_HEALTH: "1"'),
+            'CI and release must prove unreadable webhook health storage with a disposable restricted PostgreSQL role.',
+        );
     }
+    $webhookDeliveryContract = (string) file_get_contents($root . '/tests/webhook_delivery_contract.php');
+    $resetRoleOffset = strpos($webhookDeliveryContract, "\$pdo->exec('RESET ROLE')");
+    $revokeGrantOffset = strpos($webhookDeliveryContract, "'REVOKE ALL PRIVILEGES ON TABLE '");
+    $dropOwnedOffset = strpos($webhookDeliveryContract, "'DROP OWNED BY '");
+    $dropRoleOffset = strpos($webhookDeliveryContract, "'DROP ROLE '");
+    assert_true(
+        is_int($resetRoleOffset)
+            && is_int($revokeGrantOffset)
+            && is_int($dropOwnedOffset)
+            && is_int($dropRoleOffset)
+            && $resetRoleOffset < $revokeGrantOffset
+            && $revokeGrantOffset < $dropOwnedOffset
+            && $dropOwnedOffset < $dropRoleOffset
+            && str_contains($webhookDeliveryContract, 'if ($cleanupFailures !== [])'),
+        'Privileged webhook health cleanup must reset safely, revoke grants, drop owned grants, drop the role, and fail on cleanup errors.',
+    );
+    $suiteSource = (string) file_get_contents(__FILE__);
+    assert_true(
+        str_contains(
+            $suiteSource,
+            "foreach (['CPE_DB_PATH', 'CPE_DB_DRIVER', 'CPE_DATABASE_URL', 'CPE_TEST_SCHEMA_PYTHON'] as \$key)",
+        ),
+        'Extracted-package PHP subprocesses must explicitly forward CPE_TEST_SCHEMA_PYTHON from GITHUB_ENV.',
+    );
     $deployment = (string) file_get_contents($root . '/docs/deployment.md');
     foreach (['examples/deployment/apache-vhost.conf', 'examples/deployment/nginx-server.conf', 'point the virtual host document root at `public/`', 'public/.htaccess', 'CPE_SETUP_TOKEN', 'php placement setup', 'cpe_database_ownership', 'no force/rebind flag', 'cpe.engine-migrations', 'cpe.engine-installation'] as $snippet) {
         assert_true(str_contains($deployment, $snippet), "Missing deployment guidance: {$snippet}");
@@ -1900,6 +2391,7 @@ test_case('conditional PostgreSQL TLS contract skips only absent or empty endpoi
 test_case('publication check rejects obvious committed secret patterns', function (): void {
     $root = dirname(__DIR__);
     $path = $root . '/tmp-publication-secret-smoke.txt';
+    $apiTokenPath = $root . '/tmp-publication-api-token-smoke.txt';
     try {
         file_put_contents($path, 'OPENAI_API_KEY=sk-proj-' . str_repeat('A', 32) . "\n");
         [$code, $stdout, $stderr] = run_cli(['publication-check']);
@@ -1907,9 +2399,22 @@ test_case('publication check rejects obvious committed secret patterns', functio
         $output = $stdout . $stderr;
         assert_true(str_contains($output, 'Potential secret'), 'Publication check should explain the secret finding');
         assert_true(str_contains($output, 'tmp-publication-secret-smoke.txt'), 'Publication check should report the offending file');
+        unlink($path);
+
+        $tokenPrefix = implode('_', ['cpe', 'live', 'apitok']) . '_';
+        $tokenSecret = rtrim(strtr(base64_encode(str_repeat("\x5a", 32)), '+/', '-_'), '=');
+        file_put_contents($apiTokenPath, $tokenPrefix . str_repeat('a', 32) . '.' . $tokenSecret . "\n");
+        [$apiCode, $apiStdout, $apiStderr] = run_cli(['publication-check']);
+        assert_same(1, $apiCode, 'Publication check should fail for a canonical Engine API token');
+        $apiOutput = $apiStdout . $apiStderr;
+        assert_true(str_contains($apiOutput, 'Campus Placement Engine API token'), 'Publication check should classify the Engine API token');
+        assert_true(str_contains($apiOutput, 'tmp-publication-api-token-smoke.txt'), 'Publication check should report the Engine API token file');
     } finally {
         if (is_file($path)) {
             unlink($path);
+        }
+        if (is_file($apiTokenPath)) {
+            unlink($apiTokenPath);
         }
     }
 });
@@ -1927,6 +2432,7 @@ test_case('release package includes public source and excludes private runtime d
     $root = dirname(__DIR__);
     $target = sys_get_temp_dir() . '/cpe-package-' . bin2hex(random_bytes(4));
     $extractDir = sys_get_temp_dir() . '/cpe-package-extract-' . bin2hex(random_bytes(4));
+    $tarExtractDir = sys_get_temp_dir() . '/cpe-package-tar-extract-' . bin2hex(random_bytes(4));
     $packageDb = sys_get_temp_dir() . '/cpe-package-db-' . bin2hex(random_bytes(4)) . '.sqlite';
     $runtimeStaging = $root . '/data/restore-staging/package-contract-' . bin2hex(random_bytes(4));
     try {
@@ -1977,6 +2483,7 @@ test_case('release package includes public source and excludes private runtime d
         assert_true(str_contains($joined, '/app/Security/SetupAuthorization.php'), 'Package should include the setup authorization core');
         assert_true(str_contains($joined, '/app/Security/SetupAuthorizationStageFailure.php'), 'Package should include fixed setup authorization stage failures');
         assert_true(str_contains($joined, '/app/Security/SetupHttp.php'), 'Package should include the setup HTTP boundary');
+        assert_true(str_contains($joined, '/app/Security/SetupRecoveryAuthority.php'), 'Package should include target-bound setup recovery authority');
         assert_true(str_contains($joined, '/app/Views/setup-unlock.php'), 'Package should include the setup unlock view');
         assert_true(str_contains($joined, '/public/install.php'), 'Package should include the protected installer entrypoint');
         assert_true(str_contains($joined, '/public/health.php'), 'Package should include the health probe entrypoint');
@@ -1984,7 +2491,41 @@ test_case('release package includes public source and excludes private runtime d
         assert_true(str_contains($joined, '/app/Core/Backup/BackupArtifact.php'), 'Package should include the internal backup artifact contract');
         assert_true(str_contains($joined, '/app/Core/Backup/BackupMetadata.php'), 'Package should include checksum-bound backup metadata');
         assert_true(str_contains($joined, '/app/Core/Backup/LegacySqliteBackupConverter.php'), 'Package should include explicit legacy SQLite conversion');
+        assert_true(str_contains($joined, '/app/Core/Events/InternalEventDeliveryWorker.php'), 'Package should include the post-commit observer worker');
+        assert_true(str_contains($joined, '/app/Core/Events/InternalEventDeliveryReplayService.php'), 'Package should include audited internal observer replay');
+        assert_true(str_contains($joined, '/app/Core/Events/InternalEventFanoutWorker.php'), 'Package should include post-commit declaration fanout');
+        assert_true(str_contains($joined, '/app/Core/Events/InternalEventFanoutReplayService.php'), 'Package should include audited declaration fanout replay');
+        assert_true(str_contains($joined, '/app/Core/Events/InternalEventSubscriberRegistry.php'), 'Package should include the internal observer registry');
+        assert_true(str_contains($joined, '/app/Core/Events/InternalEventSubscription.php'), 'Package should include stable internal observer subscriptions');
+        assert_true(str_contains($joined, '/app/Core/Events/PublicEventProjection.php'), 'Package should include the governed public projection');
+        assert_true(str_contains($joined, '/app/Core/Events/PublicEventEnvelope.php'), 'Package should include the governed public envelope');
+        assert_true(str_contains($joined, '/app/Core/Events/PublicEventDeadLetterReplayService.php'), 'Package should include audited public dead-letter replay');
+        assert_true(str_contains($joined, '/app/Core/Events/ReplayOperatorAuthorization.php'), 'Package should include centralized replay operator authorization');
+        assert_true(str_contains($joined, '/app/Modules/Placement/Application/ApplicationStatusWriter.php'), 'Package should include the shared application status writer');
+        assert_true(str_contains($joined, '/app/Modules/Placement/Application/ApplicationTransitionActor.php'), 'Package should include the application transition actor boundary');
+        assert_true(str_contains($joined, '/app/Modules/Placement/Application/ApplicationTransitionCommand.php'), 'Package should include the application transition command boundary');
+        assert_true(str_contains($joined, '/app/Modules/Placement/Application/ApplicationTransitionResult.php'), 'Package should include the application transition result boundary');
+        assert_true(str_contains($joined, '/app/Modules/Placement/Application/ApplicationTransitionService.php'), 'Package should include the application transition service boundary');
+        assert_true(str_contains($joined, '/app/Controllers/WebhookController.php'), 'Package should include the institution webhook administration controller');
+        assert_true(str_contains($joined, '/app/Integrations/Webhooks/WebhookDeliveryWorker.php'), 'Package should include the signed webhook delivery worker');
+        assert_true(str_contains($joined, '/app/Integrations/Webhooks/WebhookDeliveryReplayService.php'), 'Package should include attributed exact webhook replay');
+        assert_true(str_contains($joined, '/app/Integrations/Webhooks/WebhookSecretCipher.php'), 'Package should include encrypted webhook secret storage');
+        assert_true(str_contains($joined, '/app/Integrations/Webhooks/WebhookSigner.php'), 'Package should include the public signing contract');
+        assert_true(str_contains($joined, '/app/Views/webhooks.php'), 'Package should include the institution webhook workflow');
+        assert_true(str_contains($joined, '/app/Controllers/ApiAccessController.php'), 'Package should include the institution API access controller');
+        assert_true(str_contains($joined, '/app/Api/Security/ApiKeyring.php'), 'Package should include the API keyring');
+        assert_true(str_contains($joined, '/app/Api/Security/ApiServiceAccountService.php'), 'Package should include API service-account lifecycle');
+        assert_true(str_contains($joined, '/app/Api/Security/ApiTokenAuthenticator.php'), 'Package should include verifier-only API authentication');
+        assert_true(str_contains($joined, '/app/Api/Security/ApiScopePolicy.php'), 'Package should include exact API scope policy');
+        assert_true(str_contains($joined, '/app/Api/Operations/ApiRateLimiter.php'), 'Package should include API rate limiting');
+        assert_true(str_contains($joined, '/app/Api/Operations/ApiRequestAuditService.php'), 'Package should include redacted API request audit');
+        assert_true(str_contains($joined, '/app/Api/Operations/ApiHealthService.php'), 'Package should include aggregate API health');
+        assert_true(str_contains($joined, '/app/Views/api-access.php'), 'Package should include the institution API access workflow');
         assert_true(str_contains($joined, '/app/Core/Persistence/DatabaseConnectionInvalidException.php'), 'Package should include typed invalid-connection cleanup failures');
+        assert_true(str_contains($joined, '/app/Core/Security/AuthorizationUnavailable.php'), 'Package should include typed installed-runtime authorization failures');
+        assert_true(str_contains($joined, '/app/Core/Modules/ModuleVersionIntegrity.php'), 'Package should include exact bundled module version integrity');
+        assert_true(str_contains($joined, '/app/Core/Install/InstallationState.php'), 'Package should include typed installation state');
+        assert_true(str_contains($joined, '/app/Core/Install/InstallationStateUnavailable.php'), 'Package should include redacted installation-state failures');
         assert_true(str_contains($joined, '/tests/alpha1_release_acceptance.php'), 'Package should include exact alpha.1 external acceptance');
         assert_true(str_contains($joined, '/tests/backup_restore_contract.php'), 'Package should include the backup/restore identity contract');
         assert_true(str_contains($joined, '/tests/database_connection_cleanup_contract.php'), 'Package should include the invalid-connection cleanup contract');
@@ -1999,15 +2540,132 @@ test_case('release package includes public source and excludes private runtime d
         assert_true(str_contains($joined, '/tests/hosted_install_atomicity_contract.php'), 'Package should include the hosted installation atomicity contract');
         assert_true(str_contains($joined, '/tests/hosted_install_preflight_contract.php'), 'Package should include the hosted installation preflight contract');
         assert_true(str_contains($joined, '/tests/setup_authorization_contract.php'), 'Package should include the setup authorization regression contract');
+        assert_true(str_contains($joined, '/tests/authorization_failure_contract.php'), 'Package should include the installed-runtime authorization regression contract');
+        assert_true(str_contains($joined, '/tests/authorization_state_contract.php'), 'Package should include the portable authorization-state contract');
+        assert_true(str_contains($joined, '/tests/installation_state_contract.php'), 'Package should include the portable installation-state contract');
+        assert_true(str_contains($joined, '/tests/internal_event_delivery_contract.php'), 'Package should include the internal observer delivery contract');
+        assert_true(str_contains($joined, '/tests/public_event_contract.php'), 'Package should include the public event contract');
+        assert_true(str_contains($joined, '/tests/webhook_delivery_contract.php'), 'Package should include the signed webhook delivery contract');
+        assert_true(str_contains($joined, '/tests/webhook_delivery_concurrency_contract.php'), 'Package should include the signed webhook concurrency contract');
+        assert_true(str_contains($joined, '/tests/webhook_delivery_concurrency_worker.php'), 'Package should include the signed webhook concurrency worker');
+        assert_true(str_contains($joined, '/tests/webhook_revoke_completion_concurrency_contract.php'), 'Package should include the webhook revoke/completion concurrency contract');
+        assert_true(str_contains($joined, '/tests/webhook_revoke_completion_concurrency_worker.php'), 'Package should include the webhook revoke/completion concurrency worker');
+        assert_true(str_contains($joined, '/tests/webhook_capture_revoke_concurrency_contract.php'), 'Package should include the webhook capture/revoke concurrency contract');
+        assert_true(str_contains($joined, '/tests/webhook_capture_revoke_concurrency_worker.php'), 'Package should include the webhook capture/revoke concurrency worker');
+        assert_true(str_contains($joined, '/tests/webhook_receiver_example_contract.php'), 'Package should include the bounded receiver example contract');
+        assert_true(str_contains($joined, '/tests/operator_simplicity_contract.php'), 'Package should include the operator simplicity contract');
+        assert_true(str_contains($joined, '/docs/operations/support-report.md'), 'Package should include the privacy-safe support report guide');
+        assert_true(str_contains($joined, '/app/Operations/SupportReportService.php'), 'Package should include the privacy-safe support report service');
+        assert_true(str_contains($joined, '/app/Modules/Placement/Application/UniversityOperationsWorkspace.php'), 'Package should include the university operations workspace');
+        assert_true(str_contains($joined, '/tests/api_identity_contract.php'), 'Package should include the API identity lifecycle contract');
+        assert_true(str_contains($joined, '/tests/api_identity_rotation_concurrency_contract.php'), 'Package should include the API rotation concurrency contract');
+        assert_true(str_contains($joined, '/tests/api_identity_rotation_concurrency_worker.php'), 'Package should include the API rotation concurrency worker');
+        assert_true(str_contains($joined, '/tests/application_transition_boundary_contract.php'), 'Package should include the application transition boundary contract');
+        assert_true(str_contains($joined, '/tests/api_application_transition_command_contract.php'), 'Package should include the API command persistence contract');
+        assert_true(str_contains($joined, '/tests/api_application_transition_command_concurrency_contract.php'), 'Package should include the API command concurrency contract');
+        assert_true(str_contains($joined, '/tests/api_application_transition_command_concurrency_worker.php'), 'Package should include the API command concurrency worker');
+        assert_true(str_contains($joined, '/tests/api_application_transition_input_contract.php'), 'Package should include the API command transport contract');
+        foreach ([
+            'app/Api/Commands/ApiApplicationTransitionCommandService.php',
+            'app/Api/Commands/ApiApplicationTransitionInput.php',
+            'app/Api/Commands/ApiApplicationTransitionOutcome.php',
+            'app/Api/Commands/ApiCommandConflict.php',
+            'app/Api/Commands/ApiCommandFingerprint.php',
+            'app/Api/Commands/ApiCommandHasher.php',
+            'app/Api/Commands/ApiCommandIdempotencyStore.php',
+            'app/Api/Commands/ApiCommandReservation.php',
+            'app/Api/Commands/ApiCommandUnavailable.php',
+            'app/Api/Commands/InvalidApiCommandInput.php',
+            'database/migrations/054_api_application_transition_commands.sql',
+            'database/migrations/pgsql/018_api_application_transition_commands.sql',
+        ] as $commandPackagePath) {
+            assert_true(
+                str_contains($joined, '/' . $commandPackagePath),
+                'Package should include Phase 4B command foundation file: ' . $commandPackagePath,
+            );
+        }
+        foreach ([
+            'app/Api/Http/ApiApplicationTransitionRequestParser.php',
+            'app/Api/Http/ApiCursorCodec.php',
+            'app/Api/Http/ApiHttpException.php',
+            'app/Api/Http/ApiHttpRequest.php',
+            'app/Api/Http/ApiHttpResponse.php',
+            'app/Api/Http/ApiReadService.php',
+            'app/Api/Http/ApiRepresentationEtag.php',
+            'app/Api/Http/ApiStorageUnavailable.php',
+            'app/Api/Http/ApiV1Kernel.php',
+            'public/router.php',
+            'database/migrations/053_api_read_pagination_indexes.sql',
+            'database/migrations/pgsql/017_api_read_pagination_indexes.sql',
+            'contracts/openapi.v1.json',
+            'contracts/schemas/api-v1-opportunity.schema.json',
+            'contracts/schemas/api-v1-application.schema.json',
+            'contracts/schemas/api-v1-meta.schema.json',
+            'contracts/schemas/api-v1-page.schema.json',
+            'contracts/schemas/api-v1-error.schema.json',
+            'contracts/schemas/api-v1-service.schema.json',
+            'contracts/schemas/api-v1-opportunity-item.schema.json',
+            'contracts/schemas/api-v1-application-item.schema.json',
+            'contracts/schemas/api-v1-opportunity-collection.schema.json',
+            'contracts/schemas/api-v1-application-collection.schema.json',
+            'contracts/schemas/api-v1-application-transition-request.schema.json',
+            'contracts/examples/api-v1-service.json',
+            'contracts/examples/api-v1-opportunity-item.json',
+            'contracts/examples/api-v1-opportunity-collection.json',
+            'contracts/examples/api-v1-application-item.json',
+            'contracts/examples/api-v1-application-collection.json',
+            'contracts/examples/api-v1-application-transition-request.json',
+            'contracts/examples/api-v1-application-transition-response.json',
+            'contracts/examples/api-v1-error.json',
+            'contracts/fixtures/api-v1-opportunity.consumer.json',
+            'contracts/fixtures/api-v1-application.consumer.json',
+            'contracts/fixtures/api-v1-application-transition.consumer.json',
+            'contracts/fixtures/api-v1-opportunity.future-field.consumer.json',
+            'docs/api/v1.md',
+            'tests/api_http_contract.php',
+            'tests/validate_public_api_contracts.py',
+        ] as $apiPackagePath) {
+            assert_true(
+                str_contains($joined, '/' . $apiPackagePath),
+                'Package should include public API v1 file: ' . $apiPackagePath,
+            );
+        }
+        assert_true(str_contains($joined, '/tests/validate_public_event_schemas.py'), 'Package should include the independent Draft 2020-12 validator');
+        assert_true(str_contains($joined, '/tests/requirements-public-event-schema.txt'), 'Package should include pinned schema-validator test dependencies');
+        assert_true(str_contains($joined, '/tests/authorized_setup_recovery_fixture.php'), 'Package should include the authorized setup recovery test fixture');
         assert_true(str_contains($joined, '/tests/hosted_install_contract.php'), 'Package should include the hosted identity immutability contract');
         assert_true(str_contains($joined, '/tests/managed_hosting_contract.php'), 'Package should include the managed-hosting probe contract');
         assert_true(str_contains($joined, '/docs/environment.md'), 'Package should include environment variable guide');
-        assert_true(str_contains($joined, '/docs/releases/v0.1.0-alpha.3.md'), 'Package should include current release notes');
+        assert_true(str_contains($joined, '/docs/integrations/events.md'), 'Package should include the public event guide');
+        assert_true(str_contains($joined, '/docs/integrations/webhooks.md'), 'Package should include signed webhook operations and consumer guidance');
+        assert_true(str_contains($joined, '/docs/api/authentication.md'), 'Package should include API identity authentication guidance');
+        assert_true(str_contains($joined, '/docs/compatibility.md'), 'Package should include public compatibility rules');
+        assert_true(str_contains($joined, '/docs/security/integration-threat-model.md'), 'Package should include the integration threat model');
+        assert_true(str_contains($joined, '/contracts/public-integration.v1.json'), 'Package should include the frozen public integration declaration');
+        assert_true(str_contains($joined, '/contracts/schemas/application.status_changed.v1.schema.json'), 'Package should include the strict event schema');
+        assert_true(str_contains($joined, '/contracts/examples/application.status_changed.v1.json'), 'Package should include the public event example');
+        assert_true(str_contains($joined, '/contracts/fixtures/application.status_changed.v1.consumer.json'), 'Package should include the frozen consumer fixture');
+        assert_true(str_contains($joined, '/docs/releases/v0.1.0-alpha.4.md'), 'Package should include current release notes');
         assert_true(str_contains($joined, '/examples/env/local.env.example'), 'Package should include synthetic env template');
+        assert_true(str_contains($joined, '/examples/integrations/verify-webhook.php'), 'Package should include the dependency-light consumer verification example');
         assert_true(str_contains($joined, '/examples/deployment/apache-vhost.conf'), 'Package should include Apache deployment example');
         assert_true(str_contains($joined, '/examples/deployment/nginx-server.conf'), 'Package should include Nginx deployment example');
         assert_true(str_contains($joined, '/database/migrations/014_round_schedule_day.sql'), 'Package should include migrations');
+        assert_true(str_contains($joined, '/database/migrations/047_internal_event_deliveries.sql'), 'Package should include SQLite internal observer delivery migration');
+        assert_true(str_contains($joined, '/database/migrations/048_module_enabled_constraint.sql'), 'Package should include SQLite module enabled constraint migration');
+        assert_true(str_contains($joined, '/database/migrations/049_public_event_projection.sql'), 'Package should include SQLite public event migration');
+        assert_true(str_contains($joined, '/database/migrations/050_signed_webhook_integrations.sql'), 'Package should include SQLite signed webhook migration');
+        assert_true(str_contains($joined, '/database/migrations/051_webhook_claim_cursor.sql'), 'Package should include SQLite webhook fairness cursor migration');
+        assert_true(str_contains($joined, '/database/migrations/052_api_identity_foundation.sql'), 'Package should include SQLite API identity migration');
+        assert_true(str_contains($joined, '/database/migrations/053_api_read_pagination_indexes.sql'), 'Package should include SQLite API pagination indexes');
         assert_true(str_contains($joined, '/database/migrations/pgsql/001_portal_baseline.sql'), 'Package should include PostgreSQL migrations');
+        assert_true(str_contains($joined, '/database/migrations/pgsql/011_internal_event_deliveries.sql'), 'Package should include PostgreSQL internal observer delivery migration');
+        assert_true(str_contains($joined, '/database/migrations/pgsql/012_module_enabled_constraint.sql'), 'Package should include PostgreSQL module enabled constraint migration');
+        assert_true(str_contains($joined, '/database/migrations/pgsql/013_public_event_projection.sql'), 'Package should include PostgreSQL public event migration');
+        assert_true(str_contains($joined, '/database/migrations/pgsql/014_signed_webhook_integrations.sql'), 'Package should include PostgreSQL signed webhook migration');
+        assert_true(str_contains($joined, '/database/migrations/pgsql/015_webhook_claim_cursor.sql'), 'Package should include PostgreSQL webhook fairness cursor migration');
+        assert_true(str_contains($joined, '/database/migrations/pgsql/016_api_identity_foundation.sql'), 'Package should include PostgreSQL API identity migration');
+        assert_true(str_contains($joined, '/database/migrations/pgsql/017_api_read_pagination_indexes.sql'), 'Package should include PostgreSQL API pagination indexes');
         assert_true(str_contains($joined, '/data/.gitkeep'), 'Package should keep an empty data directory marker');
         assert_true(!str_contains($joined, '.legacy-private'), 'Package should exclude private archive material');
         assert_true(!str_contains($joined, 'data/app.sqlite'), 'Package should exclude runtime SQLite data');
@@ -2021,7 +2679,126 @@ test_case('release package includes public source and excludes private runtime d
             assert_same(0, $verifyCode, 'Package verifier should accept matching checksum: ' . $archivePath . ' ' . $verifyErr);
             assert_true(str_contains($verifyOut, 'Package checksum verified'), 'Package verifier should report checksum verification');
             assert_true(str_contains($verifyOut, 'Package archive inspected'), 'Package verifier should inspect archive structure');
+            assert_true(str_contains($verifyOut, 'Package integration JSON verified'), 'Package verifier should validate public integration JSON');
         }
+
+        $tarArchive = new PharData($tarPath);
+        $tarArchive->extractTo($tarExtractDir);
+        $tarPackageRoot = $tarExtractDir . '/' . $rootName;
+        [$tarPublicationCode, $tarPublicationOut, $tarPublicationErr] = run_cli_from($tarPackageRoot, ['publication-check']);
+        assert_same(0, $tarPublicationCode, 'Git-free extracted tarball publication check should pass: ' . $tarPublicationErr);
+        assert_true(str_contains($tarPublicationOut, 'Public integration JSON'), 'Extracted tarball should validate public integration JSON');
+        $tarContractTmp = $tarExtractDir . '/public-event-tmp';
+        assert_true(mkdir($tarContractTmp, 0700, true), 'Could not create extracted tarball contract temp directory');
+        [$tarContractCode, $tarContractOut, $tarContractErr] = run_php_from($tarPackageRoot, 'tests/public_event_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $tarContractTmp,
+        ]);
+        assert_same(0, $tarContractCode, 'Git-free extracted tarball public event contract should pass: ' . $tarContractErr);
+        assert_true(str_contains($tarContractOut, 'PASS public event contract (sqlite'), 'Extracted tarball should run the portable public event contract');
+        $tarWebhookTmp = $tarExtractDir . '/webhook-delivery-tmp';
+        assert_true(mkdir($tarWebhookTmp, 0700, true), 'Could not create extracted tarball webhook contract temp directory');
+        [$tarWebhookCode, $tarWebhookOut, $tarWebhookErr] = run_php_from($tarPackageRoot, 'tests/webhook_delivery_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $tarWebhookTmp,
+        ]);
+        assert_same(0, $tarWebhookCode, 'Git-free extracted tarball webhook delivery contract should pass: ' . $tarWebhookErr);
+        assert_true(str_contains($tarWebhookOut, 'PASS signed webhook delivery contract (sqlite'), 'Extracted tarball should run the portable webhook delivery contract');
+        $tarWebhookConcurrencyTmp = $tarExtractDir . '/webhook-concurrency-tmp';
+        assert_true(mkdir($tarWebhookConcurrencyTmp, 0700, true), 'Could not create extracted tarball webhook concurrency temp directory');
+        [$tarWebhookConcurrencyCode, $tarWebhookConcurrencyOut, $tarWebhookConcurrencyErr] = run_php_from($tarPackageRoot, 'tests/webhook_delivery_concurrency_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $tarWebhookConcurrencyTmp,
+        ]);
+        assert_same(0, $tarWebhookConcurrencyCode, 'Git-free extracted tarball webhook concurrency contract should pass: ' . $tarWebhookConcurrencyErr);
+        assert_true(str_contains($tarWebhookConcurrencyOut, 'PASS webhook delivery concurrency contract (sqlite'), 'Extracted tarball should run the portable webhook concurrency contract');
+        $tarWebhookRevokeTmp = $tarExtractDir . '/webhook-revoke-concurrency-tmp';
+        assert_true(mkdir($tarWebhookRevokeTmp, 0700, true), 'Could not create extracted tarball webhook revoke concurrency temp directory');
+        [$tarWebhookRevokeCode, $tarWebhookRevokeOut, $tarWebhookRevokeErr] = run_php_from($tarPackageRoot, 'tests/webhook_revoke_completion_concurrency_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $tarWebhookRevokeTmp,
+        ]);
+        assert_same(0, $tarWebhookRevokeCode, 'Git-free extracted tarball webhook revoke concurrency contract should pass: ' . $tarWebhookRevokeErr);
+        assert_true(str_contains($tarWebhookRevokeOut, 'PASS webhook revoke/completion concurrency contract (sqlite'), 'Extracted tarball should run portable webhook revoke/completion fencing');
+        $tarWebhookCaptureTmp = $tarExtractDir . '/webhook-capture-revoke-tmp';
+        assert_true(mkdir($tarWebhookCaptureTmp, 0700, true), 'Could not create extracted tarball webhook capture/revoke temp directory');
+        [$tarWebhookCaptureCode, $tarWebhookCaptureOut, $tarWebhookCaptureErr] = run_php_from($tarPackageRoot, 'tests/webhook_capture_revoke_concurrency_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $tarWebhookCaptureTmp,
+        ]);
+        assert_same(0, $tarWebhookCaptureCode, 'Git-free extracted tarball webhook capture/revoke contract should pass: ' . $tarWebhookCaptureErr);
+        assert_true(str_contains($tarWebhookCaptureOut, 'PASS webhook capture/revoke and fairness contract (sqlite'), 'Extracted tarball should run portable capture/revoke serialization and durable fairness');
+        $tarReceiverTmp = $tarExtractDir . '/webhook-receiver-tmp';
+        assert_true(mkdir($tarReceiverTmp, 0700, true), 'Could not create extracted tarball receiver contract temp directory');
+        [$tarReceiverCode, $tarReceiverOut, $tarReceiverErr] = run_php_from(
+            $tarPackageRoot,
+            'tests/webhook_receiver_example_contract.php',
+            ['TMPDIR' => $tarReceiverTmp],
+        );
+        assert_same(0, $tarReceiverCode, 'Git-free extracted tarball receiver example contract should pass: ' . $tarReceiverErr);
+        assert_true(str_contains($tarReceiverOut, 'PASS webhook receiver bounded-input example contract'), 'Extracted tarball should run the bounded receiver example contract');
+        $tarApiTmp = $tarExtractDir . '/api-identity-tmp';
+        assert_true(mkdir($tarApiTmp, 0700, true), 'Could not create extracted tarball API identity temp directory');
+        [$tarApiCode, $tarApiOut, $tarApiErr] = run_php_from($tarPackageRoot, 'tests/api_identity_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $tarApiTmp,
+        ]);
+        assert_same(0, $tarApiCode, 'Git-free extracted tarball API identity contract should pass: ' . $tarApiErr);
+        assert_true(str_contains($tarApiOut, 'PASS API identity contract (sqlite'), 'Extracted tarball should run the API identity contract');
+        [$tarApiConcurrencyCode, $tarApiConcurrencyOut, $tarApiConcurrencyErr] = run_php_from($tarPackageRoot, 'tests/api_identity_rotation_concurrency_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $tarApiTmp,
+        ]);
+        assert_same(0, $tarApiConcurrencyCode, 'Git-free extracted tarball API rotation concurrency contract should pass: ' . $tarApiConcurrencyErr);
+        assert_true(str_contains($tarApiConcurrencyOut, 'PASS API token rotation concurrency (sqlite'), 'Extracted tarball should run API rotation concurrency');
+        [$tarApiInputCode, $tarApiInputOut, $tarApiInputErr] = run_php_from(
+            $tarPackageRoot,
+            'tests/api_application_transition_input_contract.php',
+            ['TMPDIR' => $tarApiTmp],
+        );
+        assert_same(0, $tarApiInputCode, 'Git-free extracted tarball API command input contract should pass: ' . $tarApiInputErr);
+        assert_true(str_contains($tarApiInputOut, 'PASS API application transition strict input contract'), 'Extracted tarball should run API command input validation');
+        $tarApiHttpTmp = $tarExtractDir . '/api-http-tmp';
+        assert_true(mkdir($tarApiHttpTmp, 0700, true), 'Could not create extracted tarball API HTTP temp directory');
+        [$tarApiHttpCode, $tarApiHttpOut, $tarApiHttpErr] = run_php_from($tarPackageRoot, 'tests/api_http_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $tarApiHttpTmp,
+        ]);
+        assert_same(0, $tarApiHttpCode, 'Git-free extracted tarball API HTTP contract should pass: ' . $tarApiHttpErr);
+        assert_true(str_contains($tarApiHttpOut, 'PASS public API HTTP contract (sqlite'), 'Extracted tarball should run the public API HTTP contract');
+        $tarTransitionTmp = $tarExtractDir . '/application-transition-boundary-tmp';
+        assert_true(mkdir($tarTransitionTmp, 0700, true), 'Could not create extracted tarball application transition boundary temp directory');
+        [$tarTransitionCode, $tarTransitionOut, $tarTransitionErr] = run_php_from($tarPackageRoot, 'tests/application_transition_boundary_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $tarTransitionTmp,
+        ]);
+        assert_same(0, $tarTransitionCode, 'Git-free extracted tarball application transition boundary contract should pass: ' . $tarTransitionErr);
+        assert_true(str_contains($tarTransitionOut, 'PASS application transition boundary contract (sqlite shared transaction'), 'Extracted tarball should run the application transition boundary contract');
+        $tarCommandTmp = $tarExtractDir . '/api-command-tmp';
+        assert_true(mkdir($tarCommandTmp, 0700, true), 'Could not create extracted tarball API command temp directory');
+        [$tarCommandCode, $tarCommandOut, $tarCommandErr] = run_php_from($tarPackageRoot, 'tests/api_application_transition_command_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $tarCommandTmp,
+        ]);
+        assert_same(0, $tarCommandCode, 'Git-free extracted tarball API command contract should pass: ' . $tarCommandErr);
+        assert_true(str_contains($tarCommandOut, 'PASS API application transition command contract (sqlite'), 'Extracted tarball should run the API command contract');
+        [$tarCommandRaceCode, $tarCommandRaceOut, $tarCommandRaceErr] = run_php_from($tarPackageRoot, 'tests/api_application_transition_command_concurrency_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $tarCommandTmp,
+        ]);
+        assert_same(0, $tarCommandRaceCode, 'Git-free extracted tarball API command concurrency contract should pass: ' . $tarCommandRaceErr);
+        assert_true(str_contains($tarCommandRaceOut, 'PASS API application transition command concurrency (sqlite'), 'Extracted tarball should run API command same-key concurrency');
 
         $zipArchive = new PharData($zipPath);
         $zipArchive->extractTo($extractDir);
@@ -2032,6 +2809,117 @@ test_case('release package includes public source and excludes private runtime d
         [$publicationCode, $publicationOut, $publicationErr] = run_cli_from($packageRoot, ['publication-check']);
         assert_same(0, $publicationCode, 'Git-free extracted package publication check should pass: ' . $publicationErr);
         assert_true(str_contains($publicationOut, 'OK: Required release files are present.'), 'Extracted package publication check should report success');
+        $zipContractTmp = $extractDir . '/public-event-tmp';
+        assert_true(mkdir($zipContractTmp, 0700, true), 'Could not create extracted ZIP contract temp directory');
+        [$packageContractCode, $packageContractOut, $packageContractErr] = run_php_from($packageRoot, 'tests/public_event_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $zipContractTmp,
+        ]);
+        assert_same(0, $packageContractCode, 'Git-free extracted ZIP public event contract should pass: ' . $packageContractErr);
+        assert_true(str_contains($packageContractOut, 'PASS public event contract (sqlite'), 'Extracted ZIP should run the portable public event contract');
+        $zipWebhookTmp = $extractDir . '/webhook-delivery-tmp';
+        assert_true(mkdir($zipWebhookTmp, 0700, true), 'Could not create extracted ZIP webhook contract temp directory');
+        [$packageWebhookCode, $packageWebhookOut, $packageWebhookErr] = run_php_from($packageRoot, 'tests/webhook_delivery_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $zipWebhookTmp,
+        ]);
+        assert_same(0, $packageWebhookCode, 'Git-free extracted ZIP webhook delivery contract should pass: ' . $packageWebhookErr);
+        assert_true(str_contains($packageWebhookOut, 'PASS signed webhook delivery contract (sqlite'), 'Extracted ZIP should run the portable webhook delivery contract');
+        $zipWebhookConcurrencyTmp = $extractDir . '/webhook-concurrency-tmp';
+        assert_true(mkdir($zipWebhookConcurrencyTmp, 0700, true), 'Could not create extracted ZIP webhook concurrency temp directory');
+        [$packageWebhookConcurrencyCode, $packageWebhookConcurrencyOut, $packageWebhookConcurrencyErr] = run_php_from($packageRoot, 'tests/webhook_delivery_concurrency_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $zipWebhookConcurrencyTmp,
+        ]);
+        assert_same(0, $packageWebhookConcurrencyCode, 'Git-free extracted ZIP webhook concurrency contract should pass: ' . $packageWebhookConcurrencyErr);
+        assert_true(str_contains($packageWebhookConcurrencyOut, 'PASS webhook delivery concurrency contract (sqlite'), 'Extracted ZIP should run the portable webhook concurrency contract');
+        $zipWebhookRevokeTmp = $extractDir . '/webhook-revoke-concurrency-tmp';
+        assert_true(mkdir($zipWebhookRevokeTmp, 0700, true), 'Could not create extracted ZIP webhook revoke concurrency temp directory');
+        [$packageWebhookRevokeCode, $packageWebhookRevokeOut, $packageWebhookRevokeErr] = run_php_from($packageRoot, 'tests/webhook_revoke_completion_concurrency_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $zipWebhookRevokeTmp,
+        ]);
+        assert_same(0, $packageWebhookRevokeCode, 'Git-free extracted ZIP webhook revoke concurrency contract should pass: ' . $packageWebhookRevokeErr);
+        assert_true(str_contains($packageWebhookRevokeOut, 'PASS webhook revoke/completion concurrency contract (sqlite'), 'Extracted ZIP should run portable webhook revoke/completion fencing');
+        $zipWebhookCaptureTmp = $extractDir . '/webhook-capture-revoke-tmp';
+        assert_true(mkdir($zipWebhookCaptureTmp, 0700, true), 'Could not create extracted ZIP webhook capture/revoke temp directory');
+        [$packageWebhookCaptureCode, $packageWebhookCaptureOut, $packageWebhookCaptureErr] = run_php_from($packageRoot, 'tests/webhook_capture_revoke_concurrency_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $zipWebhookCaptureTmp,
+        ]);
+        assert_same(0, $packageWebhookCaptureCode, 'Git-free extracted ZIP webhook capture/revoke contract should pass: ' . $packageWebhookCaptureErr);
+        assert_true(str_contains($packageWebhookCaptureOut, 'PASS webhook capture/revoke and fairness contract (sqlite'), 'Extracted ZIP should run portable capture/revoke serialization and durable fairness');
+        $zipReceiverTmp = $extractDir . '/webhook-receiver-tmp';
+        assert_true(mkdir($zipReceiverTmp, 0700, true), 'Could not create extracted ZIP receiver contract temp directory');
+        [$packageReceiverCode, $packageReceiverOut, $packageReceiverErr] = run_php_from(
+            $packageRoot,
+            'tests/webhook_receiver_example_contract.php',
+            ['TMPDIR' => $zipReceiverTmp],
+        );
+        assert_same(0, $packageReceiverCode, 'Git-free extracted ZIP receiver example contract should pass: ' . $packageReceiverErr);
+        assert_true(str_contains($packageReceiverOut, 'PASS webhook receiver bounded-input example contract'), 'Extracted ZIP should run the bounded receiver example contract');
+        $zipApiTmp = $extractDir . '/api-identity-tmp';
+        assert_true(mkdir($zipApiTmp, 0700, true), 'Could not create extracted ZIP API identity temp directory');
+        [$packageApiCode, $packageApiOut, $packageApiErr] = run_php_from($packageRoot, 'tests/api_identity_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $zipApiTmp,
+        ]);
+        assert_same(0, $packageApiCode, 'Git-free extracted ZIP API identity contract should pass: ' . $packageApiErr);
+        assert_true(str_contains($packageApiOut, 'PASS API identity contract (sqlite'), 'Extracted ZIP should run the API identity contract');
+        [$packageApiConcurrencyCode, $packageApiConcurrencyOut, $packageApiConcurrencyErr] = run_php_from($packageRoot, 'tests/api_identity_rotation_concurrency_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $zipApiTmp,
+        ]);
+        assert_same(0, $packageApiConcurrencyCode, 'Git-free extracted ZIP API rotation concurrency contract should pass: ' . $packageApiConcurrencyErr);
+        assert_true(str_contains($packageApiConcurrencyOut, 'PASS API token rotation concurrency (sqlite'), 'Extracted ZIP should run API rotation concurrency');
+        [$packageApiInputCode, $packageApiInputOut, $packageApiInputErr] = run_php_from(
+            $packageRoot,
+            'tests/api_application_transition_input_contract.php',
+            ['TMPDIR' => $zipApiTmp],
+        );
+        assert_same(0, $packageApiInputCode, 'Git-free extracted ZIP API command input contract should pass: ' . $packageApiInputErr);
+        assert_true(str_contains($packageApiInputOut, 'PASS API application transition strict input contract'), 'Extracted ZIP should run API command input validation');
+        $zipApiHttpTmp = $extractDir . '/api-http-tmp';
+        assert_true(mkdir($zipApiHttpTmp, 0700, true), 'Could not create extracted ZIP API HTTP temp directory');
+        [$packageApiHttpCode, $packageApiHttpOut, $packageApiHttpErr] = run_php_from($packageRoot, 'tests/api_http_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $zipApiHttpTmp,
+        ]);
+        assert_same(0, $packageApiHttpCode, 'Git-free extracted ZIP API HTTP contract should pass: ' . $packageApiHttpErr);
+        assert_true(str_contains($packageApiHttpOut, 'PASS public API HTTP contract (sqlite'), 'Extracted ZIP should run the public API HTTP contract');
+        $zipTransitionTmp = $extractDir . '/application-transition-boundary-tmp';
+        assert_true(mkdir($zipTransitionTmp, 0700, true), 'Could not create extracted ZIP application transition boundary temp directory');
+        [$packageTransitionCode, $packageTransitionOut, $packageTransitionErr] = run_php_from($packageRoot, 'tests/application_transition_boundary_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $zipTransitionTmp,
+        ]);
+        assert_same(0, $packageTransitionCode, 'Git-free extracted ZIP application transition boundary contract should pass: ' . $packageTransitionErr);
+        assert_true(str_contains($packageTransitionOut, 'PASS application transition boundary contract (sqlite shared transaction'), 'Extracted ZIP should run the application transition boundary contract');
+        $zipCommandTmp = $extractDir . '/api-command-tmp';
+        assert_true(mkdir($zipCommandTmp, 0700, true), 'Could not create extracted ZIP API command temp directory');
+        [$packageCommandCode, $packageCommandOut, $packageCommandErr] = run_php_from($packageRoot, 'tests/api_application_transition_command_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $zipCommandTmp,
+        ]);
+        assert_same(0, $packageCommandCode, 'Git-free extracted ZIP API command contract should pass: ' . $packageCommandErr);
+        assert_true(str_contains($packageCommandOut, 'PASS API application transition command contract (sqlite'), 'Extracted ZIP should run the API command contract');
+        [$packageCommandRaceCode, $packageCommandRaceOut, $packageCommandRaceErr] = run_php_from($packageRoot, 'tests/api_application_transition_command_concurrency_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $zipCommandTmp,
+        ]);
+        assert_same(0, $packageCommandRaceCode, 'Git-free extracted ZIP API command concurrency contract should pass: ' . $packageCommandRaceErr);
+        assert_true(str_contains($packageCommandRaceOut, 'PASS API application transition command concurrency (sqlite'), 'Extracted ZIP should run API command same-key concurrency');
 
         $packageRuntimeFixture = $packageRoot . '/data/restore-staging/package-contract.sqlite';
         try {
@@ -2102,6 +2990,7 @@ test_case('release package includes public source and excludes private runtime d
     } finally {
         remove_tree($target);
         remove_tree($extractDir);
+        remove_tree($tarExtractDir);
         if (is_file($packageDb)) {
             unlink($packageDb);
         }
@@ -2343,6 +3232,36 @@ test_case('doctor enforces local runtime requirements before install', function 
     }
 });
 
+test_case('doctor reports pending migrations before querying newer health schemas', function (): void {
+    $db = sys_get_temp_dir() . '/cpe-doctor-pending-migrations-' . bin2hex(random_bytes(4)) . '.sqlite';
+    try {
+        [$installCode, , $installError] = run_cli(['install-demo'], ['CPE_DB_PATH' => $db]);
+        assert_same(0, $installCode, 'Pending-migration doctor fixture should install: ' . $installError);
+
+        $pdo = new PDO('sqlite:' . $db);
+        $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+        $pdo->exec("DELETE FROM migrations WHERE migration = '052_api_identity_foundation.sql'");
+        $pdo->exec('DROP TABLE api_access_tokens');
+        $pdo = null;
+
+        [$code, $stdout, $stderr] = run_cli(['doctor'], ['CPE_DB_PATH' => $db]);
+        assert_same(1, $code, 'Doctor should fail while installed migrations are pending');
+        assert_true(str_contains($stdout, 'INFO installed: yes'), 'Doctor should recognize the installed pending-migration database');
+        assert_true(str_contains($stderr, 'Database migrations are pending. Run `php placement upgrade`.'), 'Doctor should emit fixed upgrade guidance');
+        foreach (['no such table', 'SQLSTATE', 'CPE_CLI_COMMAND_FAILED', 'Reference:'] as $rawFailure) {
+            assert_true(!str_contains($stdout . $stderr, $rawFailure), 'Doctor exposed a raw health-query failure while migrations were pending: ' . $rawFailure);
+        }
+
+        $pdo = new PDO('sqlite:' . $db);
+        assert_same(0, (int) $pdo->query("SELECT COUNT(*) FROM migrations WHERE migration = '052_api_identity_foundation.sql'")->fetchColumn(), 'Doctor applied a pending migration');
+        assert_same(0, (int) $pdo->query("SELECT COUNT(*) FROM sqlite_master WHERE type = 'table' AND name = 'api_access_tokens'")->fetchColumn(), 'Doctor recreated pending API storage');
+    } finally {
+        if (is_file($db)) {
+            unlink($db);
+        }
+    }
+});
+
 test_case('system requirements preflight fails closed for installer reuse', function (): void {
     $requirements = new SystemRequirements();
     assert_true($requirements->isReady(), 'Current test runtime should satisfy install requirements');
@@ -2363,7 +3282,7 @@ test_case('serve command documents the local PHP server wrapper', function (): v
     [$helpCode, $helpOut, $helpErr] = run_cli(['serve', '--help']);
     assert_same(0, $helpCode, 'Serve help should exit cleanly: ' . $helpErr);
     assert_true(str_contains($helpOut, 'php placement serve'), 'Serve help should show wrapper command');
-    assert_true(str_contains($helpOut, 'php -S 127.0.0.1:8000 -t public'), 'Serve help should disclose built-in server equivalent');
+    assert_true(str_contains($helpOut, 'php -S 127.0.0.1:8000 -t public public/router.php'), 'Serve help should disclose the clean-path development-router equivalent');
 
     [$badCode, $badOut, $badErr] = run_cli(['serve', 'not-a-port']);
     assert_same(1, $badCode, 'Invalid serve address should fail');
@@ -2489,7 +3408,7 @@ test_case('stale board moves are rejected before transition', function (): void 
     $companyId = $service->saveCompany(['code' => 'STL', 'name' => 'Stale Company'], 1);
     $service->saveApplication($candidateId, $companyId, 'scheduled', null, 1);
     $appId = (int) $pdo->query("SELECT id FROM applications WHERE candidate_id = {$candidateId} AND company_id = {$companyId}")->fetchColumn();
-    $pdo->exec("UPDATE applications SET current_status = 'intransit' WHERE id = {$appId}");
+    $pdo->exec("UPDATE applications SET current_status = 'intransit', aggregate_version = aggregate_version + 1 WHERE id = {$appId}");
     try {
         $service->moveNext($appId, 1, 'admin', 'stale form submit', 'scheduled');
         throw new RuntimeException('Expected stale board failure');
@@ -2642,7 +3561,7 @@ test_case('sensitive operational pages are hidden from restricted roles', functi
             assert_true(str_contains($e->getMessage(), 'Only administrators'), 'Role gate should explain admin-only denial');
         }
         $companyNav = render_layout_for_test(['title' => 'Company Nav', 'content' => '']);
-        foreach (['?r=records', '?r=reports', '?r=import', '?r=preferences', '?r=wanted', '?r=admin', '?r=system'] as $forbiddenLink) {
+        foreach (['?r=records', '?r=operations', '?r=reports', '?r=import', '?r=preferences', '?r=wanted', '?r=admin', '?r=integrations', '?r=system'] as $forbiddenLink) {
             assert_true(!str_contains($companyNav, $forbiddenLink), 'Company nav should hide ' . $forbiddenLink);
         }
         assert_true(str_contains($companyNav, '?r=notifications'), 'Company nav should keep notifications');
@@ -2670,7 +3589,7 @@ test_case('sensitive operational pages are hidden from restricted roles', functi
 
         $_SESSION['user_id'] = $adminUserId;
         $adminNav = render_layout_for_test(['title' => 'Admin Nav', 'content' => '']);
-        foreach (['?r=records', '?r=reports', '?r=import', '?r=preferences', '?r=wanted', '?r=admin', '?r=system'] as $expectedLink) {
+        foreach (['?r=records', '?r=operations', '?r=reports', '?r=import', '?r=preferences', '?r=wanted', '?r=admin', '?r=system'] as $expectedLink) {
             assert_true(str_contains($adminNav, $expectedLink), 'Admin nav should include ' . $expectedLink);
         }
     } finally {
@@ -5221,7 +6140,7 @@ test_case('opted-out candidates cannot move forward', function (): void {
 test_case('placement freeze blocks non-admin placement but allows admin override', function (): void {
     $pdo = Database::connection();
     $appId = (int) $pdo->query("SELECT id FROM applications WHERE current_status != 'placed' LIMIT 1")->fetchColumn();
-    $pdo->exec("UPDATE applications SET current_status = 'sent' WHERE id = {$appId}");
+    $pdo->exec("UPDATE applications SET current_status = 'sent', aggregate_version = aggregate_version + 1 WHERE id = {$appId}");
     $pdo->exec("INSERT INTO settings (key, value) VALUES ('placement_freeze', '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value");
     try {
         (new PlacementService($pdo))->moveNext($appId, 1, 'placement');
@@ -5238,19 +6157,18 @@ test_case('offer upgrades are blocked unless enabled', function (): void {
     $pdo = Database::connection();
     $candidateId = (int) $pdo->query("SELECT id FROM candidates WHERE placed_company_id IS NOT NULL LIMIT 1")->fetchColumn();
     $companyId = (int) $pdo->query("SELECT id FROM companies WHERE id != (SELECT placed_company_id FROM candidates WHERE id = {$candidateId}) LIMIT 1")->fetchColumn();
-    $stmt = $pdo->prepare('INSERT OR IGNORE INTO applications (candidate_id, company_id, current_status, created_at, updated_at) VALUES (?, ?, ?, ?, ?)');
-    $stmt->execute([$candidateId, $companyId, 'sent', cpe_now(), cpe_now()]);
+    $service = new PlacementService($pdo);
+    $service->saveApplication($candidateId, $companyId, 'sent', null, 1);
     $appId = (int) $pdo->query("SELECT id FROM applications WHERE candidate_id = {$candidateId} AND company_id = {$companyId}")->fetchColumn();
-    $pdo->exec("UPDATE applications SET current_status = 'sent' WHERE id = {$appId}");
     $pdo->exec("INSERT INTO settings (key, value) VALUES ('allow_offer_upgrade', '0') ON CONFLICT(key) DO UPDATE SET value = excluded.value");
     try {
-        (new PlacementService($pdo))->moveNext($appId, 1, 'admin');
+        $service->moveNext($appId, 1, 'admin');
         throw new RuntimeException('Expected upgrade failure');
     } catch (RuntimeException $e) {
         assert_true(str_contains($e->getMessage(), 'upgrades are disabled'), 'Expected upgrade message');
     }
     $pdo->exec("INSERT INTO settings (key, value) VALUES ('allow_offer_upgrade', '1') ON CONFLICT(key) DO UPDATE SET value = excluded.value");
-    (new PlacementService($pdo))->moveNext($appId, 1, 'admin');
+    $service->moveNext($appId, 1, 'admin');
     assert_same('placed', $pdo->query("SELECT current_status FROM applications WHERE id = {$appId}")->fetchColumn());
 });
 

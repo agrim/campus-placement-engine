@@ -14,7 +14,7 @@ Date: 2026-06-27
 The destination is a Career Services Portal with Placement Operations as its
 first-class flagship module. Colleges can run the same release themselves or use
 a managed service. Optional sections are modules, but the downloadable product
-does not become a generic plugin framework or empty shell.
+does not become a generic executable-extension framework or empty shell.
 
 The implementation now follows one deliberately small technology policy:
 
@@ -399,7 +399,7 @@ The project should ship a few starter workflows:
 
 Each starter profile should define workflow stages, roles, permissions, forms,
 boards, reports, imports, and demo data. Keep this as simple data configuration,
-not as a plugin marketplace or a separate platform layer.
+not as an extension marketplace or a separate platform layer.
 
 ## Target Domain Model
 
@@ -693,7 +693,7 @@ Recommended future extension points:
 - Read-only API for institutional dashboards.
 - Webhooks for approved integrations.
 
-For v1, do not promise a broad plugin ecosystem. Publish a stable config shape
+For v1, do not promise a broad executable-extension ecosystem. Publish a stable config shape
 and keep the code easy to extend later.
 
 ## Data Model Principles

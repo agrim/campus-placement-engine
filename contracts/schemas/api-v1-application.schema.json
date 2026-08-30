@@ -1,0 +1,25 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cpe:api:v1:application",
+  "title": "Campus Placement Engine API v1 application",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "participant_id",
+    "opportunity_id",
+    "status",
+    "aggregate_version",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "id": { "type": "string", "pattern": "^application_[a-f0-9]{32}$" },
+    "participant_id": { "type": "string", "pattern": "^participant_[a-f0-9]{32}$" },
+    "opportunity_id": { "type": "string", "pattern": "^opportunity_[a-f0-9]{32}$" },
+    "status": { "type": "string" },
+    "aggregate_version": { "type": "integer", "minimum": 1 },
+    "created_at": { "$ref": "urn:cpe:api:v1:meta#/$defs/timestamp" },
+    "updated_at": { "$ref": "urn:cpe:api:v1:meta#/$defs/timestamp" }
+  }
+}

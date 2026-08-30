@@ -91,6 +91,57 @@ final class DatabaseOwnership
         self::assertLegacyClaimAllowed($relations, 'main', self::OWNER_ENGINE_INSTITUTION);
     }
 
+    public static function targetIsEmptyStrict(PDO $pdo): bool
+    {
+        $driver = strtolower((string) $pdo->getAttribute(PDO::ATTR_DRIVER_NAME));
+        if (!in_array($driver, ['pgsql', 'sqlite'], true)) {
+            throw new RuntimeException(DatabaseLock::ERROR_UNSUPPORTED . ': unsupported database driver.');
+        }
+        if ($driver === 'pgsql') {
+            $schema = trim((string) $pdo->query('SELECT current_schema()')->fetchColumn());
+            if ($schema === '' || self::isSystemPostgresSchema($schema)) {
+                throw new RuntimeException(self::ERROR_AMBIGUOUS . ': application schema is unavailable.');
+            }
+        }
+        return self::relations($pdo, $driver) === [];
+    }
+
+    /** Read-only ownership proof for request-time installation-state checks. */
+    public static function assertOwnedByReadOnlyStrict(PDO $pdo, string $expectedOwner): void
+    {
+        if (!in_array($expectedOwner, [self::OWNER_ENGINE_INSTITUTION, self::OWNER_CLOUD_CONTROL_PLANE], true)) {
+            throw new RuntimeException(self::ERROR_CORRUPT . ': unsupported expected database owner.');
+        }
+        $driver = strtolower((string) $pdo->getAttribute(PDO::ATTR_DRIVER_NAME));
+        if (!in_array($driver, ['pgsql', 'sqlite'], true)) {
+            throw new RuntimeException(DatabaseLock::ERROR_UNSUPPORTED . ': unsupported database driver.');
+        }
+        $schema = $driver === 'sqlite'
+            ? 'main'
+            : trim((string) $pdo->query('SELECT current_schema()')->fetchColumn());
+        if ($schema === '' || ($driver === 'pgsql' && self::isSystemPostgresSchema($schema))) {
+            throw new RuntimeException(self::ERROR_AMBIGUOUS . ': application schema is unavailable.');
+        }
+        $relations = self::relations($pdo, $driver);
+        $ownership = array_values(array_filter(
+            $relations,
+            static fn (array $relation): bool => $relation['name'] === self::TABLE,
+        ));
+        if (count($ownership) !== 1 || !in_array($ownership[0]['kind'], ['r', 'p'], true)) {
+            throw new RuntimeException(self::ERROR_AMBIGUOUS . ': canonical database ownership is unavailable.');
+        }
+        self::verifyTableAndRow(
+            $pdo,
+            $driver,
+            $ownership[0]['schema'],
+            $schema,
+            $expectedOwner,
+            $relations,
+            false,
+            false,
+        );
+    }
+
     private static function claimOrVerifyWithInstalledIdentity(
         PDO $pdo,
         string $expectedOwner,
@@ -284,6 +335,8 @@ final class DatabaseOwnership
         string $currentSchema,
         string $expectedOwner,
         array $relations,
+        bool $lockRows = true,
+        bool $assertConstraints = true,
     ): void {
         self::assertTableShape($pdo, $driver, $ownershipSchema);
         $table = self::qualifiedTable($driver, $ownershipSchema);
@@ -292,18 +345,20 @@ final class DatabaseOwnership
             : '';
         $rows = $pdo->query(
             'SELECT singleton_id, owner_kind, contract_version, claimed_at' . $storageColumns
-            . ' FROM ' . $table . ($driver === 'pgsql' ? ' FOR UPDATE' : ''),
+            . ' FROM ' . $table . ($driver === 'pgsql' && $lockRows ? ' FOR UPDATE' : ''),
         )->fetchAll(PDO::FETCH_ASSOC);
         if (count($rows) !== 1) {
             throw new RuntimeException(self::ERROR_CORRUPT . ': database ownership table must contain exactly one row.');
         }
         self::assertOwnershipRow($rows[0], $expectedOwner, $driver);
-        self::assertConstraintInvariants(
-            $pdo,
-            $table,
-            (string) $rows[0]['owner_kind'],
-            (string) $rows[0]['claimed_at'],
-        );
+        if ($assertConstraints) {
+            self::assertConstraintInvariants(
+                $pdo,
+                $table,
+                (string) $rows[0]['owner_kind'],
+                (string) $rows[0]['claimed_at'],
+            );
+        }
 
         if ($driver === 'pgsql' && $ownershipSchema !== $currentSchema) {
             throw new RuntimeException(self::ERROR_AMBIGUOUS . ': search_path does not resolve to the canonical ownership schema.');

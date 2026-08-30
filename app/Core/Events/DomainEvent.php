@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Core\Events;
 
+/** @internal Private in-process event; external consumers use PublicEventEnvelope. */
 final class DomainEvent
 {
     public function __construct(
@@ -13,6 +14,7 @@ final class DomainEvent
         public readonly string $moduleKey,
         public readonly array $payload,
         public readonly string $occurredAt,
+        public readonly ?PublicEventProjection $publicProjection = null,
     ) {
     }
 }

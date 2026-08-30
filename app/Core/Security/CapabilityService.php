@@ -34,17 +34,17 @@ final class CapabilityService
         return array_values(array_unique($this->roleCapabilities[$role] ?? []));
     }
 
-    public static function fromDatabase(PDO $pdo, array $fallback, ?ModuleRegistry $modules = null): self
+    public static function fromDatabase(PDO $pdo, ?ModuleRegistry $modules = null): self
     {
         try {
             $roleCapabilities = [];
             foreach ($pdo->query('SELECT role_key, capability FROM role_capabilities ORDER BY role_key, capability')->fetchAll() as $row) {
                 $roleCapabilities[(string) $row['role_key']][] = (string) $row['capability'];
             }
-            return new self($roleCapabilities !== [] ? $roleCapabilities : $fallback, $modules);
         } catch (\Throwable) {
-            return new self($fallback, $modules);
+            throw AuthorizationUnavailable::capabilityState();
         }
+        return new self($roleCapabilities, $modules);
     }
 
     private function moduleOwner(string $capability): ?string

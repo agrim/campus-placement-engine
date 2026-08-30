@@ -6,6 +6,7 @@ namespace App\Support;
 
 use App\Core\Http\AuthorizationException;
 use App\Core\Http\UserVisibleException;
+use App\Core\Security\AuthorizationUnavailable;
 use PDO;
 
 final class Auth
@@ -18,6 +19,15 @@ final class Auth
         'application.auto_handoff' => 'Application handoff completed.',
         'application.return_to_idle' => 'Application returned to idle.',
         'application.save' => 'Application saved.',
+        'api.disable' => 'Institution-local API disabled.',
+        'api.enable' => 'Institution-local API enabled.',
+        'api.retention.prune' => 'Expired API security telemetry pruned.',
+        'api.service_account.create' => 'API service account created.',
+        'api.service_account.disable' => 'API service account disabled.',
+        'api.service_account.enable' => 'API service account enabled.',
+        'api.service_account.revoke' => 'API service account and tokens revoked.',
+        'api.token.revoke' => 'API access token revoked.',
+        'api.token.rotate' => 'API access token rotated with bounded overlap.',
         'board_preference.clear' => 'Board preference cleared.',
         'board_preference.save' => 'Board preference saved.',
         'candidate.anonymize' => 'Candidate anonymized.',
@@ -31,6 +41,8 @@ final class Auth
         'import' => 'Import completed.',
         'import.rollback' => 'Import rollback completed.',
         'install' => 'Initial installation completed.',
+        'internal_event_delivery.replay' => 'Dead-lettered internal observer delivery replayed.',
+        'internal_event_fanout.replay' => 'Dead-lettered internal observer fanout replayed.',
         'login' => 'User signed in.',
         'login.sso' => 'User signed in through institutional SSO.',
         'notification.acknowledge' => 'Notification acknowledged.',
@@ -38,6 +50,7 @@ final class Auth
         'preference.create' => 'Preference request created.',
         'preference.resolve' => 'Preference request resolved.',
         'privacy.person_erased' => 'Portal privacy erasure completed.',
+        'public_event.dead_letter_replay' => 'Dead-lettered public event requeued for delivery.',
         'round_panelist.create' => 'Round panelist created.',
         'round_panelist.update' => 'Round panelist updated.',
         'round_schedule.create' => 'Round schedule created.',
@@ -55,6 +68,15 @@ final class Auth
         'wanted.resolve' => 'Wanted alert resolved.',
         'workflow.instances.migrate' => 'Workflow instances migrated.',
         'workflow.publish' => 'Workflow version published.',
+        'webhook.subscription.create' => 'Webhook integration created.',
+        'webhook.secret.generate' => 'Webhook signing secret generated.',
+        'webhook.secret.rotate' => 'Webhook signing secret rotated with a bounded overlap.',
+        'webhook.validation.start' => 'Webhook endpoint validation started.',
+        'webhook.validation.success' => 'Webhook endpoint validation succeeded.',
+        'webhook.subscription.activate' => 'Webhook integration activated.',
+        'webhook.subscription.disable' => 'Webhook integration disabled.',
+        'webhook.subscription.revoke' => 'Webhook integration and signing secrets revoked.',
+        'webhook.delivery.replay' => 'Dead-lettered webhook delivery replayed.',
     ];
 
     private const AUDIT_SUBJECT_TYPES = [
@@ -62,6 +84,9 @@ final class Auth
         'company_round', 'import', 'notification', 'person', 'preference_request', 'round_panelist',
         'round_schedule', 'slot_assignment', 'system', 'user', 'wanted_alert', 'workflow_version',
         'candidate_unavailability',
+        'internal_event_delivery', 'internal_event_fanout', 'public_event',
+        'webhook_subscription', 'webhook_delivery',
+        'api_service_account', 'api_access_token',
     ];
 
     private const AUDIT_SUBJECT_ALIASES = [
@@ -130,6 +155,8 @@ final class Auth
     {
         try {
             return \App\Core\Portal::context()->capabilities()->allows($user, $capability);
+        } catch (AuthorizationUnavailable $e) {
+            throw $e;
         } catch (\Throwable $e) {
             StructuredLogger::log('error', 'authorization.capability_resolution_failed', [
                 'capability' => $capability,
@@ -229,18 +256,41 @@ final class Auth
         self::audit($actorId, 'user.password_reset', 'user', $id, 'Password reset by administrator');
     }
 
-    public static function audit(?int $actorId, string $action, string $subjectType, ?int $subjectId, string $detail = ''): void
+    public static function audit(
+        ?int $actorId,
+        string $action,
+        string $subjectType,
+        ?int $subjectId,
+        string $detail = '',
+        ?PDO $pdo = null,
+        ?int $actorServiceAccountId = null,
+    ): void
     {
+        if ($actorId !== null && $actorServiceAccountId !== null) {
+            throw new \RuntimeException('Audit actor attribution must be exclusive.');
+        }
         $safeAction = isset(self::AUDIT_DETAILS[$action]) ? $action : 'audit.unclassified';
         $safeDetail = self::AUDIT_DETAILS[$action] ?? 'Unclassified audit event recorded.';
         $safeSubjectType = self::AUDIT_SUBJECT_ALIASES[$subjectType] ?? $subjectType;
         $safeSubjectType = in_array($safeSubjectType, self::AUDIT_SUBJECT_TYPES, true) ? $safeSubjectType : 'unknown';
         [$ipAddress, $userAgent] = self::requestMetadata();
-        $stmt = Database::connection()->prepare(
-            'INSERT INTO audit_logs (actor_user_id, action, subject_type, subject_id, detail, ip_address, user_agent, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+        $stmt = ($pdo ?? Database::connection())->prepare(
+            'INSERT INTO audit_logs
+             (actor_user_id, actor_service_account_id, action, subject_type, subject_id,
+              detail, ip_address, user_agent, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
         );
-        $stmt->execute([$actorId, $safeAction, $safeSubjectType, $subjectId, $safeDetail, $ipAddress, $userAgent, cpe_now()]);
+        $stmt->execute([
+            $actorId,
+            $actorServiceAccountId,
+            $safeAction,
+            $safeSubjectType,
+            $subjectId,
+            $safeDetail,
+            $ipAddress,
+            $userAgent,
+            cpe_now(),
+        ]);
     }
 
     private static function requestMetadata(): array

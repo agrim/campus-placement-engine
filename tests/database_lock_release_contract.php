@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 define('CPE_SKIP_HTTP_BOOTSTRAP', true);
 require __DIR__ . '/../app/bootstrap.php';
+require __DIR__ . '/authorized_setup_recovery_fixture.php';
 
 use App\Core\Persistence\DatabaseLock;
 use App\Core\Persistence\DatabaseLockException;
@@ -208,6 +209,7 @@ try {
     $afterMigration->exec('DROP FUNCTION cpe_test_unlock_migration()');
 
     $tenantPublicId = 'tenant_' . str_repeat('9', 32);
+    $recoveryAuthority = test_authorized_setup_recovery_authority();
     $installationPid = lock_release_backend_pid($afterMigration);
     lock_release_expect(
         static fn () => (new Installer(new LockReleaseInstallationObserver($afterMigration)))->installHosted([
@@ -217,7 +219,7 @@ try {
             'admin_email' => 'checked-release@example.test',
             'admin_password' => 'checked-release-password-123',
             'seed_demo' => '1',
-        ], $tenantPublicId),
+        ], $tenantPublicId, $recoveryAuthority),
         'Installation lock',
     );
     $afterInstallation = Database::connection();

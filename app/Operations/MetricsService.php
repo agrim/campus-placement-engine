@@ -4,6 +4,8 @@ declare(strict_types=1);
 
 namespace App\Operations;
 
+use App\Api\Operations\ApiHealthService;
+use App\Integrations\Webhooks\WebhookHealthService;
 use App\Support\Database;
 use PDO;
 
@@ -20,18 +22,38 @@ final class MetricsService
         foreach ($this->pdo->query('SELECT module_key, enabled FROM module_installations ORDER BY module_key')->fetchAll() as $row) {
             $modules[(string) $row['module_key']] = (int) $row['enabled'];
         }
+        $webhooks = (new WebhookHealthService($this->pdo))->snapshot();
+        $api = (new ApiHealthService($this->pdo))->snapshot();
         return [
             'app_version' => (string) cpe_config('app.version', '0.0.0'),
             'database_driver' => Database::driver(),
             'pending_migrations' => count(Database::pendingMigrations()),
-            'domain_events_pending' => $this->columnExists('domain_event_outbox', 'failed_at')
-                ? $this->count('SELECT COUNT(*) FROM domain_event_outbox WHERE processed_at IS NULL AND failed_at IS NULL')
-                : $this->count('SELECT COUNT(*) FROM domain_event_outbox WHERE processed_at IS NULL'),
-            'domain_events_dead_lettered' => $this->columnExists('domain_event_outbox', 'failed_at')
-                ? $this->count('SELECT COUNT(*) FROM domain_event_outbox WHERE failed_at IS NOT NULL')
+            'domain_events_pending' => $this->columnExists('domain_event_outbox', 'public_event_type')
+                ? $this->count(
+                    'SELECT COUNT(*) FROM domain_event_outbox
+                     WHERE public_event_type IS NOT NULL AND processed_at IS NULL AND failed_at IS NULL',
+                )
+                : 0,
+            'domain_events_dead_lettered' => $this->columnExists('domain_event_outbox', 'public_event_type')
+                ? $this->count(
+                    'SELECT COUNT(*) FROM domain_event_outbox
+                     WHERE public_event_type IS NOT NULL AND failed_at IS NOT NULL',
+                )
                 : 0,
             'notification_deliveries_queued' => $this->count("SELECT COUNT(*) FROM notification_deliveries WHERE status = 'queued'"),
             'notification_deliveries_failed' => $this->count("SELECT COUNT(*) FROM notification_deliveries WHERE status = 'failed'"),
+            'webhook_subscriptions_active' => (int) (($webhooks['states']['active'] ?? 0) + ($webhooks['states']['degraded'] ?? 0)),
+            'webhook_subscriptions_degraded' => (int) ($webhooks['states']['degraded'] ?? 0),
+            'webhook_deliveries_pending' => (int) $webhooks['pending'],
+            'webhook_deliveries_dead_lettered' => (int) $webhooks['dead_lettered'],
+            'webhook_worker_heartbeat_age_seconds' => $webhooks['worker_heartbeat_age_seconds'],
+            'api_enabled' => $api['enabled'] ? 1 : 0,
+            'api_service_accounts_enabled' => (int) ($api['states']['enabled'] ?? 0),
+            'api_service_accounts_disabled' => (int) ($api['states']['disabled'] ?? 0),
+            'api_service_accounts_revoked' => (int) ($api['states']['revoked'] ?? 0),
+            'api_tokens_usable' => (int) $api['usable_tokens'],
+            'api_key_versions_missing' => (int) $api['missing_key_versions'],
+            'api_requests_denied_24h' => (int) $api['denied_requests_24h'],
             'open_advising_tasks' => $this->tableExists('advising_tasks') ? $this->count("SELECT COUNT(*) FROM advising_tasks WHERE task_status = 'open'") : 0,
             'modules' => $modules,
         ];
@@ -50,6 +72,26 @@ final class MetricsService
             '# TYPE cpe_notification_deliveries gauge',
             'cpe_notification_deliveries{status="queued"} ' . $snapshot['notification_deliveries_queued'],
             'cpe_notification_deliveries{status="failed"} ' . $snapshot['notification_deliveries_failed'],
+            '# TYPE cpe_webhook_subscriptions gauge',
+            'cpe_webhook_subscriptions{status="active"} ' . $snapshot['webhook_subscriptions_active'],
+            'cpe_webhook_subscriptions{status="degraded"} ' . $snapshot['webhook_subscriptions_degraded'],
+            '# TYPE cpe_webhook_deliveries gauge',
+            'cpe_webhook_deliveries{status="pending"} ' . $snapshot['webhook_deliveries_pending'],
+            'cpe_webhook_deliveries{status="dead_lettered"} ' . $snapshot['webhook_deliveries_dead_lettered'],
+            '# TYPE cpe_webhook_worker_heartbeat_age_seconds gauge',
+            'cpe_webhook_worker_heartbeat_age_seconds ' . ($snapshot['webhook_worker_heartbeat_age_seconds'] ?? -1),
+            '# TYPE cpe_api_enabled gauge',
+            'cpe_api_enabled ' . $snapshot['api_enabled'],
+            '# TYPE cpe_api_service_accounts gauge',
+            'cpe_api_service_accounts{status="enabled"} ' . $snapshot['api_service_accounts_enabled'],
+            'cpe_api_service_accounts{status="disabled"} ' . $snapshot['api_service_accounts_disabled'],
+            'cpe_api_service_accounts{status="revoked"} ' . $snapshot['api_service_accounts_revoked'],
+            '# TYPE cpe_api_tokens_usable gauge',
+            'cpe_api_tokens_usable ' . $snapshot['api_tokens_usable'],
+            '# TYPE cpe_api_key_versions_missing gauge',
+            'cpe_api_key_versions_missing ' . $snapshot['api_key_versions_missing'],
+            '# TYPE cpe_api_requests_denied_24h gauge',
+            'cpe_api_requests_denied_24h ' . $snapshot['api_requests_denied_24h'],
             '# TYPE cpe_advising_tasks_open gauge',
             'cpe_advising_tasks_open ' . $snapshot['open_advising_tasks'],
         ];

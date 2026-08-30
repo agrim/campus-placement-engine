@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace App\Import;
 
 use App\Core\Http\UserVisibleException;
+use App\Core\Persistence\WriteTransaction;
+use App\Modules\Placement\Application\ApplicationStatusWriter;
 use App\Modules\Placement\Install\LegacyDomainSynchronizer;
 use App\Modules\Placement\Workflow\WorkflowRepository;
 use PDO;
@@ -551,19 +553,25 @@ final class CsvImporter
                     : null,
             ];
         }
-        $count = 0;
-        foreach ($normalized as $row) {
-            $now = cpe_now();
-            $stmt = $this->pdo->prepare(
-                'INSERT INTO applications (candidate_id, company_id, current_status, waitlist_rank, created_at, updated_at)
-                 VALUES (?, ?, ?, ?, ?, ?)
-                 ON CONFLICT(candidate_id, company_id) DO UPDATE SET current_status = excluded.current_status, waitlist_rank = excluded.waitlist_rank, updated_at = excluded.updated_at'
-            );
-            $stmt->execute([$row['candidate_id'], $row['company_id'], $row['status'], $row['waitlist_rank'], $now, $now]);
-            $count++;
-        }
-        $this->synchronizeDurableDomain(true);
-        return $count;
+        return WriteTransaction::run($this->pdo, function () use ($normalized): int {
+            $count = 0;
+            $writer = new ApplicationStatusWriter($this->pdo);
+            foreach ($normalized as $row) {
+                $writer->saveStatus(
+                    (int) $row['candidate_id'],
+                    (int) $row['company_id'],
+                    (string) $row['status'],
+                    $row['waitlist_rank'] === null ? null : (int) $row['waitlist_rank'],
+                    null,
+                    'import',
+                    'Application status changed through shortlist import.',
+                    cpe_now(),
+                );
+                $count++;
+            }
+            $this->synchronizeDurableDomain(true);
+            return $count;
+        });
     }
 
     public function legacyWide(string $csv, array $validStatuses = []): int

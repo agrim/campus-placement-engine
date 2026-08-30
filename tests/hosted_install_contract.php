@@ -11,6 +11,7 @@ if (trim((string) (getenv('CPE_DATABASE_URL') ?: '')) === ''
 
 define('CPE_SKIP_HTTP_BOOTSTRAP', true);
 require __DIR__ . '/../app/bootstrap.php';
+require __DIR__ . '/authorized_setup_recovery_fixture.php';
 
 use App\Hosted\HostedBootstrap;
 use App\Hosted\Tenant\HostedResolutionException;
@@ -141,7 +142,7 @@ try {
     hosted_install_assert(!Database::isInstalled(), 'Hosted identity contract requires an empty database.');
     Database::migrate();
     $installer = new Installer();
-    $installer->install(hosted_install_input());
+    $installer->install(hosted_install_input(), test_authorized_setup_recovery_authority());
     hosted_install_assert(Database::isInstalled(), 'Self-hosted installation did not commit its installation marker.');
 
     $pdo = Database::connection();

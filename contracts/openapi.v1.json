@@ -1,0 +1,537 @@
+{
+  "openapi": "3.1.0",
+  "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
+  "info": {
+    "title": "Campus Placement Engine API",
+    "version": "1.0.0",
+    "description": "Institution-local API v1 with governed reads and one controlled application-transition command. Cloud does not proxy this API."
+  },
+  "servers": [
+    { "url": "/", "description": "The institution's own Engine origin" }
+  ],
+  "security": [
+    { "bearerAuth": [] }
+  ],
+  "tags": [
+    { "name": "service" },
+    { "name": "opportunities" },
+    { "name": "applications" }
+  ],
+  "paths": {
+    "/api/v1": {
+      "get": {
+        "operationId": "getApiV1Service",
+        "tags": ["service"],
+        "responses": {
+          "200": {
+            "description": "API v1 service descriptor",
+            "headers": { "X-Request-ID": { "$ref": "#/components/headers/RequestId" } },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "schemas/api-v1-service.schema.json" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "414": { "$ref": "#/components/responses/RequestTargetTooLarge" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "431": { "$ref": "#/components/responses/RequestHeadersTooLarge" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      },
+      "head": {
+        "operationId": "headApiV1Service",
+        "tags": ["service"],
+        "responses": {
+          "200": { "$ref": "#/components/responses/HeadSuccess" },
+          "400": { "$ref": "#/components/responses/HeadBadRequest" },
+          "401": { "$ref": "#/components/responses/HeadUnauthorized" },
+          "414": { "$ref": "#/components/responses/HeadRequestTargetTooLarge" },
+          "429": { "$ref": "#/components/responses/HeadRateLimited" },
+          "431": { "$ref": "#/components/responses/HeadRequestHeadersTooLarge" },
+          "500": { "$ref": "#/components/responses/HeadInternalError" },
+          "503": { "$ref": "#/components/responses/HeadUnavailable" }
+        }
+      }
+    },
+    "/api/v1/opportunities": {
+      "get": {
+        "operationId": "listApiV1Opportunities",
+        "tags": ["opportunities"],
+        "parameters": [
+          { "$ref": "#/components/parameters/UpdatedAfter" },
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/Cursor" }
+        ],
+        "responses": {
+          "200": {
+            "description": "One stable cursor page of opportunities",
+            "headers": { "X-Request-ID": { "$ref": "#/components/headers/RequestId" } },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "schemas/api-v1-opportunity-collection.schema.json" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "414": { "$ref": "#/components/responses/RequestTargetTooLarge" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "431": { "$ref": "#/components/responses/RequestHeadersTooLarge" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      },
+      "head": {
+        "operationId": "headApiV1Opportunities",
+        "tags": ["opportunities"],
+        "parameters": [
+          { "$ref": "#/components/parameters/UpdatedAfter" },
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/Cursor" }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/HeadSuccess" },
+          "400": { "$ref": "#/components/responses/HeadBadRequest" },
+          "401": { "$ref": "#/components/responses/HeadUnauthorized" },
+          "403": { "$ref": "#/components/responses/HeadForbidden" },
+          "414": { "$ref": "#/components/responses/HeadRequestTargetTooLarge" },
+          "429": { "$ref": "#/components/responses/HeadRateLimited" },
+          "431": { "$ref": "#/components/responses/HeadRequestHeadersTooLarge" },
+          "500": { "$ref": "#/components/responses/HeadInternalError" },
+          "503": { "$ref": "#/components/responses/HeadUnavailable" }
+        }
+      }
+    },
+    "/api/v1/opportunities/{public_id}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/OpportunityPublicId" }
+      ],
+      "get": {
+        "operationId": "getApiV1Opportunity",
+        "tags": ["opportunities"],
+        "parameters": [
+          { "$ref": "#/components/parameters/IfNoneMatch" }
+        ],
+        "responses": {
+          "200": {
+            "description": "One opportunity",
+            "headers": {
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" },
+              "ETag": { "$ref": "#/components/headers/EntityTag" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "schemas/api-v1-opportunity-item.schema.json" }
+              }
+            }
+          },
+          "304": { "$ref": "#/components/responses/NotModified" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "414": { "$ref": "#/components/responses/RequestTargetTooLarge" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "431": { "$ref": "#/components/responses/RequestHeadersTooLarge" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      },
+      "head": {
+        "operationId": "headApiV1Opportunity",
+        "tags": ["opportunities"],
+        "parameters": [
+          { "$ref": "#/components/parameters/IfNoneMatch" }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/HeadItemSuccess" },
+          "304": { "$ref": "#/components/responses/NotModified" },
+          "400": { "$ref": "#/components/responses/HeadBadRequest" },
+          "401": { "$ref": "#/components/responses/HeadUnauthorized" },
+          "403": { "$ref": "#/components/responses/HeadForbidden" },
+          "404": { "$ref": "#/components/responses/HeadNotFound" },
+          "414": { "$ref": "#/components/responses/HeadRequestTargetTooLarge" },
+          "429": { "$ref": "#/components/responses/HeadRateLimited" },
+          "431": { "$ref": "#/components/responses/HeadRequestHeadersTooLarge" },
+          "500": { "$ref": "#/components/responses/HeadInternalError" },
+          "503": { "$ref": "#/components/responses/HeadUnavailable" }
+        }
+      }
+    },
+    "/api/v1/applications": {
+      "get": {
+        "operationId": "listApiV1Applications",
+        "tags": ["applications"],
+        "parameters": [
+          { "$ref": "#/components/parameters/UpdatedAfter" },
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/Cursor" }
+        ],
+        "responses": {
+          "200": {
+            "description": "One stable cursor page of applications",
+            "headers": { "X-Request-ID": { "$ref": "#/components/headers/RequestId" } },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "schemas/api-v1-application-collection.schema.json" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "414": { "$ref": "#/components/responses/RequestTargetTooLarge" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "431": { "$ref": "#/components/responses/RequestHeadersTooLarge" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      },
+      "head": {
+        "operationId": "headApiV1Applications",
+        "tags": ["applications"],
+        "parameters": [
+          { "$ref": "#/components/parameters/UpdatedAfter" },
+          { "$ref": "#/components/parameters/Limit" },
+          { "$ref": "#/components/parameters/Cursor" }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/HeadSuccess" },
+          "400": { "$ref": "#/components/responses/HeadBadRequest" },
+          "401": { "$ref": "#/components/responses/HeadUnauthorized" },
+          "403": { "$ref": "#/components/responses/HeadForbidden" },
+          "414": { "$ref": "#/components/responses/HeadRequestTargetTooLarge" },
+          "429": { "$ref": "#/components/responses/HeadRateLimited" },
+          "431": { "$ref": "#/components/responses/HeadRequestHeadersTooLarge" },
+          "500": { "$ref": "#/components/responses/HeadInternalError" },
+          "503": { "$ref": "#/components/responses/HeadUnavailable" }
+        }
+      }
+    },
+    "/api/v1/applications/{public_id}": {
+      "parameters": [
+        { "$ref": "#/components/parameters/ApplicationPublicId" }
+      ],
+      "get": {
+        "operationId": "getApiV1Application",
+        "tags": ["applications"],
+        "parameters": [
+          { "$ref": "#/components/parameters/IfNoneMatch" }
+        ],
+        "responses": {
+          "200": {
+            "description": "One application",
+            "headers": {
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" },
+              "ETag": { "$ref": "#/components/headers/EntityTag" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "schemas/api-v1-application-item.schema.json" }
+              }
+            }
+          },
+          "304": { "$ref": "#/components/responses/NotModified" },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "414": { "$ref": "#/components/responses/RequestTargetTooLarge" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "431": { "$ref": "#/components/responses/RequestHeadersTooLarge" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        }
+      },
+      "head": {
+        "operationId": "headApiV1Application",
+        "tags": ["applications"],
+        "parameters": [
+          { "$ref": "#/components/parameters/IfNoneMatch" }
+        ],
+        "responses": {
+          "200": { "$ref": "#/components/responses/HeadItemSuccess" },
+          "304": { "$ref": "#/components/responses/NotModified" },
+          "400": { "$ref": "#/components/responses/HeadBadRequest" },
+          "401": { "$ref": "#/components/responses/HeadUnauthorized" },
+          "403": { "$ref": "#/components/responses/HeadForbidden" },
+          "404": { "$ref": "#/components/responses/HeadNotFound" },
+          "414": { "$ref": "#/components/responses/HeadRequestTargetTooLarge" },
+          "429": { "$ref": "#/components/responses/HeadRateLimited" },
+          "431": { "$ref": "#/components/responses/HeadRequestHeadersTooLarge" },
+          "500": { "$ref": "#/components/responses/HeadInternalError" },
+          "503": { "$ref": "#/components/responses/HeadUnavailable" }
+        }
+      }
+    },
+    "/api/v1/applications/{public_id}/transitions": {
+      "parameters": [
+        { "$ref": "#/components/parameters/ApplicationPublicId" }
+      ],
+      "post": {
+        "operationId": "transitionApiV1Application",
+        "tags": ["applications"],
+        "summary": "Apply one ordinary application status transition",
+        "description": "Uses the same transition policy and effects as the browser board. Corrections are unavailable. A completed idempotent replay returns the originally committed body, ETag, status, and X-Request-ID. Request-audit telemetry is attempted after commit and cannot replace an already committed command response.",
+        "parameters": [
+          { "$ref": "#/components/parameters/IdempotencyKey" },
+          { "$ref": "#/components/parameters/IfMatch" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "schemas/api-v1-application-transition-request.schema.json" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Committed transition result or exact completed replay",
+            "headers": {
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" },
+              "ETag": { "$ref": "#/components/headers/EntityTag" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "schemas/api-v1-application-item.schema.json" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "413": { "$ref": "#/components/responses/ContentTooLarge" },
+          "414": { "$ref": "#/components/responses/RequestTargetTooLarge" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "422": { "$ref": "#/components/responses/UnprocessableContent" },
+          "428": { "$ref": "#/components/responses/PreconditionRequired" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "431": { "$ref": "#/components/responses/RequestHeadersTooLarge" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        },
+        "x-cpe-required-scope": "applications.transition",
+        "x-cpe-idempotency-horizon-hours": 48
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "bearerAuth": {
+        "type": "http",
+        "scheme": "bearer",
+        "bearerFormat": "CPE API token"
+      }
+    },
+    "headers": {
+      "RequestId": {
+        "description": "Opaque request correlation ID",
+        "schema": { "type": "string", "pattern": "^req_[a-f0-9]{32}$" }
+      },
+      "EntityTag": {
+        "description": "Stable entity tag for this item representation",
+        "schema": { "type": "string", "pattern": "^\\\"[a-f0-9]{64}\\\"$" }
+      },
+      "RetryAfter": {
+        "description": "Seconds until a retry is permitted",
+        "schema": { "type": "integer", "minimum": 1 }
+      }
+    },
+    "parameters": {
+      "UpdatedAfter": {
+        "name": "updated_after",
+        "in": "query",
+        "required": false,
+        "description": "Strict UTC lower bound. It cannot be combined with cursor.",
+        "schema": {
+          "type": "string",
+          "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$"
+        }
+      },
+      "Limit": {
+        "name": "limit",
+        "in": "query",
+        "required": false,
+        "schema": { "type": "integer", "minimum": 1, "maximum": 100, "default": 50 }
+      },
+      "Cursor": {
+        "name": "cursor",
+        "in": "query",
+        "required": false,
+        "description": "Opaque signed continuation. It cannot be combined with updated_after.",
+        "schema": { "type": "string", "minLength": 1, "maxLength": 2048 }
+      },
+      "OpportunityPublicId": {
+        "name": "public_id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string", "pattern": "^opportunity_[a-f0-9]{32}$" }
+      },
+      "ApplicationPublicId": {
+        "name": "public_id",
+        "in": "path",
+        "required": true,
+        "schema": { "type": "string", "pattern": "^application_[a-f0-9]{32}$" }
+      },
+      "IfNoneMatch": {
+        "name": "If-None-Match",
+        "in": "header",
+        "required": false,
+        "schema": { "type": "string", "maxLength": 4096 }
+      },
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": true,
+        "description": "One memory-only clear retry key. Engine stores only its keyed hash for 48 hours.",
+        "schema": { "type": "string", "pattern": "^[a-f0-9]{32,64}$" }
+      },
+      "IfMatch": {
+        "name": "If-Match",
+        "in": "header",
+        "required": true,
+        "description": "The exact strong ETag returned by GET for the current application representation.",
+        "schema": { "type": "string", "pattern": "^\\\"[a-f0-9]{64}\\\"$" }
+      }
+    },
+    "responses": {
+      "BadRequest": { "$ref": "#/components/responses/Error400" },
+      "Unauthorized": { "$ref": "#/components/responses/Error401" },
+      "Forbidden": { "$ref": "#/components/responses/Error403" },
+      "NotFound": { "$ref": "#/components/responses/Error404" },
+      "Conflict": { "$ref": "#/components/responses/Error409" },
+      "ContentTooLarge": { "$ref": "#/components/responses/Error413" },
+      "RequestTargetTooLarge": { "$ref": "#/components/responses/Error414" },
+      "UnsupportedMediaType": { "$ref": "#/components/responses/Error415" },
+      "UnprocessableContent": { "$ref": "#/components/responses/Error422" },
+      "PreconditionRequired": { "$ref": "#/components/responses/Error428" },
+      "RateLimited": { "$ref": "#/components/responses/Error429" },
+      "RequestHeadersTooLarge": { "$ref": "#/components/responses/Error431" },
+      "InternalError": { "$ref": "#/components/responses/Error500" },
+      "Unavailable": { "$ref": "#/components/responses/Error503" },
+      "Error400": {
+        "description": "Invalid request",
+        "headers": { "X-Request-ID": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "schemas/api-v1-error.schema.json" } } }
+      },
+      "Error401": {
+        "description": "Missing, malformed, disabled, expired, revoked, or otherwise invalid credentials",
+        "headers": {
+          "X-Request-ID": { "$ref": "#/components/headers/RequestId" },
+          "WWW-Authenticate": { "schema": { "type": "string" } }
+        },
+        "content": { "application/json": { "schema": { "$ref": "schemas/api-v1-error.schema.json" } } }
+      },
+      "Error403": {
+        "description": "The exact required scope or enabled Placement policy is absent",
+        "headers": { "X-Request-ID": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "schemas/api-v1-error.schema.json" } } }
+      },
+      "Error404": {
+        "description": "Resource not found",
+        "headers": { "X-Request-ID": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "schemas/api-v1-error.schema.json" } } }
+      },
+      "Error409": {
+        "description": "Idempotency conflict, stale precondition, concurrent mutation, or invalid concurrent transition",
+        "headers": { "X-Request-ID": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "schemas/api-v1-error.schema.json" } } }
+      },
+      "Error413": {
+        "description": "Request body is too large",
+        "headers": { "X-Request-ID": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "schemas/api-v1-error.schema.json" } } }
+      },
+      "Error414": {
+        "description": "Request target is too large",
+        "headers": { "X-Request-ID": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "schemas/api-v1-error.schema.json" } } }
+      },
+      "Error415": {
+        "description": "Content-Type is not exactly application/json",
+        "headers": { "X-Request-ID": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "schemas/api-v1-error.schema.json" } } }
+      },
+      "Error422": {
+        "description": "The named ordinary transition is not allowed by current domain policy",
+        "headers": { "X-Request-ID": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "schemas/api-v1-error.schema.json" } } }
+      },
+      "Error428": {
+        "description": "A strong If-Match precondition is required",
+        "headers": { "X-Request-ID": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "schemas/api-v1-error.schema.json" } } }
+      },
+      "Error429": {
+        "description": "Rate limit exceeded",
+        "headers": {
+          "X-Request-ID": { "$ref": "#/components/headers/RequestId" },
+          "Retry-After": { "$ref": "#/components/headers/RetryAfter" }
+        },
+        "content": { "application/json": { "schema": { "$ref": "schemas/api-v1-error.schema.json" } } }
+      },
+      "Error431": {
+        "description": "Request headers are too large",
+        "headers": { "X-Request-ID": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "schemas/api-v1-error.schema.json" } } }
+      },
+      "Error500": {
+        "description": "Opaque server failure",
+        "headers": { "X-Request-ID": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "schemas/api-v1-error.schema.json" } } }
+      },
+      "Error503": {
+        "description": "Authentication, authorization, audit, or storage is unavailable",
+        "headers": {
+          "X-Request-ID": { "$ref": "#/components/headers/RequestId" },
+          "Retry-After": { "$ref": "#/components/headers/RetryAfter" }
+        },
+        "content": { "application/json": { "schema": { "$ref": "schemas/api-v1-error.schema.json" } } }
+      },
+      "HeadSuccess": {
+        "description": "The corresponding GET representation exists; HEAD has no response body",
+        "headers": { "X-Request-ID": { "$ref": "#/components/headers/RequestId" } }
+      },
+      "HeadItemSuccess": {
+        "description": "The item exists; HEAD has no response body",
+        "headers": {
+          "X-Request-ID": { "$ref": "#/components/headers/RequestId" },
+          "ETag": { "$ref": "#/components/headers/EntityTag" }
+        }
+      },
+      "NotModified": {
+        "description": "The item representation matches If-None-Match",
+        "headers": {
+          "X-Request-ID": { "$ref": "#/components/headers/RequestId" },
+          "ETag": { "$ref": "#/components/headers/EntityTag" }
+        }
+      },
+      "HeadBadRequest": { "description": "Invalid request; HEAD has no response body", "headers": { "X-Request-ID": { "$ref": "#/components/headers/RequestId" } } },
+      "HeadUnauthorized": { "description": "Invalid credentials; HEAD has no response body", "headers": { "X-Request-ID": { "$ref": "#/components/headers/RequestId" }, "WWW-Authenticate": { "schema": { "type": "string" } } } },
+      "HeadForbidden": { "description": "Missing exact scope; HEAD has no response body", "headers": { "X-Request-ID": { "$ref": "#/components/headers/RequestId" } } },
+      "HeadNotFound": { "description": "Resource not found; HEAD has no response body", "headers": { "X-Request-ID": { "$ref": "#/components/headers/RequestId" } } },
+      "HeadRequestTargetTooLarge": { "description": "Request target is too large; HEAD has no response body", "headers": { "X-Request-ID": { "$ref": "#/components/headers/RequestId" } } },
+      "HeadRateLimited": { "description": "Rate limit exceeded; HEAD has no response body", "headers": { "X-Request-ID": { "$ref": "#/components/headers/RequestId" }, "Retry-After": { "$ref": "#/components/headers/RetryAfter" } } },
+      "HeadRequestHeadersTooLarge": { "description": "Request headers are too large; HEAD has no response body", "headers": { "X-Request-ID": { "$ref": "#/components/headers/RequestId" } } },
+      "HeadInternalError": { "description": "Opaque failure; HEAD has no response body", "headers": { "X-Request-ID": { "$ref": "#/components/headers/RequestId" } } },
+      "HeadUnavailable": { "description": "API unavailable; HEAD has no response body", "headers": { "X-Request-ID": { "$ref": "#/components/headers/RequestId" }, "Retry-After": { "$ref": "#/components/headers/RetryAfter" } } }
+    }
+  },
+  "x-cpe-contract-examples": {
+    "service": "examples/api-v1-service.json",
+    "opportunity_item": "examples/api-v1-opportunity-item.json",
+    "opportunity_collection": "examples/api-v1-opportunity-collection.json",
+    "application_item": "examples/api-v1-application-item.json",
+    "application_collection": "examples/api-v1-application-collection.json",
+    "application_transition_request": "examples/api-v1-application-transition-request.json",
+    "application_transition_response": "examples/api-v1-application-transition-response.json",
+    "error": "examples/api-v1-error.json"
+  }
+}

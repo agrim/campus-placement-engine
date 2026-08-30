@@ -6,6 +6,11 @@ namespace App\Core\Modules;
 
 use RuntimeException;
 
+/**
+ * Manifest for an Engine-shipped module.
+ *
+ * @internal This catalog is release input, not an installable extension format.
+ */
 final class ModuleManifest
 {
     private function __construct(

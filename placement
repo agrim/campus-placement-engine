@@ -6,6 +6,9 @@ declare(strict_types=1);
 require __DIR__ . '/app/bootstrap.php';
 
 use App\Modules\Placement\Application\PlacementService;
+use App\Api\Operations\ApiHealthService;
+use App\Api\Operations\ApiRetentionService;
+use App\Api\Security\ApiServiceAccountService;
 use App\Modules\Placement\Workflow\WorkflowDefinitionFileService;
 use App\Modules\Placement\Workflow\WorkflowMigrationService;
 use App\Modules\Placement\Workflow\WorkflowRepository;
@@ -18,7 +21,17 @@ use App\Core\Backup\DatabaseRestoreService;
 use App\Core\Backup\BackupArtifact;
 use App\Core\Backup\LegacySqliteBackupConverter;
 use App\Core\Http\UserVisibleException;
+use App\Core\Install\InstallationState;
 use App\Core\Events\DomainEventOutboxWorker;
+use App\Core\Events\PublicEventDeadLetterReplayService;
+use App\Core\Events\ReplayOperatorAuthorization;
+use App\Core\Events\InternalEventDeliveryWorker;
+use App\Core\Events\InternalEventDeliveryReplayService;
+use App\Core\Events\InternalEventFanoutReplayService;
+use App\Core\Events\InternalEventFanoutWorker;
+use App\Integrations\Webhooks\WebhookDeliveryReplayService;
+use App\Integrations\Webhooks\WebhookDeliveryWorker;
+use App\Integrations\Webhooks\WebhookHealthService;
 use App\Domain\ConfigurationSnapshotService;
 use App\Domain\NotificationDeliveryService;
 use App\Domain\ReadinessService;
@@ -32,6 +45,7 @@ use App\Security\SetupAuthorization;
 use App\Security\SetupHttp;
 use App\Operations\MetricsService;
 use App\Operations\HttpLoadProbe;
+use App\Operations\SupportReportService;
 use App\Support\Csv;
 use App\Support\Database;
 use App\Support\IncidentReporter;
@@ -51,6 +65,18 @@ try {
         'install-demo' => install_demo(),
         'readiness' => readiness(),
         'metrics' => metrics_snapshot(),
+        'support-report' => support_report(array_slice($argv, 2)),
+        'api-status' => api_status(),
+        'api-enable' => api_global_state(array_slice($argv, 2), true),
+        'api-disable' => api_global_state(array_slice($argv, 2), false),
+        'api-service-account-create' => api_service_account_create(array_slice($argv, 2)),
+        'api-service-account-list' => api_service_account_list(array_slice($argv, 2)),
+        'api-service-account-enable' => api_service_account_state(array_slice($argv, 2), 'enable'),
+        'api-service-account-disable' => api_service_account_state(array_slice($argv, 2), 'disable'),
+        'api-service-account-revoke' => api_service_account_state(array_slice($argv, 2), 'revoke'),
+        'api-token-rotate' => api_token_rotate(array_slice($argv, 2)),
+        'api-token-revoke' => api_token_revoke(array_slice($argv, 2)),
+        'api-prune' => api_prune(array_slice($argv, 2)),
         'placement-report' => placement_report(),
         'privacy-report' => privacy_report(),
         'anonymize-candidate' => anonymize_candidate(array_slice($argv, 2)),
@@ -83,6 +109,11 @@ try {
         'verify-package' => verify_release_package($argv[2] ?? ''),
         'deliver-notifications' => deliver_notifications(array_slice($argv, 2)),
         'work-outbox' => work_outbox(array_slice($argv, 2)),
+        'work-integrations' => work_integrations(array_slice($argv, 2)),
+        'replay-webhook-delivery' => replay_webhook_delivery(array_slice($argv, 2)),
+        'replay-public-event' => replay_public_event(array_slice($argv, 2)),
+        'replay-internal-delivery' => replay_internal_delivery(array_slice($argv, 2)),
+        'replay-internal-fanout' => replay_internal_fanout(array_slice($argv, 2)),
         'certify-notifications' => certify_notifications(array_slice($argv, 2)),
         'smoke-http' => smoke_http(array_slice($argv, 2)),
         'load-smoke' => load_smoke(array_slice($argv, 2)),
@@ -118,8 +149,74 @@ function doctor(): void
     foreach ($requirements->checks() as $check) {
         echo ($check['ok'] ? 'OK' : 'ERROR') . " {$check['label']}: {$check['value']}\n";
     }
-    echo "INFO installed: " . (Database::isInstalled() ? 'yes' : 'no') . "\n";
+    $installed = Database::isInstalled();
+    echo "INFO installed: " . ($installed ? 'yes' : 'no') . "\n";
+    if ($installed) {
+        if (Database::pendingMigrations() !== []) {
+            throw new UserVisibleException(
+                'CLI_DATABASE_UPGRADE_REQUIRED',
+                'Database migrations are pending. Run `php placement upgrade`.',
+            );
+        }
+        $api = (new ApiHealthService())->snapshot();
+        echo strtoupper($api['status'] === 'fail' ? 'ERROR' : $api['status'])
+            . ' API identity: ' . $api['message'] . "\n";
+        echo 'INFO API service accounts: ' . (int) $api['service_accounts']
+            . '; usable tokens: ' . (int) $api['usable_tokens']
+            . '; missing key versions: ' . (int) $api['missing_key_versions'] . "\n";
+        $webhooks = (new WebhookHealthService())->snapshot();
+        echo strtoupper($webhooks['status'] === 'fail' ? 'ERROR' : $webhooks['status'])
+            . ' Integrations: ' . $webhooks['message'] . "\n";
+        echo 'INFO Integration worker: required=' . ($webhooks['worker_required'] ? 'yes' : 'no')
+            . '; configured=' . ($webhooks['worker_configured'] ? 'yes' : 'no')
+            . '; heartbeat=' . $webhooks['scheduler_freshness']
+            . '; status=' . $webhooks['worker_status']
+            . '; age=' . ($webhooks['worker_heartbeat_age_seconds'] === null
+                ? 'not observed'
+                : (int) $webhooks['worker_heartbeat_age_seconds'] . 's') . "\n";
+        echo 'INFO Integration deliveries: pending=' . (int) $webhooks['pending']
+            . '; oldest=' . ($webhooks['oldest_pending_age_seconds'] === null
+                ? 'none'
+                : (int) $webhooks['oldest_pending_age_seconds'] . 's')
+            . '; dead-lettered=' . (int) $webhooks['dead_lettered'] . "\n";
+        echo 'INFO webhook network policy: ' . $webhooks['network_policy'] . "\n";
+        echo 'INFO webhook TLS policy: ' . $webhooks['tls_policy'] . "\n";
+        echo 'INFO webhook encryption key present: '
+            . ($webhooks['encryption_key_present'] ? 'yes' : 'no') . "\n";
+        echo 'INFO webhook encryption key version: '
+            . ($webhooks['encryption_key_active_version'] !== '' ? $webhooks['encryption_key_active_version'] : 'not configured')
+            . "\n";
+        echo 'INFO Integration database driver: ' . $webhooks['database_driver']
+            . '; ready=' . ($webhooks['database_driver_ready'] ? 'yes' : 'no') . "\n";
+    }
     $requirements->assertReady();
+}
+
+function support_report(array $args): void
+{
+    if (in_array('--help', $args, true) || in_array('-h', $args, true)) {
+        echo "Print a bounded, privacy-safe support report as JSON:\n";
+        echo "  php placement support-report\n";
+        echo "\nThe report contains only reviewed operational metadata and never includes\n";
+        echo "placement records, secrets, endpoints, filesystem paths, tokens, or logs.\n";
+        return;
+    }
+    if ($args !== []) {
+        throw new UserVisibleException(
+            'CLI_SUPPORT_REPORT_ARGUMENT_INVALID',
+            'Support report does not accept positional arguments.',
+        );
+    }
+    if (!Database::isInstalled()) {
+        throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
+    }
+    if (Database::pendingMigrations() !== []) {
+        throw new UserVisibleException(
+            'CLI_DATABASE_UPGRADE_REQUIRED',
+            'Database migrations are pending. Run `php placement upgrade` before creating a support report.',
+        );
+    }
+    echo (new SupportReportService())->json();
 }
 
 function migrate(): void
@@ -137,12 +234,11 @@ function upgrade(array $args): void
     if ($args !== []) {
         throw new UserVisibleException('CLI_UPGRADE_ARGUMENT_INVALID', 'Upgrade does not accept positional arguments.');
     }
+    (new SystemRequirements())->assertReady();
+    Database::adoptInstalledEngineOwnershipForUpgrade();
     if (!Database::hasInstalledMarkerStrict()) {
         throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
     }
-
-    (new SystemRequirements())->assertReady();
-    Database::adoptInstalledEngineOwnershipForUpgrade();
     $backup = create_database_backup('upgrade');
     echo "Upgrade backup written. A recovery path is available only to the operator who configured backup storage.\n";
     Database::migrate();
@@ -201,7 +297,13 @@ function serve(
     echo "Starting Campus Placement Engine at http://{$address}/\n";
     echo "Press Ctrl+C to stop.\n";
     try {
-        passthru(escapeshellarg(PHP_BINARY) . ' -S ' . escapeshellarg($address) . ' -t ' . escapeshellarg(cpe_path('public')), $exitCode);
+        passthru(
+            escapeshellarg(PHP_BINARY)
+                . ' -S ' . escapeshellarg($address)
+                . ' -t ' . escapeshellarg(cpe_path('public'))
+                . ' ' . escapeshellarg(cpe_path('public/router.php')),
+            $exitCode,
+        );
     } finally {
         SetupHttp::scrubInternalEnvironment();
     }
@@ -261,7 +363,8 @@ function install_app(array $args): void
         install_help();
         return;
     }
-    if (Database::isInstalled()) {
+    $installationState = Database::installationStateStrict();
+    if ($installationState === InstallationState::INSTALLED) {
         throw new UserVisibleException(
             'CLI_APP_ALREADY_INSTALLED',
             'App is already installed. Use upgrade or configuration import for an existing installation.',
@@ -328,7 +431,8 @@ function seed_large_demo(int $candidateCount, int $companyCount): void
 
 function install_demo(): void
 {
-    if (Database::isInstalled()) {
+    $installationState = Database::installationStateStrict();
+    if ($installationState === InstallationState::INSTALLED) {
         throw new UserVisibleException(
             'CLI_APP_ALREADY_INSTALLED',
             'App is already installed. Use upgrade for an existing installation.',
@@ -360,6 +464,148 @@ function metrics_snapshot(): void
         throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
     }
     echo json_encode((new MetricsService())->snapshot(), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+}
+
+function api_status(): void
+{
+    require_installed_app();
+    Database::migrate();
+    echo json_encode((new ApiHealthService())->snapshot(), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+}
+
+function api_global_state(array $args, bool $enabled): void
+{
+    require_installed_app();
+    Database::migrate();
+    $options = cli_options($args);
+    (new ApiServiceAccountService())->setApiEnabled($enabled, api_actor_user_id($options));
+    echo 'Institution-local API ' . ($enabled ? 'enabled' : 'disabled') . ".\n";
+    if ($enabled) {
+        echo "No public /api/v1 resource is exposed in this phase.\n";
+    }
+}
+
+function api_service_account_create(array $args): void
+{
+    require_installed_app();
+    Database::migrate();
+    $options = cli_options($args);
+    $scopes = array_values(array_filter(array_map('trim', explode(',', (string) ($options['scopes'] ?? '')))));
+    $result = (new ApiServiceAccountService())->create(
+        (string) ($options['name'] ?? ''),
+        $scopes,
+        api_actor_user_id($options),
+        (int) ($options['expiry-days'] ?? ApiServiceAccountService::DEFAULT_EXPIRY_DAYS),
+    );
+    echo "Service account: {$result['service_account_id']}\n";
+    echo "Token lookup ID: {$result['token_lookup_id']}\n";
+    echo "Expires at: {$result['expires_at']} UTC\n";
+    echo "Copy this token now; it will not be shown again:\n";
+    echo $result['token'] . "\n";
+}
+
+function api_service_account_list(array $args): void
+{
+    require_installed_app();
+    Database::migrate();
+    $options = cli_options($args);
+    $accounts = (new ApiServiceAccountService())->listForActor(api_actor_user_id($options));
+    echo "service_account_id,name,status,scopes,tokens,current_or_grace_tokens\n";
+    $handle = fopen('php://output', 'w');
+    $now = cpe_now();
+    foreach ($accounts as $account) {
+        $usableMetadata = array_filter(
+            $account['tokens'],
+            static fn (array $token): bool => $token['revoked_at'] === null
+                && (string) $token['expires_at'] > $now
+                && ($token['rotation_grace_expires_at'] === null || (string) $token['rotation_grace_expires_at'] > $now),
+        );
+        Csv::writeRow($handle, [
+            $account['public_id'],
+            $account['name'],
+            $account['status'],
+            implode(',', $account['scopes']),
+            count($account['tokens']),
+            count($usableMetadata),
+        ]);
+    }
+    fclose($handle);
+}
+
+function api_service_account_state(array $args, string $action): void
+{
+    require_installed_app();
+    Database::migrate();
+    $options = cli_options($args);
+    $publicId = (string) ($options['service-account'] ?? '');
+    $actor = api_actor_user_id($options);
+    $service = new ApiServiceAccountService();
+    match ($action) {
+        'enable' => $service->setAccountEnabled($publicId, true, $actor),
+        'disable' => $service->setAccountEnabled($publicId, false, $actor),
+        'revoke' => $service->revokeAccount($publicId, $actor),
+        default => throw new RuntimeException('Unknown API service-account lifecycle action.'),
+    };
+    echo 'API service account ' . $action . "d.\n";
+}
+
+function api_token_rotate(array $args): void
+{
+    require_installed_app();
+    Database::migrate();
+    $options = cli_options($args);
+    $result = (new ApiServiceAccountService())->rotateToken(
+        (string) ($options['service-account'] ?? ''),
+        api_actor_user_id($options),
+        (int) ($options['expiry-days'] ?? ApiServiceAccountService::DEFAULT_EXPIRY_DAYS),
+    );
+    echo "Token lookup ID: {$result['token_lookup_id']}\n";
+    echo "Expires at: {$result['expires_at']} UTC\n";
+    echo "The prior token remains usable for at most 24 hours. Copy this token now:\n";
+    echo $result['token'] . "\n";
+}
+
+function api_token_revoke(array $args): void
+{
+    require_installed_app();
+    Database::migrate();
+    $options = cli_options($args);
+    (new ApiServiceAccountService())->revokeToken(
+        (string) ($options['token-id'] ?? ''),
+        api_actor_user_id($options),
+    );
+    echo "API token revoked.\n";
+}
+
+function api_prune(array $args): void
+{
+    require_installed_app();
+    Database::migrate();
+    $options = cli_options($args);
+    $result = (new ApiRetentionService())->prune(
+        api_actor_user_id($options),
+        (int) ($options['limit'] ?? 1000),
+    );
+    echo "Expired rate-limit buckets pruned: {$result['rate_limit_buckets']}\n";
+    echo "Expired request-audit events pruned: {$result['request_audit_events']}\n";
+    echo "Expired command-idempotency keys pruned: {$result['command_idempotency_keys']}\n";
+}
+
+/** @param array<string, string|bool> $options */
+function api_actor_user_id(array $options): int
+{
+    $actorUserId = filter_var(
+        $options['actor-user-id'] ?? null,
+        FILTER_VALIDATE_INT,
+        ['options' => ['min_range' => 1]],
+    );
+    if ($actorUserId === false) {
+        throw new UserVisibleException(
+            'API_MANAGEMENT_ACTOR_INVALID',
+            'Provide --actor-user-id for an active user with integration-management capability.',
+        );
+    }
+    return (int) $actorUserId;
 }
 
 function backup_database(): void
@@ -1114,6 +1360,7 @@ function verify_release_package(string $path): void
     $archive = new PharData($path);
     $archivePrefix = 'phar://' . (realpath($path) ?: $path) . '/';
     $entries = [];
+    $integrationDocuments = [];
     $rootName = '';
     $uncompressedBytes = 0;
     foreach (new RecursiveIteratorIterator($archive) as $file) {
@@ -1152,8 +1399,157 @@ function verify_release_package(string $path): void
             throw new RuntimeException('Release package exceeds safe inspection limits.');
         }
         $entries[$relative] = true;
+        if (in_array($relative, public_integration_artifact_paths(), true)) {
+            $body = file_get_contents($pathname);
+            if (!is_string($body)) {
+                throw new RuntimeException('Release package contains an unreadable integration artifact: ' . $relative);
+            }
+            $integrationDocuments[$relative] = $body;
+        }
     }
-    foreach (['.htaccess', 'README.md', 'INSTALL.md', 'placement', 'app/Core/Backup/BackupArtifact.php', 'app/Core/Backup/BackupMetadata.php', 'app/Core/Backup/LegacySqliteBackupConverter.php', 'app/Core/Persistence/DatabaseConnectionInvalidException.php', 'app/Core/Persistence/DatabaseLock.php', 'app/Core/Persistence/DatabaseOwnership.php', 'app/Core/Persistence/SqlMigrationRunner.php', 'app/Security/OperationalBearerAuthorization.php', 'app/Security/SetupAuthorization.php', 'app/Security/SetupAuthorizationDenied.php', 'app/Security/SetupAuthorizationStageFailure.php', 'app/Security/SetupHttp.php', 'app/Views/setup-unlock.php', 'public/.htaccess', 'public/health.php', 'public/index.php', 'public/install.php', 'public/metrics.php', 'database/.htaccess', 'database/migrations/001_initial.sql', 'database/migrations/pgsql/001_portal_baseline.sql', 'docs/environment.md', 'docs/managed-hosting-contract.md', 'docs/disaster-recovery.md', 'docs/releases/v0.1.0-alpha.3.md', 'examples/env/local.env.example', 'examples/deployment/apache-vhost.conf', 'examples/deployment/nginx-server.conf', 'tests/.htaccess', 'tests/alpha1_release_acceptance.php', 'tests/backup_restore_contract.php', 'tests/database_connection_cleanup_contract.php', 'tests/database_ownership_contract.php', 'tests/database_ownership_worker.php', 'tests/legacy_backup_compatibility_contract.php', 'tests/migration_lock_contract.php', 'tests/migration_lock_worker.php', 'tests/install_concurrency_contract.php', 'tests/install_concurrency_worker.php', 'tests/setup_authorization_contract.php', 'tests/hosted_install_contract.php', 'tests/managed_hosting_contract.php', 'data/.gitkeep', 'data/.htaccess'] as $required) {
+    foreach (['.htaccess', 'README.md', 'INSTALL.md', 'placement', 'app/Core/Backup/BackupArtifact.php', 'app/Core/Backup/BackupMetadata.php', 'app/Core/Backup/LegacySqliteBackupConverter.php', 'app/Core/Persistence/DatabaseConnectionInvalidException.php', 'app/Core/Persistence/DatabaseLock.php', 'app/Core/Persistence/DatabaseOwnership.php', 'app/Core/Persistence/SqlMigrationRunner.php', 'app/Security/OperationalBearerAuthorization.php', 'app/Security/SetupAuthorization.php', 'app/Security/SetupAuthorizationDenied.php', 'app/Security/SetupAuthorizationStageFailure.php', 'app/Security/SetupHttp.php', 'app/Views/setup-unlock.php', 'public/.htaccess', 'public/health.php', 'public/index.php', 'public/install.php', 'public/metrics.php', 'database/.htaccess', 'database/migrations/001_initial.sql', 'database/migrations/pgsql/001_portal_baseline.sql', 'docs/environment.md', 'docs/managed-hosting-contract.md', 'docs/disaster-recovery.md', 'docs/releases/v0.1.0-alpha.4.md', 'examples/env/local.env.example', 'examples/deployment/apache-vhost.conf', 'examples/deployment/nginx-server.conf', 'tests/.htaccess', 'tests/alpha1_release_acceptance.php', 'tests/backup_restore_contract.php', 'tests/database_connection_cleanup_contract.php', 'tests/database_ownership_contract.php', 'tests/database_ownership_worker.php', 'tests/legacy_backup_compatibility_contract.php', 'tests/migration_lock_contract.php', 'tests/migration_lock_worker.php', 'tests/install_concurrency_contract.php', 'tests/install_concurrency_worker.php', 'tests/setup_authorization_contract.php', 'tests/hosted_install_contract.php', 'tests/managed_hosting_contract.php', 'data/.gitkeep', 'data/.htaccess'] as $required) {
+        if (!isset($entries[$required])) {
+            throw new RuntimeException('Release package is missing required file: ' . $required);
+        }
+    }
+    foreach ([
+        'app/Core/Security/AuthorizationUnavailable.php',
+        'app/Core/Modules/ModuleVersionIntegrity.php',
+        'app/Core/Install/InstallationState.php',
+        'app/Core/Install/InstallationStateUnavailable.php',
+        'app/Core/Events/InternalEventDeliveryWorker.php',
+        'app/Core/Events/InternalEventDeliveryReplayService.php',
+        'app/Core/Events/InternalEventFanoutWorker.php',
+        'app/Core/Events/InternalEventFanoutClaimLost.php',
+        'app/Core/Events/InternalEventFanoutReplayService.php',
+        'app/Core/Events/InternalEventSubscriberRegistry.php',
+        'app/Core/Events/InternalEventSubscription.php',
+        'app/Security/SetupRecoveryAuthority.php',
+        'database/migrations/047_internal_event_deliveries.sql',
+        'database/migrations/048_module_enabled_constraint.sql',
+        'database/migrations/049_public_event_projection.sql',
+        'database/migrations/pgsql/011_internal_event_deliveries.sql',
+        'database/migrations/pgsql/012_module_enabled_constraint.sql',
+        'database/migrations/pgsql/013_public_event_projection.sql',
+        'app/Core/Events/PublicEventProjection.php',
+        'app/Core/Events/PublicEventEnvelope.php',
+        'app/Core/Events/PublicEventDeadLetterReplayService.php',
+        'app/Core/Events/ReplayOperatorAuthorization.php',
+        'app/Operations/SupportReportService.php',
+        'app/Modules/Placement/Application/ApplicationStatusWriter.php',
+        'app/Modules/Placement/Application/ApplicationTransitionActor.php',
+        'app/Modules/Placement/Application/ApplicationTransitionCommand.php',
+        'app/Modules/Placement/Application/ApplicationTransitionResult.php',
+        'app/Modules/Placement/Application/ApplicationTransitionService.php',
+        'app/Modules/Placement/Application/UniversityOperationsWorkspace.php',
+        'app/Controllers/WebhookController.php',
+        'app/Integrations/IntegrationState.php',
+        'app/Integrations/Webhooks/CurlWebhookHttpTransport.php',
+        'app/Integrations/Webhooks/WebhookDeliveryReplayService.php',
+        'app/Integrations/Webhooks/WebhookDeliveryWorker.php',
+        'app/Integrations/Webhooks/WebhookHealthService.php',
+        'app/Integrations/Webhooks/WebhookHttpResult.php',
+        'app/Integrations/Webhooks/WebhookHttpTransport.php',
+        'app/Integrations/Webhooks/WebhookSecretCipher.php',
+        'app/Integrations/Webhooks/WebhookSigner.php',
+        'app/Integrations/Webhooks/WebhookSubscriptionService.php',
+        'app/Integrations/Webhooks/WebhookTransportException.php',
+        'app/Views/webhooks.php',
+        'app/Views/operations.php',
+        'app/Controllers/ApiAccessController.php',
+        'app/Api/Security/ApiAuthenticationUnavailable.php',
+        'app/Api/Security/ApiAuthorizationUnavailable.php',
+        'app/Api/Security/ApiKeyring.php',
+        'app/Api/Security/ApiManagementAuthorization.php',
+        'app/Api/Security/ApiPrincipal.php',
+        'app/Api/Security/ApiScopePolicy.php',
+        'app/Api/Security/ApiServiceAccountService.php',
+        'app/Api/Security/ApiTokenAuthenticator.php',
+        'app/Api/Security/InvalidApiCredential.php',
+        'app/Api/Operations/ApiHealthService.php',
+        'app/Api/Operations/ApiRateLimiter.php',
+        'app/Api/Operations/ApiRequestAuditService.php',
+        'app/Api/Operations/ApiRetentionService.php',
+        'app/Api/Commands/ApiApplicationTransitionCommandService.php',
+        'app/Api/Commands/ApiApplicationTransitionInput.php',
+        'app/Api/Commands/ApiApplicationTransitionOutcome.php',
+        'app/Api/Commands/ApiCommandConflict.php',
+        'app/Api/Commands/ApiCommandFingerprint.php',
+        'app/Api/Commands/ApiCommandHasher.php',
+        'app/Api/Commands/ApiCommandIdempotencyStore.php',
+        'app/Api/Commands/ApiCommandReservation.php',
+        'app/Api/Commands/ApiCommandUnavailable.php',
+        'app/Api/Commands/InvalidApiCommandInput.php',
+        'app/Api/Http/ApiCursorCodec.php',
+        'app/Api/Http/ApiApplicationTransitionRequestParser.php',
+        'app/Api/Http/ApiHttpException.php',
+        'app/Api/Http/ApiHttpRequest.php',
+        'app/Api/Http/ApiHttpResponse.php',
+        'app/Api/Http/ApiReadService.php',
+        'app/Api/Http/ApiRepresentationEtag.php',
+        'app/Api/Http/ApiStorageUnavailable.php',
+        'app/Api/Http/ApiV1Kernel.php',
+        'app/Views/api-access.php',
+        'database/migrations/050_signed_webhook_integrations.sql',
+        'database/migrations/051_webhook_claim_cursor.sql',
+        'database/migrations/052_api_identity_foundation.sql',
+        'database/migrations/053_api_read_pagination_indexes.sql',
+        'database/migrations/054_api_application_transition_commands.sql',
+        'database/migrations/pgsql/014_signed_webhook_integrations.sql',
+        'database/migrations/pgsql/015_webhook_claim_cursor.sql',
+        'database/migrations/pgsql/016_api_identity_foundation.sql',
+        'database/migrations/pgsql/017_api_read_pagination_indexes.sql',
+        'database/migrations/pgsql/018_api_application_transition_commands.sql',
+        'public/router.php',
+        'contracts/public-integration.v1.json',
+        'contracts/schemas/public-event-envelope.v1.schema.json',
+        'contracts/schemas/application.status_changed.v1.schema.json',
+        'contracts/examples/application.status_changed.v1.json',
+        'contracts/fixtures/application.status_changed.v1.consumer.json',
+        'contracts/fixtures/application.status_changed.v1.future-optional.consumer.json',
+        'contracts/openapi.v1.json',
+        'contracts/schemas/api-v1-application-transition-request.schema.json',
+        'contracts/examples/api-v1-application-transition-request.json',
+        'contracts/examples/api-v1-application-transition-response.json',
+        'contracts/fixtures/api-v1-application-transition.consumer.json',
+        'docs/integrations/events.md',
+        'docs/integrations/webhooks.md',
+        'docs/operations/integration-worker.md',
+        'docs/operations/support-report.md',
+        'docs/operations/university-workspace.md',
+        'docs/api/authentication.md',
+        'docs/api/v1.md',
+        'docs/compatibility.md',
+        'docs/security/integration-threat-model.md',
+        'examples/integrations/verify-webhook.php',
+        'tests/public_event_contract.php',
+        'tests/webhook_delivery_contract.php',
+        'tests/webhook_delivery_concurrency_contract.php',
+        'tests/webhook_delivery_concurrency_worker.php',
+        'tests/webhook_revoke_completion_concurrency_contract.php',
+        'tests/webhook_revoke_completion_concurrency_worker.php',
+        'tests/webhook_capture_revoke_concurrency_contract.php',
+        'tests/webhook_capture_revoke_concurrency_worker.php',
+        'tests/webhook_receiver_example_contract.php',
+        'tests/operator_simplicity_contract.php',
+        'tests/api_identity_contract.php',
+        'tests/api_identity_rotation_concurrency_contract.php',
+        'tests/api_identity_rotation_concurrency_worker.php',
+        'tests/api_http_contract.php',
+        'tests/application_transition_boundary_contract.php',
+        'tests/api_application_transition_command_contract.php',
+        'tests/api_application_transition_command_concurrency_contract.php',
+        'tests/api_application_transition_command_concurrency_worker.php',
+        'tests/api_application_transition_input_contract.php',
+        'tests/validate_public_api_contracts.py',
+        'tests/validate_public_event_schemas.py',
+        'tests/requirements-public-event-schema.txt',
+        'tests/authorization_failure_contract.php',
+        'tests/authorization_state_contract.php',
+        'tests/installation_state_contract.php',
+        'tests/internal_event_delivery_contract.php',
+        'tests/authorized_setup_recovery_fixture.php',
+    ] as $required) {
         if (!isset($entries[$required])) {
             throw new RuntimeException('Release package is missing required file: ' . $required);
         }
@@ -1171,8 +1567,13 @@ function verify_release_package(string $path): void
             throw new RuntimeException('Release package contains forbidden runtime data.');
         }
     }
+    $integrationFailures = public_integration_artifact_failures($integrationDocuments);
+    if ($integrationFailures !== []) {
+        throw new RuntimeException('Release package integration contract is invalid: ' . $integrationFailures[0]);
+    }
     echo "Package checksum verified: {$path}\n";
     echo "Package archive inspected: " . count($entries) . " files.\n";
+    echo "Package integration JSON verified.\n";
 }
 
 function release_package_files(): array
@@ -1190,6 +1591,7 @@ function release_package_files(): array
         'placement',
         'app',
         'config',
+        'contracts',
         'database',
         'docs',
         'examples',
@@ -1268,12 +1670,14 @@ function deliver_notifications(array $args): void
 
 function work_outbox(array $args): void
 {
-    if (!Database::isInstalled()) {
+    if (!Database::hasInstalledMarkerStrict()) {
         throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
     }
     Database::migrate();
     $options = cli_options($args);
     $limit = max(1, min(1000, (int) ($options['limit'] ?? 100)));
+    $fanoutResult = (new InternalEventFanoutWorker())->work($limit);
+    $internalResult = (new InternalEventDeliveryWorker())->work($limit);
     $result = (new DomainEventOutboxWorker())->work($limit);
     echo "Domain events claimed: {$result['claimed']}\n";
     echo "Delivered: {$result['delivered']}\n";
@@ -1292,12 +1696,152 @@ function work_outbox(array $args): void
         }
         echo "\n";
     }
-    if ($result['failed'] > 0 || $result['outcome_unknown'] > 0) {
+    echo "Internal fanout claimed: {$fanoutResult['claimed']}\n";
+    echo "Internal fanout expanded: {$fanoutResult['expanded']}\n";
+    echo "Internal deliveries created: {$fanoutResult['deliveries_created']}\n";
+    echo "Internal fanout failed: {$fanoutResult['failed']}\n";
+    echo "Internal fanout retrying: {$fanoutResult['retrying']}\n";
+    echo "Internal fanout dead-lettered: {$fanoutResult['dead_lettered']}\n";
+    echo "Internal fanout outcome unknown: {$fanoutResult['outcome_unknown']}\n";
+    echo "Internal fanout claim lost: {$fanoutResult['claim_lost']}\n";
+    foreach ($fanoutResult['rows'] as $row) {
+        echo "{$row['public_id']},{$row['module_key']},{$row['status']}";
+        if ($row['error'] !== '') {
+            echo ',' . $row['error'];
+        }
+        echo "\n";
+    }
+    echo "Internal observers claimed: {$internalResult['claimed']}\n";
+    echo "Internal observers delivered: {$internalResult['delivered']}\n";
+    echo "Internal observers skipped: {$internalResult['skipped']}\n";
+    echo "Internal observers failed: {$internalResult['failed']}\n";
+    echo "Internal observers retrying: {$internalResult['retrying']}\n";
+    echo "Internal observers dead-lettered: {$internalResult['dead_lettered']}\n";
+    echo "Internal observer outcome unknown: {$internalResult['outcome_unknown']}\n";
+    echo "Internal observer claim lost: {$internalResult['claim_lost']}\n";
+    foreach ($internalResult['rows'] as $row) {
+        echo "{$row['public_id']},{$row['subscription_id']},{$row['status']}";
+        if ($row['error'] !== '') {
+            echo ',' . $row['error'];
+        }
+        echo "\n";
+    }
+    if ($result['failed'] > 0 || $result['outcome_unknown'] > 0
+        || $fanoutResult['failed'] > 0 || $fanoutResult['outcome_unknown'] > 0
+        || $internalResult['failed'] > 0 || $internalResult['outcome_unknown'] > 0) {
         throw new UserVisibleException(
             'CLI_DOMAIN_EVENT_DELIVERY_FAILED',
-            'One or more domain events could not be delivered. Review the incident references above.',
+            'One or more domain events or internal observers could not be delivered. Review the incident references above.',
         );
     }
+}
+
+function work_integrations(array $args): void
+{
+    if (!Database::hasInstalledMarkerStrict()) {
+        throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
+    }
+    Database::migrate();
+    $options = cli_options($args);
+    $limit = max(1, min(1000, (int) ($options['limit'] ?? 100)));
+    $result = (new WebhookDeliveryWorker())->work($limit);
+    echo "Webhook deliveries claimed: {$result['claimed']}\n";
+    echo "Succeeded: {$result['succeeded']}\n";
+    echo "Retrying: {$result['retrying']}\n";
+    echo "Dead-lettered: {$result['dead_lettered']}\n";
+    echo "Claim lost: {$result['claim_lost']}\n";
+    foreach ($result['rows'] as $row) {
+        echo "{$row['delivery_id']},{$row['status']}";
+        if ($row['failure_reference'] !== '') {
+            echo ',' . $row['failure_reference'];
+        }
+        echo "\n";
+    }
+    if ($result['retrying'] > 0 || $result['dead_lettered'] > 0 || $result['claim_lost'] > 0) {
+        throw new UserVisibleException(
+            'CLI_WEBHOOK_DELIVERY_DEGRADED',
+            'One or more webhook deliveries need retry or administrator review. See the redacted references above.',
+        );
+    }
+}
+
+function replay_webhook_delivery(array $args): void
+{
+    if (!Database::hasInstalledMarkerStrict()) {
+        throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
+    }
+    Database::migrate();
+    $options = cli_options($args);
+    $deliveryPublicId = trim((string) ($options['delivery'] ?? ''));
+    $actorUserId = replay_actor_user_id($options, ReplayOperatorAuthorization::PUBLIC_EVENT);
+    $result = (new WebhookDeliveryReplayService())->replay($deliveryPublicId, $actorUserId);
+    echo "Webhook delivery replay {$result['status']}: {$deliveryPublicId}\n";
+}
+
+function replay_internal_delivery(array $args): void
+{
+    if (!Database::hasInstalledMarkerStrict()) {
+        throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
+    }
+    Database::migrate();
+    $options = cli_options($args);
+    $eventPublicId = trim((string) ($options['event'] ?? ''));
+    $subscriptionId = trim((string) ($options['subscription'] ?? ''));
+    $actorUserId = replay_actor_user_id($options, ReplayOperatorAuthorization::INTERNAL_DELIVERY);
+    $result = (new InternalEventDeliveryReplayService())->replay(
+        $eventPublicId,
+        $subscriptionId,
+        $actorUserId,
+    );
+    echo "Internal observer replay {$result['status']}: {$eventPublicId},{$subscriptionId}\n";
+}
+
+function replay_public_event(array $args): void
+{
+    if (!Database::hasInstalledMarkerStrict()) {
+        throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
+    }
+    Database::migrate();
+    $options = cli_options($args);
+    $eventPublicId = trim((string) ($options['event'] ?? ''));
+    $actorUserId = replay_actor_user_id($options, ReplayOperatorAuthorization::PUBLIC_EVENT);
+    $result = (new PublicEventDeadLetterReplayService())->replay(
+        $eventPublicId,
+        $actorUserId,
+    );
+    echo "Public event replay {$result['status']}: {$eventPublicId}\n";
+}
+
+function replay_internal_fanout(array $args): void
+{
+    if (!Database::hasInstalledMarkerStrict()) {
+        throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
+    }
+    Database::migrate();
+    $options = cli_options($args);
+    $eventPublicId = trim((string) ($options['event'] ?? ''));
+    $moduleKey = trim((string) ($options['module'] ?? ''));
+    $actorUserId = replay_actor_user_id($options, ReplayOperatorAuthorization::INTERNAL_FANOUT);
+    $result = (new InternalEventFanoutReplayService())->replay(
+        $eventPublicId,
+        $moduleKey,
+        $actorUserId,
+    );
+    echo "Internal observer fanout replay {$result['status']}: {$eventPublicId},{$moduleKey}\n";
+}
+
+/** @param array<string, string|bool> $options */
+function replay_actor_user_id(array $options, string $context): int
+{
+    $actorUserId = filter_var(
+        $options['actor-user-id'] ?? null,
+        FILTER_VALIDATE_INT,
+        ['options' => ['min_range' => 1]],
+    );
+    if ($actorUserId === false) {
+        throw ReplayOperatorAuthorization::invalid($context);
+    }
+    return (int) $actorUserId;
 }
 
 function certify_notifications(array $args): void
@@ -1405,6 +1949,7 @@ function smoke_http(array $args): void
     $pages = [
         'board' => '/?r=board',
         'records' => '/?r=records',
+        'operations' => '/?r=operations',
         'reports' => '/?r=reports',
         'import' => '/?r=import',
         'notifications' => '/?r=notifications',
@@ -1487,21 +2032,22 @@ function smoke_http(array $args): void
 
         $restrictedForbidden = [
             'restricted records block' => '/?r=records',
+            'restricted operations block' => '/?r=operations',
             'restricted reports block' => '/?r=reports',
             'restricted import block' => '/?r=import',
             'restricted preferences block' => '/?r=preferences',
             'restricted wanted block' => '/?r=wanted',
             'restricted admin block' => '/?r=admin',
+            'restricted integrations block' => '/?r=integrations',
             'restricted system block' => '/?r=system',
         ];
         foreach ($restrictedForbidden as $label => $path) {
             $response = http_smoke_request('GET', $baseUrl . $path, [], $restrictedCookies, $timeout);
-            if (!in_array($response['status'], [302, 303], true)) {
-                throw new RuntimeException("HTTP smoke failed for {$label}: expected a redirect, received HTTP " . (int) $response['status'] . '.');
+            if ($response['status'] !== 403) {
+                throw new RuntimeException("HTTP smoke failed for {$label}: expected HTTP 403, received HTTP " . (int) $response['status'] . '.');
             }
-            $location = http_smoke_header($response['headers'], 'Location');
-            if ($location !== '/') {
-                throw new RuntimeException("HTTP smoke failed for {$label}: expected redirect to /, received " . ($location === '' ? 'no Location header' : $location) . '.');
+            if ($response['body'] !== "Access denied.\n") {
+                throw new RuntimeException("HTTP smoke failed for {$label}: the fixed access-denied response changed.");
             }
             echo "OK {$label}\n";
             $checks++;
@@ -1627,6 +2173,7 @@ function browser_qa_routes(string $baseUrl): array
         ['label' => 'Board - wanted flag', 'url' => $baseUrl . '/?flag=wanted', 'auth' => 'admin/control/mobile/floor', 'focus' => 'Urgent queue flag is visible without changing layout width.'],
         ['label' => 'Board - conflict flag', 'url' => $baseUrl . '/?flag=conflict', 'auth' => 'admin/control/placement', 'focus' => 'Conflict warning text wraps cleanly.'],
         ['label' => 'Records', 'url' => $baseUrl . '/?r=records', 'auth' => 'admin/control', 'focus' => 'Record grids scroll inside their own container.'],
+        ['label' => 'Opportunity coverage', 'url' => $baseUrl . '/?r=operations', 'auth' => 'admin/placement/auditor', 'focus' => 'Action queues keep outcome, evidence limits, and next steps visible.'],
         ['label' => 'Import', 'url' => $baseUrl . '/?r=import', 'auth' => 'admin/control', 'focus' => 'Preview and rollback panels fit on phone width.'],
         ['label' => 'Notifications', 'url' => $baseUrl . '/?r=notifications', 'auth' => 'role-scoped', 'focus' => 'Queue rows and actions do not overlap.'],
         ['label' => 'Reports', 'url' => $baseUrl . '/?r=reports', 'auth' => 'admin/placement/auditor', 'focus' => 'Summary tables remain scannable.'],
@@ -1677,6 +2224,18 @@ function print_browser_qa_plan_text(array $plan): void
     echo "  php placement seed-large-demo {$plan['candidate_target']} {$plan['company_target']}\n";
     echo "  php placement readiness\n";
     echo "  php placement metrics\n";
+    echo "  php placement support-report\n";
+    echo "  php placement api-status\n";
+    echo "  php placement api-enable --actor-user-id=USER_ID\n";
+    echo "  php placement api-disable --actor-user-id=USER_ID\n";
+    echo "  php placement api-service-account-create --name=NAME --scopes=opportunities.read,applications.read,applications.transition --actor-user-id=USER_ID [--expiry-days=90]\n";
+    echo "  php placement api-service-account-list --actor-user-id=USER_ID\n";
+    echo "  php placement api-service-account-enable --service-account=apisa_ID --actor-user-id=USER_ID\n";
+    echo "  php placement api-service-account-disable --service-account=apisa_ID --actor-user-id=USER_ID\n";
+    echo "  php placement api-service-account-revoke --service-account=apisa_ID --actor-user-id=USER_ID\n";
+    echo "  php placement api-token-rotate --service-account=apisa_ID --actor-user-id=USER_ID [--expiry-days=90]\n";
+    echo "  php placement api-token-revoke --token-id=LOOKUP_ID --actor-user-id=USER_ID\n";
+    echo "  php placement api-prune --actor-user-id=USER_ID [--limit=1000]\n";
     echo "  php placement serve\n";
     echo "  php placement smoke-http --base-url={$plan['base_url']} --email=admin@example.test --password=password123 --restricted-email=atlas@example.test --restricted-password=password123\n";
     echo "\nCross-browser matrix:\n";
@@ -1981,34 +2540,155 @@ function publication_check(): void
         'public/.htaccess',
         'data/.htaccess',
         'database/.htaccess',
+        'database/migrations/047_internal_event_deliveries.sql',
+        'database/migrations/048_module_enabled_constraint.sql',
+        'database/migrations/049_public_event_projection.sql',
+        'database/migrations/050_signed_webhook_integrations.sql',
+        'database/migrations/051_webhook_claim_cursor.sql',
+        'database/migrations/052_api_identity_foundation.sql',
+        'database/migrations/053_api_read_pagination_indexes.sql',
+        'database/migrations/054_api_application_transition_commands.sql',
         'database/migrations/pgsql/001_portal_baseline.sql',
+        'database/migrations/pgsql/011_internal_event_deliveries.sql',
+        'database/migrations/pgsql/012_module_enabled_constraint.sql',
+        'database/migrations/pgsql/013_public_event_projection.sql',
+        'database/migrations/pgsql/014_signed_webhook_integrations.sql',
+        'database/migrations/pgsql/015_webhook_claim_cursor.sql',
+        'database/migrations/pgsql/016_api_identity_foundation.sql',
+        'database/migrations/pgsql/017_api_read_pagination_indexes.sql',
+        'database/migrations/pgsql/018_api_application_transition_commands.sql',
+        'contracts/public-integration.v1.json',
+        'contracts/openapi.v1.json',
+        'contracts/schemas/public-event-envelope.v1.schema.json',
+        'contracts/schemas/application.status_changed.v1.schema.json',
+        'contracts/examples/application.status_changed.v1.json',
+        'contracts/fixtures/application.status_changed.v1.consumer.json',
+        'contracts/fixtures/application.status_changed.v1.future-optional.consumer.json',
         'tests/.htaccess',
         'docs/environment.md',
+        'docs/integrations/events.md',
+        'docs/integrations/webhooks.md',
+        'docs/operations/integration-worker.md',
+        'docs/operations/support-report.md',
+        'docs/operations/university-workspace.md',
+        'docs/api/authentication.md',
+        'docs/api/v1.md',
+        'docs/compatibility.md',
+        'docs/security/integration-threat-model.md',
         'docs/release-checklist.md',
         'docs/migration-from-legacy.md',
-        'docs/releases/v0.1.0-alpha.3.md',
+        'docs/releases/v0.1.0-alpha.4.md',
         'app/Core/Backup/BackupArtifact.php',
         'app/Core/Backup/BackupMetadata.php',
         'app/Core/Backup/LegacySqliteBackupConverter.php',
+        'app/Core/Events/InternalEventDeliveryWorker.php',
+        'app/Core/Events/InternalEventSubscriberRegistry.php',
+        'app/Core/Events/InternalEventSubscription.php',
+        'app/Core/Events/PublicEventDeadLetterReplayService.php',
+        'app/Core/Events/ReplayOperatorAuthorization.php',
+        'app/Operations/SupportReportService.php',
+        'app/Controllers/WebhookController.php',
+        'app/Controllers/ApiAccessController.php',
+        'app/Api/Security/ApiAuthenticationUnavailable.php',
+        'app/Api/Security/ApiAuthorizationUnavailable.php',
+        'app/Api/Security/ApiKeyring.php',
+        'app/Api/Security/ApiManagementAuthorization.php',
+        'app/Api/Security/ApiPrincipal.php',
+        'app/Api/Security/ApiScopePolicy.php',
+        'app/Api/Security/ApiServiceAccountService.php',
+        'app/Api/Security/ApiTokenAuthenticator.php',
+        'app/Api/Security/InvalidApiCredential.php',
+        'app/Api/Operations/ApiHealthService.php',
+        'app/Api/Operations/ApiRateLimiter.php',
+        'app/Api/Operations/ApiRequestAuditService.php',
+        'app/Api/Operations/ApiRetentionService.php',
+        'app/Api/Commands/ApiApplicationTransitionCommandService.php',
+        'app/Api/Commands/ApiApplicationTransitionInput.php',
+        'app/Api/Commands/ApiApplicationTransitionOutcome.php',
+        'app/Api/Commands/ApiCommandConflict.php',
+        'app/Api/Commands/ApiCommandFingerprint.php',
+        'app/Api/Commands/ApiCommandHasher.php',
+        'app/Api/Commands/ApiCommandIdempotencyStore.php',
+        'app/Api/Commands/ApiCommandReservation.php',
+        'app/Api/Commands/ApiCommandUnavailable.php',
+        'app/Api/Commands/InvalidApiCommandInput.php',
+        'app/Api/Http/ApiCursorCodec.php',
+        'app/Api/Http/ApiApplicationTransitionRequestParser.php',
+        'app/Api/Http/ApiHttpException.php',
+        'app/Api/Http/ApiHttpRequest.php',
+        'app/Api/Http/ApiHttpResponse.php',
+        'app/Api/Http/ApiReadService.php',
+        'app/Api/Http/ApiRepresentationEtag.php',
+        'app/Api/Http/ApiStorageUnavailable.php',
+        'app/Api/Http/ApiV1Kernel.php',
+        'app/Modules/Placement/Application/ApplicationTransitionActor.php',
+        'app/Modules/Placement/Application/ApplicationTransitionCommand.php',
+        'app/Modules/Placement/Application/ApplicationTransitionResult.php',
+        'app/Modules/Placement/Application/ApplicationTransitionService.php',
+        'app/Modules/Placement/Application/UniversityOperationsWorkspace.php',
+        'app/Integrations/IntegrationState.php',
+        'app/Integrations/Webhooks/CurlWebhookHttpTransport.php',
+        'app/Integrations/Webhooks/WebhookDeliveryReplayService.php',
+        'app/Integrations/Webhooks/WebhookDeliveryWorker.php',
+        'app/Integrations/Webhooks/WebhookHealthService.php',
+        'app/Integrations/Webhooks/WebhookHttpResult.php',
+        'app/Integrations/Webhooks/WebhookHttpTransport.php',
+        'app/Integrations/Webhooks/WebhookSecretCipher.php',
+        'app/Integrations/Webhooks/WebhookSigner.php',
+        'app/Integrations/Webhooks/WebhookSubscriptionService.php',
+        'app/Integrations/Webhooks/WebhookTransportException.php',
+        'app/Views/webhooks.php',
+        'app/Views/operations.php',
+        'app/Views/api-access.php',
+        'app/Core/Modules/ModuleVersionIntegrity.php',
         'app/Core/Persistence/DatabaseConnectionInvalidException.php',
+        'app/Core/Security/AuthorizationUnavailable.php',
         'app/Security/OperationalBearerAuthorization.php',
         'app/Security/SetupAuthorization.php',
         'app/Security/SetupAuthorizationDenied.php',
         'app/Security/SetupAuthorizationStageFailure.php',
         'app/Security/SetupHttp.php',
+        'app/Security/SetupRecoveryAuthority.php',
         'app/Views/setup-unlock.php',
         'public/install.php',
         'public/health.php',
         'public/metrics.php',
+        'public/router.php',
         'tests/install_concurrency_contract.php',
         'tests/install_concurrency_worker.php',
         'tests/alpha1_release_acceptance.php',
         'tests/backup_restore_contract.php',
         'tests/database_connection_cleanup_contract.php',
         'tests/legacy_backup_compatibility_contract.php',
+        'tests/internal_event_delivery_contract.php',
+        'tests/public_event_contract.php',
+        'tests/webhook_delivery_contract.php',
+        'tests/webhook_delivery_concurrency_contract.php',
+        'tests/webhook_delivery_concurrency_worker.php',
+        'tests/webhook_revoke_completion_concurrency_contract.php',
+        'tests/webhook_revoke_completion_concurrency_worker.php',
+        'tests/webhook_capture_revoke_concurrency_contract.php',
+        'tests/webhook_capture_revoke_concurrency_worker.php',
+        'tests/webhook_receiver_example_contract.php',
+        'tests/operator_simplicity_contract.php',
+        'tests/api_identity_contract.php',
+        'tests/api_identity_rotation_concurrency_contract.php',
+        'tests/api_identity_rotation_concurrency_worker.php',
+        'tests/api_http_contract.php',
+        'tests/application_transition_boundary_contract.php',
+        'tests/api_application_transition_command_contract.php',
+        'tests/api_application_transition_command_concurrency_contract.php',
+        'tests/api_application_transition_command_concurrency_worker.php',
+        'tests/api_application_transition_input_contract.php',
+        'tests/validate_public_api_contracts.py',
+        'tests/validate_public_event_schemas.py',
+        'tests/requirements-public-event-schema.txt',
+        'tests/authorized_setup_recovery_fixture.php',
+        'tests/authorization_failure_contract.php',
         'tests/setup_authorization_contract.php',
         'tests/hosted_install_contract.php',
         'tests/managed_hosting_contract.php',
+        'examples/integrations/verify-webhook.php',
         'examples/env/local.env.example',
         'examples/deployment/apache-vhost.conf',
         'examples/deployment/nginx-server.conf',
@@ -2019,6 +2699,16 @@ function publication_check(): void
         if (!is_file(__DIR__ . '/' . $path)) {
             $failures[] = "Missing required release file: {$path}";
         }
+    }
+
+    $integrationDocuments = [];
+    foreach (public_integration_artifact_paths() as $path) {
+        if (is_file(__DIR__ . '/' . $path)) {
+            $integrationDocuments[$path] = (string) file_get_contents(__DIR__ . '/' . $path);
+        }
+    }
+    foreach (public_integration_artifact_failures($integrationDocuments) as $failure) {
+        $failures[] = 'Invalid public integration artifact: ' . $failure;
     }
 
     $gitignore = is_file(__DIR__ . '/.gitignore') ? (string) file_get_contents(__DIR__ . '/.gitignore') : '';
@@ -2050,6 +2740,376 @@ function publication_check(): void
     echo "OK: Private archive and runtime data patterns are ignored.\n";
     echo "OK: No forbidden publish-risk files found outside allowed paths.\n";
     echo "OK: No obvious secret or token patterns found in public files.\n";
+    echo "OK: Public integration JSON and frozen event/API compatibility fixtures are valid.\n";
+}
+
+/** @return list<string> */
+function public_integration_artifact_paths(): array
+{
+    return [
+        'contracts/public-integration.v1.json',
+        'contracts/openapi.v1.json',
+        'contracts/schemas/public-event-envelope.v1.schema.json',
+        'contracts/schemas/application.status_changed.v1.schema.json',
+        'contracts/schemas/api-v1-opportunity.schema.json',
+        'contracts/schemas/api-v1-application.schema.json',
+        'contracts/schemas/api-v1-meta.schema.json',
+        'contracts/schemas/api-v1-page.schema.json',
+        'contracts/schemas/api-v1-error.schema.json',
+        'contracts/schemas/api-v1-service.schema.json',
+        'contracts/schemas/api-v1-opportunity-item.schema.json',
+        'contracts/schemas/api-v1-application-item.schema.json',
+        'contracts/schemas/api-v1-opportunity-collection.schema.json',
+        'contracts/schemas/api-v1-application-collection.schema.json',
+        'contracts/schemas/api-v1-application-transition-request.schema.json',
+        'contracts/examples/application.status_changed.v1.json',
+        'contracts/examples/api-v1-service.json',
+        'contracts/examples/api-v1-opportunity-item.json',
+        'contracts/examples/api-v1-opportunity-collection.json',
+        'contracts/examples/api-v1-application-item.json',
+        'contracts/examples/api-v1-application-collection.json',
+        'contracts/examples/api-v1-application-transition-request.json',
+        'contracts/examples/api-v1-application-transition-response.json',
+        'contracts/examples/api-v1-error.json',
+        'contracts/fixtures/application.status_changed.v1.consumer.json',
+        'contracts/fixtures/application.status_changed.v1.future-optional.consumer.json',
+        'contracts/fixtures/api-v1-opportunity.consumer.json',
+        'contracts/fixtures/api-v1-application.consumer.json',
+        'contracts/fixtures/api-v1-application-transition.consumer.json',
+        'contracts/fixtures/api-v1-opportunity.future-field.consumer.json',
+    ];
+}
+
+/**
+ * @param array<string, string> $documents
+ * @return list<string>
+ */
+function public_integration_artifact_failures(array $documents): array
+{
+    $decoded = [];
+    $failures = [];
+    foreach (public_integration_artifact_paths() as $path) {
+        if (!array_key_exists($path, $documents)) {
+            $failures[] = 'missing ' . $path;
+            continue;
+        }
+        try {
+            $value = json_decode($documents[$path], true, 64, JSON_THROW_ON_ERROR);
+        } catch (JsonException) {
+            $failures[] = 'malformed JSON in ' . $path;
+            continue;
+        }
+        if (!is_array($value) || array_is_list($value)) {
+            $failures[] = 'top-level JSON object required in ' . $path;
+            continue;
+        }
+        $decoded[$path] = $value;
+    }
+    if ($failures !== []) {
+        return $failures;
+    }
+
+    $contractPath = 'contracts/public-integration.v1.json';
+    $expectedContract = [
+        'schema' => 1,
+        'event_schemas' => ['application.status_changed' => [1]],
+        'api_scopes' => ['opportunities.read', 'applications.read', 'applications.transition'],
+        'engine_api' => ['v1'],
+    ];
+    if ($decoded[$contractPath] !== $expectedContract) {
+        $failures[] = 'public-integration.v1.json differs from the frozen event and governed API declaration';
+    }
+
+    $requiredEnvelope = [
+        'event_id', 'event_type', 'schema_version', 'occurred_at',
+        'instance_id', 'aggregate', 'data', 'trace',
+    ];
+    foreach ([
+        'contracts/schemas/public-event-envelope.v1.schema.json',
+        'contracts/schemas/application.status_changed.v1.schema.json',
+    ] as $path) {
+        $schema = $decoded[$path];
+        $required = $schema['required'] ?? null;
+        if (($schema['$schema'] ?? null) !== 'https://json-schema.org/draft/2020-12/schema'
+            || ($schema['type'] ?? null) !== 'object'
+            || ($schema['additionalProperties'] ?? null) !== false
+            || !is_array($required)
+            || array_values($required) !== $requiredEnvelope
+            || (($schema['properties']['event_type']['const'] ?? null) !== 'application.status_changed')
+            || (($schema['properties']['schema_version']['const'] ?? null) !== 1)
+            || (($schema['properties']['aggregate']['additionalProperties'] ?? null) !== false)
+            || (($schema['properties']['trace']['additionalProperties'] ?? null) !== false)) {
+            $failures[] = 'strict producer envelope constraints differ in ' . $path;
+        }
+    }
+    $eventSchema = $decoded['contracts/schemas/application.status_changed.v1.schema.json'];
+    $envelopeSchema = $decoded['contracts/schemas/public-event-envelope.v1.schema.json'];
+    if (!is_string($eventSchema['$id'] ?? null)
+        || ($envelopeSchema['properties']['data']['$ref'] ?? null)
+            !== $eventSchema['$id'] . '#/$defs/data') {
+        $failures[] = 'envelope data reference does not resolve from the event schema absolute identifier';
+    }
+    if (($eventSchema['$defs']['data']['additionalProperties'] ?? null) !== false
+        || ($eventSchema['$defs']['data']['required'] ?? null) !== ['from_status', 'to_status']) {
+        $failures[] = 'application status data schema is not strict';
+    }
+
+    $example = $decoded['contracts/examples/application.status_changed.v1.json'];
+    $frozen = $decoded['contracts/fixtures/application.status_changed.v1.consumer.json'];
+    $future = $decoded['contracts/fixtures/application.status_changed.v1.future-optional.consumer.json'];
+    foreach (public_event_wire_failures($example, true) as $failure) {
+        $failures[] = 'example: ' . $failure;
+    }
+    foreach (public_event_wire_failures($frozen, true) as $failure) {
+        $failures[] = 'frozen consumer fixture: ' . $failure;
+    }
+    foreach (public_event_wire_failures($future, false) as $failure) {
+        $failures[] = 'future-optional consumer fixture: ' . $failure;
+    }
+    if (public_event_wire_failures($future, true) === []) {
+        $failures[] = 'future-optional fixture does not prove strict producer rejection';
+    }
+    if (public_event_consumer_view($frozen) !== public_event_consumer_view($future)) {
+        $failures[] = 'future-optional fixture changes the frozen v1 consumer view';
+    }
+
+    $apiSchemaPaths = [
+        'contracts/schemas/api-v1-opportunity.schema.json' => 'urn:cpe:api:v1:opportunity',
+        'contracts/schemas/api-v1-application.schema.json' => 'urn:cpe:api:v1:application',
+        'contracts/schemas/api-v1-meta.schema.json' => 'urn:cpe:api:v1:meta',
+        'contracts/schemas/api-v1-page.schema.json' => 'urn:cpe:api:v1:page',
+        'contracts/schemas/api-v1-error.schema.json' => 'urn:cpe:api:v1:error',
+        'contracts/schemas/api-v1-service.schema.json' => 'urn:cpe:api:v1:service',
+        'contracts/schemas/api-v1-opportunity-item.schema.json' => 'urn:cpe:api:v1:opportunity-item',
+        'contracts/schemas/api-v1-application-item.schema.json' => 'urn:cpe:api:v1:application-item',
+        'contracts/schemas/api-v1-opportunity-collection.schema.json' => 'urn:cpe:api:v1:opportunity-collection',
+        'contracts/schemas/api-v1-application-collection.schema.json' => 'urn:cpe:api:v1:application-collection',
+        'contracts/schemas/api-v1-application-transition-request.schema.json' => 'urn:cpe:api:v1:application-transition-request',
+    ];
+    foreach ($apiSchemaPaths as $path => $schemaId) {
+        $schema = $decoded[$path];
+        if (($schema['$schema'] ?? null) !== 'https://json-schema.org/draft/2020-12/schema'
+            || ($schema['$id'] ?? null) !== $schemaId
+            || ($schema['type'] ?? null) !== 'object'
+            || ($schema['additionalProperties'] ?? null) !== false) {
+            $failures[] = 'strict API v1 schema root differs in ' . $path;
+        }
+    }
+    $opportunityFields = [
+        'id', 'cycle_id', 'organization_id', 'organization_code', 'organization_name',
+        'opportunity_key', 'title', 'status', 'created_at', 'updated_at',
+    ];
+    $applicationFields = [
+        'id', 'participant_id', 'opportunity_id', 'status', 'aggregate_version',
+        'created_at', 'updated_at',
+    ];
+    if (($decoded['contracts/schemas/api-v1-opportunity.schema.json']['required'] ?? null) !== $opportunityFields
+        || array_keys($decoded['contracts/schemas/api-v1-opportunity.schema.json']['properties'] ?? []) !== $opportunityFields) {
+        $failures[] = 'opportunity API producer allowlist differs';
+    }
+    if (($decoded['contracts/schemas/api-v1-application.schema.json']['required'] ?? null) !== $applicationFields
+        || array_keys($decoded['contracts/schemas/api-v1-application.schema.json']['properties'] ?? []) !== $applicationFields) {
+        $failures[] = 'application API producer allowlist differs';
+    }
+
+    $openapi = $decoded['contracts/openapi.v1.json'];
+    $expectedApiPaths = [
+        '/api/v1',
+        '/api/v1/opportunities',
+        '/api/v1/opportunities/{public_id}',
+        '/api/v1/applications',
+        '/api/v1/applications/{public_id}',
+        '/api/v1/applications/{public_id}/transitions',
+    ];
+    $actualApiPaths = is_array($openapi['paths'] ?? null) ? array_keys($openapi['paths']) : [];
+    sort($expectedApiPaths);
+    sort($actualApiPaths);
+    if (($openapi['openapi'] ?? null) !== '3.1.0'
+        || ($openapi['jsonSchemaDialect'] ?? null) !== 'https://json-schema.org/draft/2020-12/schema'
+        || ($openapi['security'] ?? null) !== [['bearerAuth' => []]]
+        || $actualApiPaths !== $expectedApiPaths
+        || (($openapi['components']['securitySchemes']['bearerAuth'] ?? null) !== [
+            'type' => 'http',
+            'scheme' => 'bearer',
+            'bearerFormat' => 'CPE API token',
+        ])) {
+        $failures[] = 'OpenAPI v1 root, path, or Bearer security contract differs';
+    }
+    $httpMethods = ['get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace'];
+    foreach (($openapi['paths'] ?? []) as $path => $pathItem) {
+        if (!is_array($pathItem)) {
+            $failures[] = 'OpenAPI path item is invalid: ' . $path;
+            continue;
+        }
+        $methods = array_values(array_intersect(array_keys($pathItem), $httpMethods));
+        sort($methods);
+        $expectedMethods = $path === '/api/v1/applications/{public_id}/transitions'
+            ? ['post']
+            : ['get', 'head'];
+        if ($methods !== $expectedMethods) {
+            $failures[] = 'OpenAPI method map differs: ' . $path;
+        }
+        foreach ($methods as $method) {
+            $operation = $pathItem[$method] ?? null;
+            $command = $path === '/api/v1/applications/{public_id}/transitions';
+            if (!is_array($operation)
+                || array_key_exists('requestBody', $operation) !== $command
+                || !is_string($operation['operationId'] ?? null)
+                || !is_array($operation['responses'] ?? null)
+                || !array_key_exists('200', $operation['responses'])) {
+                $failures[] = 'OpenAPI operation is incomplete: ' . strtoupper($method) . ' ' . $path;
+            }
+        }
+    }
+    $expectedExamples = [
+        'service' => 'examples/api-v1-service.json',
+        'opportunity_item' => 'examples/api-v1-opportunity-item.json',
+        'opportunity_collection' => 'examples/api-v1-opportunity-collection.json',
+        'application_item' => 'examples/api-v1-application-item.json',
+        'application_collection' => 'examples/api-v1-application-collection.json',
+        'application_transition_request' => 'examples/api-v1-application-transition-request.json',
+        'application_transition_response' => 'examples/api-v1-application-transition-response.json',
+        'error' => 'examples/api-v1-error.json',
+    ];
+    if (($openapi['x-cpe-contract-examples'] ?? null) !== $expectedExamples) {
+        $failures[] = 'OpenAPI contract example declaration differs';
+    }
+    foreach ($expectedExamples as $relative) {
+        if (!isset($decoded['contracts/' . $relative])) {
+            $failures[] = 'OpenAPI contract example is unresolved: ' . $relative;
+        }
+    }
+
+    foreach ([
+        'contracts/examples/api-v1-opportunity-item.json',
+        'contracts/fixtures/api-v1-opportunity.consumer.json',
+    ] as $path) {
+        if (array_keys($decoded[$path]) !== ['data', 'meta']
+            || array_keys($decoded[$path]['data'] ?? []) !== $opportunityFields
+            || array_keys($decoded[$path]['meta'] ?? []) !== ['request_id']) {
+            $failures[] = 'opportunity API item shape differs in ' . $path;
+        }
+    }
+    foreach ([
+        'contracts/examples/api-v1-application-item.json',
+        'contracts/examples/api-v1-application-transition-response.json',
+        'contracts/fixtures/api-v1-application.consumer.json',
+        'contracts/fixtures/api-v1-application-transition.consumer.json',
+    ] as $path) {
+        if (array_keys($decoded[$path]) !== ['data', 'meta']
+            || array_keys($decoded[$path]['data'] ?? []) !== $applicationFields
+            || array_keys($decoded[$path]['meta'] ?? []) !== ['request_id']) {
+            $failures[] = 'application API item shape differs in ' . $path;
+        }
+    }
+    $futureApi = $decoded['contracts/fixtures/api-v1-opportunity.future-field.consumer.json'];
+    $futureData = is_array($futureApi['data'] ?? null) ? $futureApi['data'] : [];
+    if (($futureData['future_optional'] ?? null) === null) {
+        $failures[] = 'future-field API fixture does not prove strict producer rejection';
+    }
+    unset($futureData['future_optional']);
+    $futureApi['data'] = $futureData;
+    if ($futureApi !== $decoded['contracts/fixtures/api-v1-opportunity.consumer.json']) {
+        $failures[] = 'future-field API fixture changes the frozen v1 consumer view';
+    }
+
+    return $failures;
+}
+
+/**
+ * @param array<string, mixed> $event
+ * @return list<string>
+ */
+function public_event_wire_failures(array $event, bool $strict): array
+{
+    $failures = [];
+    $required = [
+        'event_id', 'event_type', 'schema_version', 'occurred_at',
+        'instance_id', 'aggregate', 'data', 'trace',
+    ];
+    foreach ($required as $key) {
+        if (!array_key_exists($key, $event)) {
+            $failures[] = 'missing ' . $key;
+        }
+    }
+    if ($strict && array_keys($event) !== $required) {
+        $failures[] = 'unexpected top-level field';
+    }
+    foreach ([
+        'event_id' => '/^event_[a-f0-9]{32}$/D',
+        'occurred_at' => '/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$/D',
+        'instance_id' => '/^(?:inst|tenant)_[a-f0-9]{32}$/D',
+    ] as $key => $pattern) {
+        if (!is_string($event[$key] ?? null) || preg_match($pattern, $event[$key]) !== 1) {
+            $failures[] = 'invalid ' . $key;
+        }
+    }
+    if (($event['event_type'] ?? null) !== 'application.status_changed'
+        || ($event['schema_version'] ?? null) !== 1) {
+        $failures[] = 'unsupported event catalog identity';
+    }
+
+    $aggregate = $event['aggregate'] ?? null;
+    if (!is_array($aggregate) || array_is_list($aggregate)) {
+        $failures[] = 'aggregate object required';
+    } else {
+        if ($strict && array_keys($aggregate) !== ['type', 'id', 'version']) {
+            $failures[] = 'unexpected aggregate field';
+        }
+        if (($aggregate['type'] ?? null) !== 'application'
+            || !is_string($aggregate['id'] ?? null)
+            || preg_match('/^application_[a-f0-9]{32}$/D', $aggregate['id']) !== 1
+            || !is_int($aggregate['version'] ?? null)
+            || $aggregate['version'] < 2) {
+            $failures[] = 'invalid aggregate';
+        }
+    }
+
+    $data = $event['data'] ?? null;
+    if (!is_array($data) || array_is_list($data)) {
+        $failures[] = 'data object required';
+    } else {
+        if ($strict && array_keys($data) !== ['from_status', 'to_status']) {
+            $failures[] = 'unexpected data field';
+        }
+        foreach (['from_status', 'to_status'] as $field) {
+            if (!is_string($data[$field] ?? null)
+                || preg_match('/^[a-z][a-z0-9_]{0,79}$/D', $data[$field]) !== 1) {
+                $failures[] = 'invalid ' . $field;
+            }
+        }
+        if (($data['from_status'] ?? null) === ($data['to_status'] ?? null)) {
+            $failures[] = 'status change is not real';
+        }
+    }
+
+    $trace = $event['trace'] ?? null;
+    if (!is_array($trace) || array_is_list($trace)) {
+        $failures[] = 'trace object required';
+    } else {
+        if ($strict && array_keys($trace) !== ['correlation_id']) {
+            $failures[] = 'unexpected trace field';
+        }
+        if (!is_string($trace['correlation_id'] ?? null)
+            || preg_match('/^req_[a-f0-9]{24}$/D', $trace['correlation_id']) !== 1) {
+            $failures[] = 'invalid correlation_id';
+        }
+    }
+    return $failures;
+}
+
+/** @param array<string, mixed> $event @return array<string, int|string> */
+function public_event_consumer_view(array $event): array
+{
+    return [
+        'event_id' => (string) ($event['event_id'] ?? ''),
+        'event_type' => (string) ($event['event_type'] ?? ''),
+        'schema_version' => (int) ($event['schema_version'] ?? 0),
+        'aggregate_id' => (string) ($event['aggregate']['id'] ?? ''),
+        'aggregate_version' => (int) ($event['aggregate']['version'] ?? 0),
+        'from_status' => (string) ($event['data']['from_status'] ?? ''),
+        'to_status' => (string) ($event['data']['to_status'] ?? ''),
+    ];
 }
 
 function publication_forbidden_files(string $root): array
@@ -2231,6 +3291,7 @@ function publication_secret_patterns(): array
         'GitHub token' => '/\b(?:gh[opsru]_[A-Za-z0-9_]{30,}|github_pat_[A-Za-z0-9_]{20,})\b/',
         'OpenAI-style API key' => '/\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b/',
         'Slack token' => '/\bxox[baprs]-[A-Za-z0-9-]{20,}\b/',
+        'Campus Placement Engine API token' => '/(?<![A-Za-z0-9_])cpe_live_apitok_[a-f0-9]{32}\.[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048](?![A-Za-z0-9_-])/',
         'long bearer token' => '/Bearer\s+(?!\.\.\.|replace|example|token|test)[A-Za-z0-9._~+\/=-]{24,}/i',
     ];
 }
@@ -2331,6 +3392,18 @@ function help(): void
     echo "  php placement install-demo\n";
     echo "  php placement readiness\n";
     echo "  php placement metrics\n";
+    echo "  php placement support-report\n";
+    echo "  php placement api-status\n";
+    echo "  php placement api-enable --actor-user-id=USER_ID\n";
+    echo "  php placement api-disable --actor-user-id=USER_ID\n";
+    echo "  php placement api-service-account-create --name=NAME --scopes=opportunities.read,applications.read,applications.transition --actor-user-id=USER_ID [--expiry-days=90]\n";
+    echo "  php placement api-service-account-list --actor-user-id=USER_ID\n";
+    echo "  php placement api-service-account-enable --service-account=apisa_ID --actor-user-id=USER_ID\n";
+    echo "  php placement api-service-account-disable --service-account=apisa_ID --actor-user-id=USER_ID\n";
+    echo "  php placement api-service-account-revoke --service-account=apisa_ID --actor-user-id=USER_ID\n";
+    echo "  php placement api-token-rotate --service-account=apisa_ID --actor-user-id=USER_ID [--expiry-days=90]\n";
+    echo "  php placement api-token-revoke --token-id=LOOKUP_ID --actor-user-id=USER_ID\n";
+    echo "  php placement api-prune --actor-user-id=USER_ID [--limit=1000]\n";
     echo "  php placement placement-report\n";
     echo "  php placement privacy-report\n";
     echo "  php placement anonymize-candidate C001 --confirm=C001\n";
@@ -2362,6 +3435,11 @@ function help(): void
     echo "  php placement verify-package /path/to/campus-placement-engine-version.tar.gz|.zip\n";
     echo "  php placement deliver-notifications [--channel=file|webhook|email|sms|whatsapp] [--limit=100] [--dry-run]\n";
     echo "  php placement work-outbox [--limit=100]\n";
+    echo "  php placement work-integrations [--limit=100]\n";
+    echo "  php placement replay-webhook-delivery --delivery=whdel_ID --actor-user-id=USER_ID\n";
+    echo "  php placement replay-public-event --event=event_ID --actor-user-id=USER_ID\n";
+    echo "  php placement replay-internal-delivery --event=event_ID --subscription=internal.module.name.v1 --actor-user-id=USER_ID\n";
+    echo "  php placement replay-internal-fanout --event=event_ID --module=MODULE_KEY --actor-user-id=USER_ID\n";
     echo "  php placement certify-notifications --channel=sms|whatsapp [--require-live]\n";
     echo "  php placement smoke-http [--base-url=http://127.0.0.1:8000] [--email=admin@example.test] [--password=password123] [--restricted-email=atlas@example.test]\n";
     echo "  php placement load-smoke [--base-url=http://127.0.0.1:8000] [--path='/?r=public'] [--requests=50] [--concurrency=5]\n";
@@ -2428,7 +3506,7 @@ function serve_help(): void
     echo "  php placement serve localhost:8000\n";
     echo "\n";
     echo "This is a small wrapper around:\n";
-    echo "  php -S 127.0.0.1:8000 -t public\n";
+    echo "  php -S 127.0.0.1:8000 -t public public/router.php\n";
     echo "\n";
     echo "Environment fallback:\n";
     echo "  CPE_SERVE_ADDRESS=127.0.0.1:8000\n";
@@ -2437,7 +3515,7 @@ function serve_help(): void
 function smoke_http_help(): void
 {
     echo "Run a dependency-free HTTP smoke test against a running PHP server:\n";
-    echo "  php -S 127.0.0.1:8000 -t public\n";
+    echo "  php -S 127.0.0.1:8000 -t public public/router.php\n";
     echo "  php placement smoke-http --base-url=http://127.0.0.1:8000 --email=admin@example.test --password=password123 --restricted-email=atlas@example.test --restricted-password=password123\n";
     echo "\n";
     echo "Environment fallbacks:\n";

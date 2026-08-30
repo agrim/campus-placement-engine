@@ -15,6 +15,7 @@ if (trim((string) (getenv('CPE_DATABASE_URL') ?: '')) === ''
 
 define('CPE_SKIP_HTTP_BOOTSTRAP', true);
 require __DIR__ . '/../app/bootstrap.php';
+require __DIR__ . '/authorized_setup_recovery_fixture.php';
 
 use App\Hosted\HostedBootstrap;
 use App\Hosted\Tenant\HostedResolutionException;
@@ -168,6 +169,7 @@ try {
 
     hosted_atomicity_assert(!Database::isInstalled(), 'Hosted install atomicity contract requires an uninstalled database.');
     Database::migrate();
+    $recoveryAuthority = test_authorized_setup_recovery_authority();
     $tenantPublicId = 'tenant_' . str_repeat('c', 32);
     $wrongTenantPublicId = 'tenant_' . str_repeat('d', 32);
     $input = hosted_atomicity_input();
@@ -189,9 +191,9 @@ try {
     $hostedInstallMethod = new ReflectionMethod(Installer::class, 'installHosted');
     hosted_atomicity_assert(
         Installer::HOSTED_INSTALL_CONTRACT_VERSION === 1
-            && $hostedInstallMethod->getNumberOfParameters() === 2
+            && $hostedInstallMethod->getNumberOfParameters() === 3
             && $hostedInstallMethod->getNumberOfRequiredParameters() === 2,
-        'Hosted install public version 1 two-argument contract changed.',
+        'Hosted install public version 1 required-argument contract changed.',
     );
     $installerSource = (string) file_get_contents(__DIR__ . '/../app/Install/Installer.php');
     hosted_atomicity_assert(
@@ -250,7 +252,7 @@ try {
     foreach (InstallationStepObserver::STAGES as $stage) {
         $observer = new HostedAtomicityThrowingObserver($pdo, $stage);
         try {
-            (new Installer($observer))->installHosted($input, $tenantPublicId);
+            (new Installer($observer))->installHosted($input, $tenantPublicId, $recoveryAuthority);
             throw new RuntimeException('Injected installation interruption did not stop stage ' . $stage . '.');
         } catch (RuntimeException $e) {
             hosted_atomicity_assert(
@@ -291,7 +293,7 @@ try {
     }
 
     $recordingObserver = new HostedAtomicityRecordingObserver($pdo);
-    $adminId = (new Installer($recordingObserver))->installHosted($input, $tenantPublicId);
+    $adminId = (new Installer($recordingObserver))->installHosted($input, $tenantPublicId, $recoveryAuthority);
     hosted_atomicity_assert(
         $recordingObserver->observedStages === InstallationStepObserver::STAGES,
         'Successful installation did not observe every reviewed stage in order.',

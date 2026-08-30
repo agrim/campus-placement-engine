@@ -40,7 +40,9 @@ Use this before a public alpha tag or downloadable archive.
   fresh dedicated database.
 - Run `php tests/hosted_install_preflight_contract.php` and confirm installed
   pre-current schemas reject same-tenant and wrong-tenant direct retries without
-  changing schema, migration, ownership, identity, or product state.
+  changing schema, migration, ownership, identity, or product state. Confirm a
+  recovery authority replayed against another absent target is rejected before
+  creating that target.
 - Run `php tests/database_lock_release_contract.php` and confirm its local typed
   failure companion passes. The PostgreSQL 17 release job must fault checked
   unlock for ownership, migration, and installation locks and prove every next
@@ -56,6 +58,52 @@ Use this before a public alpha tag or downloadable archive.
   PostgreSQL 17 release job must run it against a fresh dedicated database.
 - Run `php tests/database_contract.php` against SQLite and a fresh PostgreSQL 17
   database.
+- Run `php tests/public_event_contract.php` against SQLite and a fresh dedicated
+  PostgreSQL 17 database. Confirm database guards, all seven application-status
+  mutation paths, exact/private-safe envelopes, retry and aggregate ordering,
+  portability continuity limits, strict producer schemas, and tolerant frozen
+  consumer behavior.
+- Run `php tests/webhook_delivery_contract.php` against SQLite and a fresh
+  dedicated PostgreSQL 17 database. Confirm encrypted one-time secrets,
+  lifecycle and immutability guards, atomic per-subscription fanout, exact
+  signatures, SSRF and DNS pinning policy, endpoint isolation, ordering,
+  fencing, retry/dead-letter policy, attributed exact replay, and redaction.
+- Run `php tests/webhook_delivery_concurrency_contract.php` against SQLite and a
+  fresh dedicated PostgreSQL 17 database. Confirm two worker processes preserve
+  global endpoint/institution claim caps and retain both parallel failure
+  increments through circuit opening.
+- Run `php tests/webhook_revoke_completion_concurrency_contract.php` and
+  `php tests/webhook_capture_revoke_concurrency_contract.php` against SQLite and
+  separate fresh PostgreSQL 17 databases. Confirm subscription-first completion
+  locking, capture-time `FOR UPDATE` serialization with revoke, terminal fencing
+  and replay refusal through reactivation without blocking future events, and
+  durable rank-first round-robin progress across
+  repeated `work(1)` runs without cap or aggregate-order regression. Run
+  `php tests/webhook_receiver_example_contract.php` and confirm oversized input
+  stops at the 1 MiB plus one-byte sentinel.
+- Run `php tests/operator_simplicity_contract.php` against SQLite and a fresh
+  dedicated PostgreSQL 17 database. Confirm the university opportunity queues
+  run inside a read-only database boundary, candidate-level access requires both
+  reports and sensitive-record capabilities, readiness exposes worker/backlog/
+  TLS/key/driver state, and the support-report JSON/CLI omit every placement,
+  endpoint, credential, payload, path, and database-URL sentinel.
+- Run `php tests/api_identity_contract.php` and
+  `php tests/api_identity_rotation_concurrency_contract.php` against SQLite and
+  separate fresh PostgreSQL 17 databases. Confirm `api_enabled` is nonportable
+  and defaults to `0`, only verifier material is stored, exact scope and key
+  readiness fail closed, lifecycle/audit changes are atomic, two concurrent
+  rotations retain one current plus one grace token, aggregate diagnostics are
+  redacted, and the public integration declaration exposes only v1 and three
+  exact scopes, including `applications.transition`.
+- Run `php tests/api_http_contract.php` against SQLite and a separate fresh
+  PostgreSQL 17 database with the pinned schema validator. Confirm clean-path
+  routing, static assets, no sessions/cookies/CORS/redirects, exact auth and
+  scopes, institution filtering, privacy allowlists, GET/HEAD/ETag/304, cursor
+  tamper/filter/route/institution/snapshot binding, strict transition request,
+  ETag precondition, exact replay/conflict/rollback, service attribution,
+  post-commit audit behavior, bounded request rejection, rate/audit enforcement,
+  and fixed errors. Run the command race contract on SQLite and fresh
+  PostgreSQL, and repeat package-focused contracts from extracted ZIP and tar.
 - Run `php tests/managed_hosting_contract.php` and confirm the external resolver
   seam, tenant database identity, module entitlements, and session binding fail
   closed as documented.
@@ -66,6 +114,20 @@ Use this before a public alpha tag or downloadable archive.
 - Confirm the ZIP and tarball each have a `.sha256` sidecar, the combined
   `SHA256SUMS` contains both archives, and run `php placement verify-package`
   against both formats.
+- Confirm both Git-free unpacked archives contain `contracts/`, pass JSON
+  validation and `publication-check`, and can run
+  `tests/public_event_contract.php`, `tests/webhook_delivery_contract.php`,
+  `tests/webhook_delivery_concurrency_contract.php`,
+  `tests/webhook_revoke_completion_concurrency_contract.php`,
+  `tests/webhook_capture_revoke_concurrency_contract.php`, and
+  `tests/webhook_receiver_example_contract.php`,
+  `tests/api_identity_contract.php`, and
+  `tests/api_identity_rotation_concurrency_contract.php`, and
+  `tests/api_application_transition_input_contract.php`,
+  `tests/api_application_transition_command_contract.php`,
+  `tests/api_application_transition_command_concurrency_contract.php`, and
+  `tests/api_http_contract.php` without relying on repository
+  metadata.
 - Run CLI first-run install against a throwaway database with
   `CPE_ADMIN_PASSWORD=... php placement install ...`.
 - Run `php placement upgrade` against a throwaway installed database and confirm
@@ -103,12 +165,13 @@ Use this before a public alpha tag or downloadable archive.
   manual dense-board QA.
 - Run `php placement browser-qa-plan --format=markdown` and use the output as
   the cross-browser/manual visual QA checklist for the release candidate.
-- Run a browser smoke against `php -S localhost:8000 -t public`.
+- Run a browser/API smoke against
+  `php -S localhost:8000 -t public public/router.php`.
 - Run `php placement smoke-http --base-url=http://localhost:8000` and confirm
   it checks hardened session cookies plus browser security headers. On demo or
   staffed test installs, include `--restricted-email=atlas@example.test` or an
-  equivalent non-admin account so sensitive-page redirects are covered over
-  HTTP.
+  equivalent non-admin account so every sensitive route is proven to return
+  exact HTTP 403 with the fixed `Access denied.` body.
 - Check public `/health.php`, self-hosted `/health.php?ready=1`, and
   token-protected `/metrics.php`. For managed hosting, check readiness again
   through the real proxy with both the tenant `Host` and
@@ -117,8 +180,18 @@ Use this before a public alpha tag or downloadable archive.
 - Run `php placement load-smoke --base-url=http://localhost:8000` and record the
   release-candidate baseline rather than treating it as a production capacity
   guarantee.
-- Run `php placement work-outbox` with a local JSONL sink and confirm a second run
-  does not deliver acknowledged events again.
+- Run `php placement work-outbox` with the explicitly diagnostic-only local
+  JSONL sink; confirm internal fanout and observer counts are reported and that
+  a second run does not redeliver acknowledged work. Exercise the audited
+  internal/public replay commands against isolated dead-letter fixtures,
+  including public deadletter-to-ordered-resume behavior.
+- Run `php placement work-integrations` on an installed test database and
+  exercise an isolated signed webhook fixture through success, retry,
+  dead-letter, and `replay-webhook-delivery` with administrator attribution.
+  Confirm the worker heartbeat, backlog, last outcome, and redacted support
+  reference appear in the institution Integrations workflow without exposing
+  endpoint URLs, secrets, event bodies, or aggregate identifiers to operations
+  output.
 - Follow `docs/browser-qa.md` for dense-board desktop and phone-width checks.
 - Confirm the GitHub Actions CI workflow is green.
 - For PostgreSQL, run the fresh-database backup/restore contract, then separately
@@ -150,6 +223,10 @@ Use this before a public alpha tag or downloadable archive.
   allows it.
 - Confirm portability excludes control-plane metadata, sessions, password
   hashes, SSO secrets, notification credentials, and event delivery state.
+- Confirm portability exports positive application aggregate versions, accepts
+  older bundles without that field as version 1, and restores without synthetic
+  events. Record that restore breaks stream continuity and requires connector
+  resynchronization.
 - Round-trip a custom published workflow and every installed module into a clean
   target installation.
 
@@ -172,6 +249,14 @@ Use this before a public alpha tag or downloadable archive.
 - Implementation status lists known gaps honestly.
 - Managed-hosting contract, disaster recovery, security operations, module
   development, and testing runbooks are current.
+- University opportunity workspace, Integration worker, and privacy-safe support
+  report runbooks are current and describe their evidence limits.
+- Public event, read API, signed webhook, compatibility, and integration
+  threat-model documents match the frozen contracts, strict producer schemas,
+  consumer fixtures, exact signing bytes, lifecycle, pagination/recovery,
+  replay, and network policy. Run the pinned Draft 2020-12/OpenAPI contract
+  validators with every schema URN registered; do not treat dependency-light
+  PHP artifact checks as standards-resolution proof.
 
 ## Operational Smoke
 
@@ -183,8 +268,11 @@ Use this before a public alpha tag or downloadable archive.
   `install`, `readiness`, and `export` against a throwaway `CPE_DB_PATH`.
 - Install a fresh demo database.
 - Sign in as the demo admin.
-- Open Board, Records, Reports, Import, Notifications, Admin, System, Public,
-  and Student pages.
+- Open Opportunity coverage, Board, Records, Reports, Import, Notifications,
+  Admin, Integrations, System, Public, and Student pages.
+- Run `php placement support-report`, inspect the JSON allowlist, and confirm it
+  contains no synthetic candidate name, Integration endpoint, credential, path,
+  or free-form log/error text.
 - Run `php placement backup`.
 - Confirm the backup archive has `.metadata.json` and `.sha256` sidecars and that
   `restore` rejects missing/tampered metadata, corrupt checksums, wrong identity,

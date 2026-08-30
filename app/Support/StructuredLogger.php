@@ -104,11 +104,12 @@ final class StructuredLogger
             return '[redacted]';
         }
         $allowed = match ($key) {
+            'api_request_id' => preg_match('/\Areq_[a-f0-9]{32}\z/D', $value) === 1,
             'incident_id', 'request_id' => preg_match('/\A(?:inc|req)_[a-f0-9]{24,32}\z/D', $value) === 1 || in_array($value, ['inc_unavailable', 'req_unavailable'], true),
             'diagnostic_code' => preg_match('/\ACPE_[A-Z0-9_]{3,59}\z/D', $value) === 1,
             'exception', 'exception_class' => preg_match('/\A[A-Za-z_][A-Za-z0-9_\\\\]{0,191}\z/D', $value) === 1,
             'source_category' => in_array($value, ['bootstrap', 'web', 'setup', 'health', 'metrics', 'controller', 'cli', 'worker', 'persistence', 'unknown'], true),
-            'method' => in_array($value, ['GET', 'POST', 'HEAD', 'UNKNOWN'], true),
+            'method' => in_array($value, ['GET', 'POST', 'HEAD', 'OPTIONS', 'UNKNOWN'], true),
             'mode' => in_array($value, ['readiness', 'liveness', 'environment_token', 'local'], true),
             'phase' => in_array($value, [
                 'error_handler', 'uncaught', 'shutdown', 'authorization_header', 'payload_json', 'rollback',
@@ -117,10 +118,11 @@ final class StructuredLogger
                 'session_id_read', 'session_cookie_reset', 'session_warning_storage', 'session_warning_response',
                 'session_warning_other', 'session_returned_false', 'session_threw', 'state_prepare',
                 'state_permissions', 'session_fingerprint', 'state_write_prepare', 'state_write_io', 'state_sync',
+                'validation', 'delivery',
             ], true),
             'status' => in_array($value, ['failed'], true),
-            'route' => preg_match('/\A(?:bootstrap|unknown|login|sso|logout|portal|modules|public|student|board|move|return-to-idle|board-preferences|notifications|notification-acknowledge|candidate|records(?:-(?:candidate|company|round|schedule|panelist|slot-assignment|application))?|reports|import(?:-rollback)?|admin(?:-(?:user|users|password|workflow))?|preferences(?:-resolve)?|wanted(?:-resolve)?|system(?:-clear-demo)?|advising(?:-(?:appointment|status|note|task))?)\z/D', $value) === 1,
-            'operation' => preg_match('/\A(?:placement\.command|host_(?:resolution|bootstrap)|collection|probe|dispatch|session|authorization|unlock|install|installation|request|database_restore\.cleanup|domain_event\.(?:dispatch|delivery)|notification\.(?:delivery|certification|acknowledge)|admin\.(?:password\.reset|settings|user\.create|users\.update|workflow)|advising\.(?:create|note|task|update)|auth\.(?:logout|password|sso)|board\.(?:move|preferences|return_to_idle)|import\.(?:rollback|run)|module\.update|preference\.(?:create|resolve)|record\.(?:application|assignment|candidate|company|panelist|round|schedule)|system\.clear_demo_data|wanted\.(?:create|resolve)|configuration\.import|portability\.import|privacy\.erasure)\z/D', $value) === 1,
+            'route' => preg_match('/\A(?:bootstrap|unknown|login|sso|logout|portal|modules|public|student|board|move|return-to-idle|board-preferences|notifications|notification-acknowledge|candidate|records(?:-(?:candidate|company|round|schedule|panelist|slot-assignment|application))?|operations|reports|import(?:-rollback)?|admin(?:-(?:user|users|password|workflow))?|integrations|integration-(?:create|secret-(?:generate|rotate)|validate|activate|disable|revoke|replay)|preferences(?:-resolve)?|wanted(?:-resolve)?|system(?:-clear-demo)?|advising(?:-(?:appointment|status|note|task))?|api-v1-(?:root|unknown|opportunities-(?:list|item)|applications-(?:list|item|transition)))\z/D', $value) === 1,
+            'operation' => preg_match('/\A(?:placement\.command|host_(?:resolution|bootstrap)|collection|probe|dispatch|session|authorization|unlock|install|installation|request|api\.request|database_restore\.cleanup|domain_event\.(?:dispatch|delivery)|webhook\.(?:create|secret\.(?:generate|rotate)|validation|validate|activate|disable|revoke|replay|delivery)|notification\.(?:delivery|certification|acknowledge)|admin\.(?:password\.reset|settings|user\.create|users\.update|workflow)|advising\.(?:create|note|task|update)|auth\.(?:logout|password|sso)|board\.(?:move|preferences|return_to_idle)|import\.(?:rollback|run)|module\.update|preference\.(?:create|resolve)|record\.(?:application|assignment|candidate|company|panelist|round|schedule)|system\.clear_demo_data|wanted\.(?:create|resolve)|configuration\.import|portability\.import|privacy\.erasure)\z/D', $value) === 1,
             'tenant' => in_array($value, ['hosted', 'self-hosted'], true),
             default => false,
         };

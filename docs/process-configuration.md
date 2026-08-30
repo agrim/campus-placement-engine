@@ -1,7 +1,7 @@
 # Process Configuration
 
 Company records can carry a lightweight process profile. This keeps operational
-details configurable without introducing plugins, a frontend build, or a
+details configurable without introducing executable extensions, a frontend build, or a
 separate scheduling service.
 
 Supported company/process fields:
@@ -27,7 +27,7 @@ Candidate records also support an optional `accommodation_notes` field. Use it
 for public-safe operational notes such as room, floor, seating, timing, or
 accessibility constraints that should remain visible on the board and candidate
 trace. The field is deliberately free text for v1 so each college can use its
-own wording without adding a taxonomy or plugin.
+own wording without adding a taxonomy or executable extension.
 
 Companies can also have ordered rounds for process detail:
 

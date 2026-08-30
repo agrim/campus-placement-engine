@@ -1,0 +1,19 @@
+{
+  "event_id": "event_11111111111111111111111111111111",
+  "event_type": "application.status_changed",
+  "schema_version": 1,
+  "occurred_at": "2026-08-29T12:00:00Z",
+  "instance_id": "inst_22222222222222222222222222222222",
+  "aggregate": {
+    "type": "application",
+    "id": "application_33333333333333333333333333333333",
+    "version": 2
+  },
+  "data": {
+    "from_status": "idle",
+    "to_status": "scheduled"
+  },
+  "trace": {
+    "correlation_id": "req_444444444444444444444444"
+  }
+}

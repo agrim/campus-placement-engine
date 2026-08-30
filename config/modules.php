@@ -8,6 +8,7 @@ return [
         'version' => '0.1.0',
         'core_requires' => '>=0.1.0-alpha.1',
         'requires_modules' => [],
+        'internal_event_observer_events' => [],
         'capabilities' => [
             'placement.board.view',
             'placement.application.transition',
@@ -28,6 +29,7 @@ return [
             'placement.sensitive.view',
             'placement.accommodation.view',
             'placement.cross_company.view',
+            'portal.integrations.manage',
         ],
         'enabled_by_default' => true,
         'description' => 'Live placement workflows, scheduling, movement, offers, and reporting.',
@@ -38,6 +40,9 @@ return [
         'version' => '0.1.0',
         'core_requires' => '>=0.1.0-alpha.1',
         'requires_modules' => [],
+        'internal_event_observer_events' => [
+            'placement.offer.accepted',
+        ],
         'capabilities' => [
             'advising.appointments.view',
             'advising.appointments.manage',

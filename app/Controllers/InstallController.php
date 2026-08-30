@@ -5,6 +5,8 @@ declare(strict_types=1);
 namespace App\Controllers;
 
 use App\Core\Http\UserVisibleException;
+use App\Core\Install\InstallationState;
+use App\Core\Install\InstallationStateUnavailable;
 use App\Install\Installer;
 use App\Install\SystemRequirements;
 use App\Security\Csrf;
@@ -23,7 +25,8 @@ final class InstallController
         if (($authorization->accessState()['state'] ?? '') !== SetupAuthorization::ACCESS_AUTHORIZED) {
             throw new SetupAuthorizationDenied(SetupAuthorizationDenied::NOT_AUTHORIZED);
         }
-        if (Database::isInstalled()) {
+        $state = $this->installationState($authorization);
+        if ($state['state'] === InstallationState::INSTALLED) {
             redirect('/', 303);
         }
         $requirements = new SystemRequirements();
@@ -39,6 +42,10 @@ final class InstallController
             throw new SetupAuthorizationDenied(SetupAuthorizationDenied::NOT_AUTHORIZED);
         }
         try {
+            $state = $this->installationState($authorization);
+            if ($state['state'] === InstallationState::INSTALLED) {
+                throw new UserVisibleException('SETUP_ALREADY_COMPLETE', 'Setup is already complete.');
+            }
             $csrf = $_POST['_token'] ?? null;
             try {
                 Csrf::verify(is_string($csrf) ? $csrf : null);
@@ -52,12 +59,14 @@ final class InstallController
             (new SystemRequirements())->assertReady();
             $input = SetupHttp::installInput($_POST);
             $adminId = $authorization->runAuthorized(
-                static fn (): int => (new Installer())->install($input),
+                static fn (): int => (new Installer())->install($input, $state['authority']),
             );
             Auth::loginById($adminId);
             Flash::add('success', !empty($input['seed_demo']) ? 'Installation complete. Dummy placement drive is ready.' : 'Installation complete.');
             redirect('/', 303);
         } catch (SetupAuthorizationDenied $e) {
+            throw $e;
+        } catch (InstallationStateUnavailable $e) {
             throw $e;
         } catch (UserVisibleException $e) {
             Flash::add('error', $e->publicMessage());
@@ -71,6 +80,20 @@ final class InstallController
             );
             Flash::add('error', 'Installation failed. Reference: ' . $incidentId);
             redirect('/install.php', 303);
+        }
+    }
+
+    /** @return array{state: string, authority: ?\App\Security\SetupRecoveryAuthority} */
+    private function installationState(SetupAuthorization $authorization): array
+    {
+        try {
+            return ['state' => Database::installationStateStrict(), 'authority' => null];
+        } catch (InstallationStateUnavailable) {
+            $authority = $authorization->issueRecoveryAuthority();
+            return [
+                'state' => Database::installationStateForAuthorizedSetupStrict($authority),
+                'authority' => $authority,
+            ];
         }
     }
 }

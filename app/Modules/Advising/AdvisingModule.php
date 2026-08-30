@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Modules\Advising;
 
 use App\Core\Events\DomainEvent;
+use App\Core\Events\InternalEventSubscription;
 use App\Core\Modules\Module;
 use App\Core\Modules\ModuleLifecycleHooks;
 use App\Core\Modules\ModuleManifest;
@@ -20,14 +21,19 @@ use App\Modules\Advising\Privacy\AdvisingPrivacyHandler;
 
 final class AdvisingModule implements Module, ModuleLifecycleHooks, ProvidesEventSubscribers, ProvidesPortability, ProvidesPrivacy
 {
+    public const CPE_MODULE_KEY = 'advising';
+    public const CPE_MODULE_VERSION = '0.1.0';
+
     public function key(): string
     {
-        return 'advising';
+        return self::CPE_MODULE_KEY;
     }
 
     public function manifest(): ModuleManifest
     {
-        return ModuleManifest::fromArray($this->key(), cpe_config('modules.' . $this->key(), []));
+        $definition = (array) cpe_config('modules.' . self::CPE_MODULE_KEY, []);
+        $definition['version'] = self::CPE_MODULE_VERSION;
+        return ModuleManifest::fromArray(self::CPE_MODULE_KEY, $definition);
     }
 
     public function routes(): array
@@ -54,9 +60,12 @@ final class AdvisingModule implements Module, ModuleLifecycleHooks, ProvidesEven
     public function eventSubscribers(): array
     {
         return [
-            'placement.offer.accepted' => [
+            new InternalEventSubscription(
+                'internal.advising.offer_follow_up.v1',
+                'placement.offer.accepted',
+                'advising',
                 static fn (DomainEvent $event) => (new AdvisingService())->recordOfferFollowUp($event),
-            ],
+            ),
         ];
     }
 

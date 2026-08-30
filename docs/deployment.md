@@ -86,7 +86,7 @@ instead of rerunning the installer over an existing live database.
 The ordinary `php placement serve` command is only a convenience wrapper around:
 
 ```bash
-php -S 127.0.0.1:8000 -t public
+php -S 127.0.0.1:8000 -t public public/router.php
 ```
 
 Use `php placement serve localhost:8000` or `CPE_SERVE_ADDRESS=localhost:8000`
@@ -213,6 +213,15 @@ Adjust `server_name`, filesystem paths, and `fastcgi_pass` for the PHP-FPM
 socket or host used by the server. Keep `data/` writable by the PHP user but
 outside the Nginx root.
 
+Both starter web-server configurations preserve clean `/api/v1/...` paths and
+pass the application transition command body plus `Authorization`,
+`Idempotency-Key`, `If-Match`, and `Content-Type` headers to the front
+controller. Do not add a proxy cache, CORS layer, path rewrite that drops the
+public ID, request-body transformation, or Cloud/control-plane proxy in front
+of this institution-local API. Keep the server request-body ceiling compatible
+with Engine's stricter 16 KiB command limit so oversize requests remain a
+bounded denial.
+
 ## CLI Install
 
 Technical operators can also run the same first-run setup without opening the
@@ -226,6 +235,11 @@ CPE_ADMIN_PASSWORD='change-this-password' php placement install \
   --admin-name='Placement Admin' \
   --admin-email=admin@example.edu
 ```
+
+The CLI installer accepts only a genuinely empty target. If a prior setup
+attempt already created the Engine schema but did not commit `installed_at`,
+use the browser installer with an explicit setup authorization credential to
+retry. Mutable CLI process metadata is not a recovery credential.
 
 Optional flags:
 
@@ -382,8 +396,9 @@ php placement smoke-http --base-url=http://localhost:8000
 The smoke signs in with demo-style credentials unless `--email`, `--password`,
 `CPE_SMOKE_EMAIL`, or `CPE_SMOKE_PASSWORD` are supplied. When the install has a
 non-admin user available, add `--restricted-email` and
-`--restricted-password` so the same smoke also confirms sensitive pages redirect
-away from restricted roles.
+`--restricted-password` so the same smoke also confirms sensitive pages return
+exact HTTP 403 responses with the fixed `Access denied.` body for restricted
+roles.
 
 Company process fields such as room, tracker, process type, active cap, and
 ordered rounds can be maintained through `Records` or imported from CSV. See
@@ -404,7 +419,19 @@ tenant resolution. A production reverse proxy must pass the monitor's
 `Authorization` header and the intended tenant `Host` header unchanged to PHP.
 Query parameters, cookies, client IP, and `X-Forwarded-*` identity headers are
 not credentials. Configure the scheduler to run any enabled notification
-handoff and `php placement work-outbox`. See `security-operations.md`.
+handoff and `php placement work-outbox`. When an administrator has activated a
+signed webhook Integration, also run the isolated delivery worker every minute:
+
+```cron
+* * * * * cd /absolute/path/to/campus-placement-engine && /usr/bin/php placement work-integrations --limit=100
+```
+
+Use the host's actual PHP path and keep the cron environment restricted. It must
+receive the same database configuration and external webhook encryption keyring
+as the web process. Do not put endpoint URLs or signing secrets in the crontab,
+and do not run the worker in a busy loop. Managed schedulers use the same short
+command and tenant-local data-plane environment. See
+`docs/integrations/webhooks.md` and `security-operations.md`.
 
 Use `php placement export` after major placement-day milestones or before
 upgrades when a readable CSV audit trail is useful. See `docs/exports.md`.
@@ -435,7 +462,7 @@ moving the release package between machines.
 Verify the package before publishing or installing it elsewhere:
 
 ```bash
-php placement verify-package dist/campus-placement-engine-0.1.0-alpha.3.zip
+php placement verify-package dist/campus-placement-engine-0.1.0-alpha.4.zip
 ```
 
 Before publishing a package, extract it into a clean temp directory and run:
