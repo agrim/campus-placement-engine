@@ -6,6 +6,9 @@ namespace App\Controllers;
 
 use App\Core\Http\UserVisibleException;
 use App\Domain\Workflow;
+use App\Modules\Placement\Application\ApplicationTransitionActor;
+use App\Modules\Placement\Application\ApplicationTransitionCommand;
+use App\Modules\Placement\Application\ApplicationTransitionService;
 use App\Modules\Placement\Application\PlacementService;
 use App\Security\Csrf;
 use App\Support\Auth;
@@ -47,27 +50,29 @@ final class BoardController
         $user = Auth::requireUser();
         try {
             Csrf::verify($_POST['_token'] ?? null);
-            if (!Auth::hasCapability($user, 'placement.application.transition')) {
-                throw new UserVisibleException('BOARD_TRANSITION_FORBIDDEN', 'Auditors cannot change candidate status.');
+            if (!Auth::hasCapability($user, ApplicationTransitionService::CAPABILITY)) {
+                throw new UserVisibleException(
+                    ApplicationTransitionService::DENIED_CODE,
+                    ApplicationTransitionService::DENIED_MESSAGE,
+                );
             }
-            $service = new PlacementService();
             $applicationId = (int) ($_POST['application_id'] ?? 0);
-            $outcome = $service->applyBoardMove(
-                $applicationId,
-                (int) $user['id'],
-                (string) $user['role'],
-                trim((string) ($_POST['to_status'] ?? '')),
-                trim((string) ($_POST['transition_key'] ?? '')),
-                trim((string) ($_POST['note'] ?? '')),
-                trim((string) ($_POST['expected_status'] ?? '')),
-                (string) ($_POST['idempotency_key'] ?? ''),
-                $user
+            $outcome = (new ApplicationTransitionService())->execute(
+                new ApplicationTransitionCommand(
+                    $applicationId,
+                    trim((string) ($_POST['to_status'] ?? '')),
+                    trim((string) ($_POST['transition_key'] ?? '')),
+                    trim((string) ($_POST['note'] ?? '')),
+                    trim((string) ($_POST['expected_status'] ?? '')),
+                    (string) ($_POST['idempotency_key'] ?? ''),
+                ),
+                ApplicationTransitionActor::fromAuthenticatedUser($user),
             );
-            if ($outcome['duplicate']) {
+            if ($outcome->duplicate()) {
                 Flash::add('success', 'Duplicate move ignored.');
                 redirect('/');
             }
-            Flash::add('success', 'Moved to ' . (new Workflow())->statusLabel($outcome['status']) . '.');
+            Flash::add('success', 'Moved to ' . (new Workflow())->statusLabel($outcome->status()) . '.');
         } catch (\Throwable $e) {
             ControllerFailure::flash($e, 'CPE_BOARD_MOVE_FAILURE', 'board.move');
         }

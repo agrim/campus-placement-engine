@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Modules\Placement\Workflow;
 
 use App\Core\Http\UserVisibleException;
+use App\Core\Persistence\WriteTransaction;
 use App\Support\Database;
 use PDO;
 use RuntimeException;
@@ -26,7 +27,7 @@ final class WorkflowPublisher
             return;
         }
 
-        $ownsTransaction = !$this->pdo->inTransaction();
+        $ownsTransaction = !WriteTransaction::isActive($this->pdo);
         if ($ownsTransaction) {
             $this->pdo->beginTransaction();
         }
@@ -72,7 +73,7 @@ final class WorkflowPublisher
             throw new RuntimeException('Versioned workflow storage is unavailable.');
         }
         $this->validator->assertValid($definition);
-        $ownsTransaction = !$this->pdo->inTransaction();
+        $ownsTransaction = !WriteTransaction::isActive($this->pdo);
         if ($ownsTransaction) {
             $this->pdo->beginTransaction();
         }

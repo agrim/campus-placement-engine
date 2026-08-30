@@ -119,6 +119,7 @@ jobs:
           php tests/api_identity_contract.php
           php tests/api_identity_rotation_concurrency_contract.php
           php tests/api_http_contract.php
+          php tests/application_transition_boundary_contract.php
           php tests/postgres_connection_policy_contract.php
           php tests/postgres_tls_contract.php
           php tests/database_contract.php
@@ -214,6 +215,15 @@ jobs:
         run: |
           psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_api_http_contract'
           php tests/api_http_contract.php
+
+      - name: Run PostgreSQL application transition boundary contract
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_application_transition_boundary_contract?sslmode=disable
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_application_transition_boundary_contract'
+          php tests/application_transition_boundary_contract.php
 
       - name: Run PostgreSQL API rotation concurrency contract
         env:
