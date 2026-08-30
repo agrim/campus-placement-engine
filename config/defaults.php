@@ -31,6 +31,8 @@ return [
         'calendar_non_operating_weekdays' => '',
         'calendar_non_operating_dates' => '',
         'audit_request_metadata' => 'none',
+        // Local operational switch. Intentionally excluded from configuration and portability exports.
+        'api_enabled' => '0',
         'configuration_freeze' => '0',
         'terminology_candidate_label' => 'Candidate',
         'terminology_candidates_label' => 'Candidates',

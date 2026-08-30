@@ -87,6 +87,17 @@ from portability exports. A downstream Connector is a separate data controller:
 its event-ID deduplication records, bodies, logs, and side effects require an
 institution-approved retention and erasure policy.
 
+The disabled API identity foundation stores service-account metadata, exact
+scope grants, clear random lookup IDs, 32-byte keyed verifiers, lifecycle
+timestamps, keyed rate-limit/source fingerprints, and fixed redacted request
+audit classifications. It never stores the token secret, raw authorization
+header, raw source address, request URL/query/body, or candidate/employer
+identity. Expired rate-limit buckets and 90-day request-audit rows are removed
+in bounded batches with `php placement api-prune --actor-user-id=USER_ID`.
+Service-account and token lifecycle metadata remains until institution policy
+authorizes a separately governed deletion feature; revoke instead of deleting
+operational evidence.
+
 ## Recommended Cycle-End Flow
 
 1. Run `php placement backup`.

@@ -6,6 +6,9 @@ declare(strict_types=1);
 require __DIR__ . '/app/bootstrap.php';
 
 use App\Modules\Placement\Application\PlacementService;
+use App\Api\Operations\ApiHealthService;
+use App\Api\Operations\ApiRetentionService;
+use App\Api\Security\ApiServiceAccountService;
 use App\Modules\Placement\Workflow\WorkflowDefinitionFileService;
 use App\Modules\Placement\Workflow\WorkflowMigrationService;
 use App\Modules\Placement\Workflow\WorkflowRepository;
@@ -61,6 +64,17 @@ try {
         'install-demo' => install_demo(),
         'readiness' => readiness(),
         'metrics' => metrics_snapshot(),
+        'api-status' => api_status(),
+        'api-enable' => api_global_state(array_slice($argv, 2), true),
+        'api-disable' => api_global_state(array_slice($argv, 2), false),
+        'api-service-account-create' => api_service_account_create(array_slice($argv, 2)),
+        'api-service-account-list' => api_service_account_list(array_slice($argv, 2)),
+        'api-service-account-enable' => api_service_account_state(array_slice($argv, 2), 'enable'),
+        'api-service-account-disable' => api_service_account_state(array_slice($argv, 2), 'disable'),
+        'api-service-account-revoke' => api_service_account_state(array_slice($argv, 2), 'revoke'),
+        'api-token-rotate' => api_token_rotate(array_slice($argv, 2)),
+        'api-token-revoke' => api_token_revoke(array_slice($argv, 2)),
+        'api-prune' => api_prune(array_slice($argv, 2)),
         'placement-report' => placement_report(),
         'privacy-report' => privacy_report(),
         'anonymize-candidate' => anonymize_candidate(array_slice($argv, 2)),
@@ -133,8 +147,21 @@ function doctor(): void
     foreach ($requirements->checks() as $check) {
         echo ($check['ok'] ? 'OK' : 'ERROR') . " {$check['label']}: {$check['value']}\n";
     }
-    echo "INFO installed: " . (Database::isInstalled() ? 'yes' : 'no') . "\n";
-    if (Database::isInstalled()) {
+    $installed = Database::isInstalled();
+    echo "INFO installed: " . ($installed ? 'yes' : 'no') . "\n";
+    if ($installed) {
+        if (Database::pendingMigrations() !== []) {
+            throw new UserVisibleException(
+                'CLI_DATABASE_UPGRADE_REQUIRED',
+                'Database migrations are pending. Run `php placement upgrade`.',
+            );
+        }
+        $api = (new ApiHealthService())->snapshot();
+        echo strtoupper($api['status'] === 'fail' ? 'ERROR' : $api['status'])
+            . ' API identity: ' . $api['message'] . "\n";
+        echo 'INFO API service accounts: ' . (int) $api['service_accounts']
+            . '; usable tokens: ' . (int) $api['usable_tokens']
+            . '; missing key versions: ' . (int) $api['missing_key_versions'] . "\n";
         $webhooks = (new WebhookHealthService())->snapshot();
         echo strtoupper($webhooks['status'] === 'fail' ? 'ERROR' : $webhooks['status'])
             . ' signed webhooks: ' . $webhooks['message'] . "\n";
@@ -385,6 +412,147 @@ function metrics_snapshot(): void
         throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
     }
     echo json_encode((new MetricsService())->snapshot(), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+}
+
+function api_status(): void
+{
+    require_installed_app();
+    Database::migrate();
+    echo json_encode((new ApiHealthService())->snapshot(), JSON_PRETTY_PRINT | JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR) . "\n";
+}
+
+function api_global_state(array $args, bool $enabled): void
+{
+    require_installed_app();
+    Database::migrate();
+    $options = cli_options($args);
+    (new ApiServiceAccountService())->setApiEnabled($enabled, api_actor_user_id($options));
+    echo 'Institution-local API ' . ($enabled ? 'enabled' : 'disabled') . ".\n";
+    if ($enabled) {
+        echo "No public /api/v1 resource is exposed in this phase.\n";
+    }
+}
+
+function api_service_account_create(array $args): void
+{
+    require_installed_app();
+    Database::migrate();
+    $options = cli_options($args);
+    $scopes = array_values(array_filter(array_map('trim', explode(',', (string) ($options['scopes'] ?? '')))));
+    $result = (new ApiServiceAccountService())->create(
+        (string) ($options['name'] ?? ''),
+        $scopes,
+        api_actor_user_id($options),
+        (int) ($options['expiry-days'] ?? ApiServiceAccountService::DEFAULT_EXPIRY_DAYS),
+    );
+    echo "Service account: {$result['service_account_id']}\n";
+    echo "Token lookup ID: {$result['token_lookup_id']}\n";
+    echo "Expires at: {$result['expires_at']} UTC\n";
+    echo "Copy this token now; it will not be shown again:\n";
+    echo $result['token'] . "\n";
+}
+
+function api_service_account_list(array $args): void
+{
+    require_installed_app();
+    Database::migrate();
+    $options = cli_options($args);
+    $accounts = (new ApiServiceAccountService())->listForActor(api_actor_user_id($options));
+    echo "service_account_id,name,status,scopes,tokens,current_or_grace_tokens\n";
+    $handle = fopen('php://output', 'w');
+    $now = cpe_now();
+    foreach ($accounts as $account) {
+        $usableMetadata = array_filter(
+            $account['tokens'],
+            static fn (array $token): bool => $token['revoked_at'] === null
+                && (string) $token['expires_at'] > $now
+                && ($token['rotation_grace_expires_at'] === null || (string) $token['rotation_grace_expires_at'] > $now),
+        );
+        Csv::writeRow($handle, [
+            $account['public_id'],
+            $account['name'],
+            $account['status'],
+            implode(',', $account['scopes']),
+            count($account['tokens']),
+            count($usableMetadata),
+        ]);
+    }
+    fclose($handle);
+}
+
+function api_service_account_state(array $args, string $action): void
+{
+    require_installed_app();
+    Database::migrate();
+    $options = cli_options($args);
+    $publicId = (string) ($options['service-account'] ?? '');
+    $actor = api_actor_user_id($options);
+    $service = new ApiServiceAccountService();
+    match ($action) {
+        'enable' => $service->setAccountEnabled($publicId, true, $actor),
+        'disable' => $service->setAccountEnabled($publicId, false, $actor),
+        'revoke' => $service->revokeAccount($publicId, $actor),
+        default => throw new RuntimeException('Unknown API service-account lifecycle action.'),
+    };
+    echo 'API service account ' . $action . "d.\n";
+}
+
+function api_token_rotate(array $args): void
+{
+    require_installed_app();
+    Database::migrate();
+    $options = cli_options($args);
+    $result = (new ApiServiceAccountService())->rotateToken(
+        (string) ($options['service-account'] ?? ''),
+        api_actor_user_id($options),
+        (int) ($options['expiry-days'] ?? ApiServiceAccountService::DEFAULT_EXPIRY_DAYS),
+    );
+    echo "Token lookup ID: {$result['token_lookup_id']}\n";
+    echo "Expires at: {$result['expires_at']} UTC\n";
+    echo "The prior token remains usable for at most 24 hours. Copy this token now:\n";
+    echo $result['token'] . "\n";
+}
+
+function api_token_revoke(array $args): void
+{
+    require_installed_app();
+    Database::migrate();
+    $options = cli_options($args);
+    (new ApiServiceAccountService())->revokeToken(
+        (string) ($options['token-id'] ?? ''),
+        api_actor_user_id($options),
+    );
+    echo "API token revoked.\n";
+}
+
+function api_prune(array $args): void
+{
+    require_installed_app();
+    Database::migrate();
+    $options = cli_options($args);
+    $result = (new ApiRetentionService())->prune(
+        api_actor_user_id($options),
+        (int) ($options['limit'] ?? 1000),
+    );
+    echo "Expired rate-limit buckets pruned: {$result['rate_limit_buckets']}\n";
+    echo "Expired request-audit events pruned: {$result['request_audit_events']}\n";
+}
+
+/** @param array<string, string|bool> $options */
+function api_actor_user_id(array $options): int
+{
+    $actorUserId = filter_var(
+        $options['actor-user-id'] ?? null,
+        FILTER_VALIDATE_INT,
+        ['options' => ['min_range' => 1]],
+    );
+    if ($actorUserId === false) {
+        throw new UserVisibleException(
+            'API_MANAGEMENT_ACTOR_INVALID',
+            'Provide --actor-user-id for an active user with integration-management capability.',
+        );
+    }
+    return (int) $actorUserId;
 }
 
 function backup_database(): void
@@ -1227,10 +1395,27 @@ function verify_release_package(string $path): void
         'app/Integrations/Webhooks/WebhookSubscriptionService.php',
         'app/Integrations/Webhooks/WebhookTransportException.php',
         'app/Views/webhooks.php',
+        'app/Controllers/ApiAccessController.php',
+        'app/Api/Security/ApiAuthenticationUnavailable.php',
+        'app/Api/Security/ApiAuthorizationUnavailable.php',
+        'app/Api/Security/ApiKeyring.php',
+        'app/Api/Security/ApiManagementAuthorization.php',
+        'app/Api/Security/ApiPrincipal.php',
+        'app/Api/Security/ApiScopePolicy.php',
+        'app/Api/Security/ApiServiceAccountService.php',
+        'app/Api/Security/ApiTokenAuthenticator.php',
+        'app/Api/Security/InvalidApiCredential.php',
+        'app/Api/Operations/ApiHealthService.php',
+        'app/Api/Operations/ApiRateLimiter.php',
+        'app/Api/Operations/ApiRequestAuditService.php',
+        'app/Api/Operations/ApiRetentionService.php',
+        'app/Views/api-access.php',
         'database/migrations/050_signed_webhook_integrations.sql',
         'database/migrations/051_webhook_claim_cursor.sql',
+        'database/migrations/052_api_identity_foundation.sql',
         'database/migrations/pgsql/014_signed_webhook_integrations.sql',
         'database/migrations/pgsql/015_webhook_claim_cursor.sql',
+        'database/migrations/pgsql/016_api_identity_foundation.sql',
         'contracts/public-integration.v1.json',
         'contracts/schemas/public-event-envelope.v1.schema.json',
         'contracts/schemas/application.status_changed.v1.schema.json',
@@ -1239,6 +1424,7 @@ function verify_release_package(string $path): void
         'contracts/fixtures/application.status_changed.v1.future-optional.consumer.json',
         'docs/integrations/events.md',
         'docs/integrations/webhooks.md',
+        'docs/api/authentication.md',
         'docs/compatibility.md',
         'docs/security/integration-threat-model.md',
         'examples/integrations/verify-webhook.php',
@@ -1251,6 +1437,9 @@ function verify_release_package(string $path): void
         'tests/webhook_capture_revoke_concurrency_contract.php',
         'tests/webhook_capture_revoke_concurrency_worker.php',
         'tests/webhook_receiver_example_contract.php',
+        'tests/api_identity_contract.php',
+        'tests/api_identity_rotation_concurrency_contract.php',
+        'tests/api_identity_rotation_concurrency_worker.php',
         'tests/validate_public_event_schemas.py',
         'tests/requirements-public-event-schema.txt',
         'tests/authorization_failure_contract.php',
@@ -1930,6 +2119,17 @@ function print_browser_qa_plan_text(array $plan): void
     echo "  php placement seed-large-demo {$plan['candidate_target']} {$plan['company_target']}\n";
     echo "  php placement readiness\n";
     echo "  php placement metrics\n";
+    echo "  php placement api-status\n";
+    echo "  php placement api-enable --actor-user-id=USER_ID\n";
+    echo "  php placement api-disable --actor-user-id=USER_ID\n";
+    echo "  php placement api-service-account-create --name=NAME --scopes=opportunities.read,applications.read --actor-user-id=USER_ID [--expiry-days=90]\n";
+    echo "  php placement api-service-account-list --actor-user-id=USER_ID\n";
+    echo "  php placement api-service-account-enable --service-account=apisa_ID --actor-user-id=USER_ID\n";
+    echo "  php placement api-service-account-disable --service-account=apisa_ID --actor-user-id=USER_ID\n";
+    echo "  php placement api-service-account-revoke --service-account=apisa_ID --actor-user-id=USER_ID\n";
+    echo "  php placement api-token-rotate --service-account=apisa_ID --actor-user-id=USER_ID [--expiry-days=90]\n";
+    echo "  php placement api-token-revoke --token-id=LOOKUP_ID --actor-user-id=USER_ID\n";
+    echo "  php placement api-prune --actor-user-id=USER_ID [--limit=1000]\n";
     echo "  php placement serve\n";
     echo "  php placement smoke-http --base-url={$plan['base_url']} --email=admin@example.test --password=password123 --restricted-email=atlas@example.test --restricted-password=password123\n";
     echo "\nCross-browser matrix:\n";
@@ -2239,12 +2439,14 @@ function publication_check(): void
         'database/migrations/049_public_event_projection.sql',
         'database/migrations/050_signed_webhook_integrations.sql',
         'database/migrations/051_webhook_claim_cursor.sql',
+        'database/migrations/052_api_identity_foundation.sql',
         'database/migrations/pgsql/001_portal_baseline.sql',
         'database/migrations/pgsql/011_internal_event_deliveries.sql',
         'database/migrations/pgsql/012_module_enabled_constraint.sql',
         'database/migrations/pgsql/013_public_event_projection.sql',
         'database/migrations/pgsql/014_signed_webhook_integrations.sql',
         'database/migrations/pgsql/015_webhook_claim_cursor.sql',
+        'database/migrations/pgsql/016_api_identity_foundation.sql',
         'contracts/public-integration.v1.json',
         'contracts/schemas/public-event-envelope.v1.schema.json',
         'contracts/schemas/application.status_changed.v1.schema.json',
@@ -2255,6 +2457,7 @@ function publication_check(): void
         'docs/environment.md',
         'docs/integrations/events.md',
         'docs/integrations/webhooks.md',
+        'docs/api/authentication.md',
         'docs/compatibility.md',
         'docs/security/integration-threat-model.md',
         'docs/release-checklist.md',
@@ -2269,6 +2472,20 @@ function publication_check(): void
         'app/Core/Events/PublicEventDeadLetterReplayService.php',
         'app/Core/Events/ReplayOperatorAuthorization.php',
         'app/Controllers/WebhookController.php',
+        'app/Controllers/ApiAccessController.php',
+        'app/Api/Security/ApiAuthenticationUnavailable.php',
+        'app/Api/Security/ApiAuthorizationUnavailable.php',
+        'app/Api/Security/ApiKeyring.php',
+        'app/Api/Security/ApiManagementAuthorization.php',
+        'app/Api/Security/ApiPrincipal.php',
+        'app/Api/Security/ApiScopePolicy.php',
+        'app/Api/Security/ApiServiceAccountService.php',
+        'app/Api/Security/ApiTokenAuthenticator.php',
+        'app/Api/Security/InvalidApiCredential.php',
+        'app/Api/Operations/ApiHealthService.php',
+        'app/Api/Operations/ApiRateLimiter.php',
+        'app/Api/Operations/ApiRequestAuditService.php',
+        'app/Api/Operations/ApiRetentionService.php',
         'app/Integrations/Webhooks/CurlWebhookHttpTransport.php',
         'app/Integrations/Webhooks/WebhookDeliveryReplayService.php',
         'app/Integrations/Webhooks/WebhookDeliveryWorker.php',
@@ -2280,6 +2497,7 @@ function publication_check(): void
         'app/Integrations/Webhooks/WebhookSubscriptionService.php',
         'app/Integrations/Webhooks/WebhookTransportException.php',
         'app/Views/webhooks.php',
+        'app/Views/api-access.php',
         'app/Core/Modules/ModuleVersionIntegrity.php',
         'app/Core/Persistence/DatabaseConnectionInvalidException.php',
         'app/Core/Security/AuthorizationUnavailable.php',
@@ -2309,6 +2527,9 @@ function publication_check(): void
         'tests/webhook_capture_revoke_concurrency_contract.php',
         'tests/webhook_capture_revoke_concurrency_worker.php',
         'tests/webhook_receiver_example_contract.php',
+        'tests/api_identity_contract.php',
+        'tests/api_identity_rotation_concurrency_contract.php',
+        'tests/api_identity_rotation_concurrency_worker.php',
         'tests/validate_public_event_schemas.py',
         'tests/requirements-public-event-schema.txt',
         'tests/authorized_setup_recovery_fixture.php',
@@ -2755,6 +2976,7 @@ function publication_secret_patterns(): array
         'GitHub token' => '/\b(?:gh[opsru]_[A-Za-z0-9_]{30,}|github_pat_[A-Za-z0-9_]{20,})\b/',
         'OpenAI-style API key' => '/\bsk-(?:proj-)?[A-Za-z0-9_-]{20,}\b/',
         'Slack token' => '/\bxox[baprs]-[A-Za-z0-9-]{20,}\b/',
+        'Campus Placement Engine API token' => '/(?<![A-Za-z0-9_])cpe_live_apitok_[a-f0-9]{32}\.[A-Za-z0-9_-]{42}[AEIMQUYcgkosw048](?![A-Za-z0-9_-])/',
         'long bearer token' => '/Bearer\s+(?!\.\.\.|replace|example|token|test)[A-Za-z0-9._~+\/=-]{24,}/i',
     ];
 }
@@ -2855,6 +3077,17 @@ function help(): void
     echo "  php placement install-demo\n";
     echo "  php placement readiness\n";
     echo "  php placement metrics\n";
+    echo "  php placement api-status\n";
+    echo "  php placement api-enable --actor-user-id=USER_ID\n";
+    echo "  php placement api-disable --actor-user-id=USER_ID\n";
+    echo "  php placement api-service-account-create --name=NAME --scopes=opportunities.read,applications.read --actor-user-id=USER_ID [--expiry-days=90]\n";
+    echo "  php placement api-service-account-list --actor-user-id=USER_ID\n";
+    echo "  php placement api-service-account-enable --service-account=apisa_ID --actor-user-id=USER_ID\n";
+    echo "  php placement api-service-account-disable --service-account=apisa_ID --actor-user-id=USER_ID\n";
+    echo "  php placement api-service-account-revoke --service-account=apisa_ID --actor-user-id=USER_ID\n";
+    echo "  php placement api-token-rotate --service-account=apisa_ID --actor-user-id=USER_ID [--expiry-days=90]\n";
+    echo "  php placement api-token-revoke --token-id=LOOKUP_ID --actor-user-id=USER_ID\n";
+    echo "  php placement api-prune --actor-user-id=USER_ID [--limit=1000]\n";
     echo "  php placement placement-report\n";
     echo "  php placement privacy-report\n";
     echo "  php placement anonymize-candidate C001 --confirm=C001\n";

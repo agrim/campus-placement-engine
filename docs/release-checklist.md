@@ -81,6 +81,13 @@ Use this before a public alpha tag or downloadable archive.
   repeated `work(1)` runs without cap or aggregate-order regression. Run
   `php tests/webhook_receiver_example_contract.php` and confirm oversized input
   stops at the 1 MiB plus one-byte sentinel.
+- Run `php tests/api_identity_contract.php` and
+  `php tests/api_identity_rotation_concurrency_contract.php` against SQLite and
+  separate fresh PostgreSQL 17 databases. Confirm `api_enabled` is nonportable
+  and defaults to `0`, only verifier material is stored, exact scope and key
+  readiness fail closed, lifecycle/audit changes are atomic, two concurrent
+  rotations retain one current plus one grace token, aggregate diagnostics are
+  redacted, and the public integration declaration remains event-only.
 - Run `php tests/managed_hosting_contract.php` and confirm the external resolver
   seam, tenant database identity, module entitlements, and session binding fail
   closed as documented.
@@ -97,7 +104,9 @@ Use this before a public alpha tag or downloadable archive.
   `tests/webhook_delivery_concurrency_contract.php`,
   `tests/webhook_revoke_completion_concurrency_contract.php`,
   `tests/webhook_capture_revoke_concurrency_contract.php`, and
-  `tests/webhook_receiver_example_contract.php` without relying on repository
+  `tests/webhook_receiver_example_contract.php`,
+  `tests/api_identity_contract.php`, and
+  `tests/api_identity_rotation_concurrency_contract.php` without relying on repository
   metadata.
 - Run CLI first-run install against a throwaway database with
   `CPE_ADMIN_PASSWORD=... php placement install ...`.

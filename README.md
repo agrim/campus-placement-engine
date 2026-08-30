@@ -121,6 +121,8 @@ php tests/webhook_delivery_concurrency_contract.php
 php tests/webhook_revoke_completion_concurrency_contract.php
 php tests/webhook_capture_revoke_concurrency_contract.php
 php tests/webhook_receiver_example_contract.php
+php tests/api_identity_contract.php
+php tests/api_identity_rotation_concurrency_contract.php
 php tests/install_concurrency_contract.php
 php tests/setup_authorization_contract.php
 ```
@@ -143,6 +145,13 @@ php placement seed-demo
 php placement seed-large-demo [candidate-count] [company-count]
 php placement readiness
 php placement metrics
+php placement api-status
+php placement api-service-account-create --name=NAME --scopes=opportunities.read,applications.read --actor-user-id=USER_ID
+php placement api-token-rotate --service-account=apisa_ID --actor-user-id=USER_ID
+php placement api-token-revoke --token-id=LOOKUP_ID --actor-user-id=USER_ID
+php placement api-enable --actor-user-id=USER_ID
+php placement api-disable --actor-user-id=USER_ID
+php placement api-prune --actor-user-id=USER_ID
 php placement placement-report
 php placement privacy-report
 php placement anonymize-candidate C001 --confirm=C001
@@ -243,6 +252,10 @@ workflow, one-time secrets, exact signing headers, Connector verification,
 retry/replay, SSRF policy, and worker operations, see
 [docs/integrations/webhooks.md](docs/integrations/webhooks.md). `DomainEvent`
 and bundled module PHP interfaces remain private Engine implementation details.
+The disabled-by-default institution-local service-account/token foundation is
+documented in [docs/api/authentication.md](docs/api/authentication.md). It does
+not expose `/api/v1` or change the event-only public integration declaration;
+the first public API resource remains a separate compatibility gate.
 For health, metrics,
 SSO, sessions, logs, and outbox operations, see
 [docs/security-operations.md](docs/security-operations.md).

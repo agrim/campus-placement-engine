@@ -1,6 +1,6 @@
 # Integration event threat model
 
-Status: Phase 2 signed institution-local webhook delivery
+Status: Phase 2 signed delivery plus Phase 3A API identity/control foundation
 
 ## Assets and trust boundary
 
@@ -14,9 +14,11 @@ store endpoint URLs, secrets, event payloads, delivery bodies, raw diagnostics,
 aggregate IDs, or example placement records.
 
 The only public payload in this phase is `application.status_changed` schema 1.
-There is no public Engine API or API scope. Private `DomainEvent` payloads and
-internal module observer APIs remain implementation details even though their
-durable state shares the transactional outbox table.
+There is no public Engine API or public API scope. The disabled Phase 3A
+identity foundation reserves exact scope rows but exposes no `/api/v1` route;
+private `DomainEvent` payloads and internal module observer APIs remain
+implementation details even though their durable state shares the transactional
+outbox table.
 
 ## Threats and controls
 
@@ -40,6 +42,11 @@ durable state shares the transactional outbox table.
 | A stale worker acknowledges after disable, revoke, or replay | Claims use random tokens plus monotonic lease generations. Every state mutation is token/generation fenced; revoke steals/fences active claims and dead-letters unresolved work. An already in-flight HTTP request remains possible and is covered by consumer verification/deduplication. |
 | A forged or replayed request causes side effects | HMAC-SHA256 binds event ID, Unix timestamp, and exact raw body. Consumers use constant-time comparison, reject excessive clock skew, validate the schema/header identity, and transactionally deduplicate event IDs. |
 | Signing or operational secrets enter source or payloads | Runtime keyrings are environment/secret-manager owned, publication scans public files, and the public schema contains no credential fields. Private repository visibility is not treated as a secret store. |
+| An API token is recovered from the database, browser history, logs, audit, or support output | Token secrets are 32 random bytes revealed once. Storage holds only a clear random lookup ID and 32-byte HMAC verifier under an external versioned keyring. Management never flashes the token, all management responses are no-store, logs/audit are fixed and redacted, and health/metrics expose aggregate counts only. |
+| Unknown API token IDs become an enumeration oracle | Strict parsing uses the same generic denial, performs a dummy HMAC for unknown or malformed lookups, and never returns account state. A missing referenced key version is an aggregate readiness failure rather than credential-specific disclosure. |
+| A broad user role or wildcard silently grants API access | API principals are service accounts, never browser users. Exact stored scopes map fail closed to an enabled Placement module and a durable capability catalog row; user-role inheritance and wildcard scope syntax are not consulted. |
+| Rotation leaves an unbounded credential overlap | Expiry is mandatory (90-day default, 365-day maximum), the previous current token receives no more than 24 hours of grace, database guards allow only one current and at most two unrevoked tokens, and concurrent rotation serializes on the account. |
+| Rate-limit or API audit state becomes a secondary personal-data store | Buckets retain keyed institution/token/source dimensions only. Request audit accepts fixed route, scope, outcome, status, and detail classes with a keyed source fingerprint; raw addresses, URLs, queries, bodies, headers, tokens, and placement identities are excluded and retention is bounded. |
 | Restore silently forks or rewinds the stream | Restore is documented as a continuity break. Operators stop delivery and require connector checkpoint/deduplication review plus resynchronization before resuming. |
 | Control-plane compromise exposes institution records | Cloud compatibility fixtures contain declarations only. Connector execution and payload handling remain in a tenant-isolated data-plane runtime; Cloud stores no event payloads or aggregate IDs. |
 | Recovery replays the wrong endpoint event or changes its content | Webhook replay requires one exact canonical delivery ID, a replayable per-subscription dead letter, no retained lease, an active/degraded subscription, and an actor who resolves to an active local administrator. Revocation-terminal deliveries are never replayable. A transactional row lock and generation fence preserve the immutable source envelope, write a fixed payload-free audit, and keep later versions for only that subscription/aggregate blocked until success. |

@@ -170,6 +170,22 @@ webhooks in the administrator workflow instead.
 and internal-module processing. `CPE_OUTBOUND_ALLOW_PRIVATE_NETWORK` applies to
 legacy notification gateways, not signed Integration subscriptions.
 
+## Future API identity foundation
+
+The Phase 3A identity/control foundation is institution-local, disabled by
+default, and exposes no `/api/v1` resource. Its root keys are separate from
+webhook encryption and every other bearer credential.
+
+| Variable | Purpose |
+|---|---|
+| `CPE_API_KEYRING` | One to eight semicolon-separated `version=key` entries. Every key is exactly 32 bytes in canonical unpadded base64url and remains external to the database. |
+| `CPE_API_ACTIVE_KEY_VERSION` | Version used to derive verifiers for newly issued API tokens. It must name one keyring entry. |
+
+An absent keyring is acceptable while the foundation is disabled and no usable
+token references exist. A missing referenced version fails readiness. See
+`docs/api/authentication.md` for rotation, lifecycle, CLI, audit, and retention
+rules.
+
 ## Managed-hosting adapter
 
 | Variable | Purpose |

@@ -14,9 +14,12 @@ The machine-readable compatibility declaration is
 }
 ```
 
-This is an event-only contract. It grants no Engine API surface and no API
-scope. Internal PHP module APIs, `DomainEvent` payloads, database schemas, and
-observer subscriptions are outside this compatibility promise.
+This is an event-only contract. It grants no Engine API surface and no public
+API scope. The disabled institution-local identity foundation reserves exact
+scope rows internally, but those rows are not a connector compatibility promise
+and no `/api/v1` resource is registered. Internal PHP module APIs,
+`DomainEvent` payloads, database schemas, and observer subscriptions are outside
+this compatibility promise.
 
 ## Version rules
 

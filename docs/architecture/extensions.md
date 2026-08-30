@@ -50,8 +50,12 @@ implemented as the event-only contract in `contracts/public-integration.v1.json`
 3. broader out-of-process connector capabilities only after their public
    contracts are governed.
 
-The Phase 1 declaration has empty `api_scopes` and `engine_api` arrays. It does
-not introduce an API surface.
+The Phase 1 declaration has empty `api_scopes` and `engine_api` arrays. Phase 3A
+adds a disabled-by-default institution-local service-account, exact-scope,
+verifier-only token, rate-limit, and redacted-audit control foundation. It does
+not register `/api/v1`, publish an OpenAPI contract, or change those empty
+declarations. The first public resource and compatibility declaration remain a
+separate Phase 3B gate. See `docs/api/authentication.md`.
 
 Internal PHP class names, database tables, templates, and module subscriber
 interfaces are not public contracts. The public compatibility policy is

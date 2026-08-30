@@ -19,6 +19,15 @@ final class Auth
         'application.auto_handoff' => 'Application handoff completed.',
         'application.return_to_idle' => 'Application returned to idle.',
         'application.save' => 'Application saved.',
+        'api.disable' => 'Institution-local API disabled.',
+        'api.enable' => 'Institution-local API enabled.',
+        'api.retention.prune' => 'Expired API security telemetry pruned.',
+        'api.service_account.create' => 'API service account created.',
+        'api.service_account.disable' => 'API service account disabled.',
+        'api.service_account.enable' => 'API service account enabled.',
+        'api.service_account.revoke' => 'API service account and tokens revoked.',
+        'api.token.revoke' => 'API access token revoked.',
+        'api.token.rotate' => 'API access token rotated with bounded overlap.',
         'board_preference.clear' => 'Board preference cleared.',
         'board_preference.save' => 'Board preference saved.',
         'candidate.anonymize' => 'Candidate anonymized.',
@@ -77,6 +86,7 @@ final class Auth
         'candidate_unavailability',
         'internal_event_delivery', 'internal_event_fanout', 'public_event',
         'webhook_subscription', 'webhook_delivery',
+        'api_service_account', 'api_access_token',
     ];
 
     private const AUDIT_SUBJECT_ALIASES = [

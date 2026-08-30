@@ -115,6 +115,8 @@ jobs:
           php tests/webhook_revoke_completion_concurrency_contract.php
           php tests/webhook_capture_revoke_concurrency_contract.php
           php tests/webhook_receiver_example_contract.php
+          php tests/api_identity_contract.php
+          php tests/api_identity_rotation_concurrency_contract.php
           php tests/postgres_connection_policy_contract.php
           php tests/postgres_tls_contract.php
           php tests/database_contract.php
@@ -192,6 +194,24 @@ jobs:
           CPE_DATABASE_URL='postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_installation_state_contract?sslmode=disable' php tests/installation_state_contract.php
           psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_internal_event_contract'
           CPE_DATABASE_URL='postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_internal_event_contract?sslmode=disable' php tests/internal_event_delivery_contract.php
+
+      - name: Run PostgreSQL API identity contract
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_api_identity_contract?sslmode=disable
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_api_identity_contract'
+          php tests/api_identity_contract.php
+
+      - name: Run PostgreSQL API rotation concurrency contract
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_api_rotation_concurrency_contract?sslmode=disable
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_api_rotation_concurrency_contract'
+          php tests/api_identity_rotation_concurrency_contract.php
 
       - name: Run PostgreSQL mutation concurrency contract
         env:

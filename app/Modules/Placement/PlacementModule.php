@@ -5,6 +5,7 @@ declare(strict_types=1);
 namespace App\Modules\Placement;
 
 use App\Controllers\AdminController;
+use App\Controllers\ApiAccessController;
 use App\Controllers\BoardController;
 use App\Controllers\CandidateController;
 use App\Controllers\ImportController;
@@ -91,6 +92,15 @@ final class PlacementModule implements Module, ProvidesPortability, ProvidesPriv
             $this->route('integration-disable', 'POST', WebhookController::class, 'disable'),
             $this->route('integration-revoke', 'POST', WebhookController::class, 'revoke'),
             $this->route('integration-replay', 'POST', WebhookController::class, 'replay'),
+            $this->route('api-access', 'GET', ApiAccessController::class, 'show'),
+            $this->route('api-service-account-create', 'POST', ApiAccessController::class, 'create'),
+            $this->route('api-token-rotate', 'POST', ApiAccessController::class, 'rotate'),
+            $this->route('api-token-revoke', 'POST', ApiAccessController::class, 'revokeToken'),
+            $this->route('api-service-account-enable', 'POST', ApiAccessController::class, 'enableAccount'),
+            $this->route('api-service-account-disable', 'POST', ApiAccessController::class, 'disableAccount'),
+            $this->route('api-service-account-revoke', 'POST', ApiAccessController::class, 'revokeAccount'),
+            $this->route('api-enable', 'POST', ApiAccessController::class, 'enableApi'),
+            $this->route('api-disable', 'POST', ApiAccessController::class, 'disableApi'),
             $this->route('preferences', 'GET', PreferenceController::class, 'show'),
             $this->route('preferences', 'POST', PreferenceController::class, 'create'),
             $this->route('preferences-resolve', 'POST', PreferenceController::class, 'resolve'),
@@ -114,6 +124,7 @@ final class PlacementModule implements Module, ProvidesPortability, ProvidesPriv
             $this->nav('wanted', 'Wanted', 'placement.wanted.view', 70),
             $this->nav('admin', 'Admin', 'portal.settings.manage', 80),
             $this->nav('integrations', 'Integrations', 'portal.integrations.manage', 85),
+            $this->nav('api-access', 'API Access', 'portal.integrations.manage', 86),
             $this->nav('system', 'System', 'placement.system.view', 90),
             $this->nav('public', 'Public', 'portal.access', 100),
         ];

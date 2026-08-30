@@ -28,6 +28,14 @@ Date: 2026-07-18
 > receives none of that data. Local PostgreSQL and live TLS endpoints remain
 > release-environment proof gates rather than claims made by this working tree.
 
+> Phase 3A API identity update, 2026-08-30: the Engine now contains a
+> disabled-by-default institution-local service-account and verifier-only token
+> foundation with exact scopes, bounded rotation, aggregate readiness,
+> rate-limit state, and redacted request audit. No `/api/v1` resource or public
+> API scope is exposed; `contracts/public-integration.v1.json` remains
+> event-only. PostgreSQL execution and production TLS remain release-environment
+> proof gates rather than claims made by this working tree.
+
 ## Implemented
 
 ### Career Services Portal Productization
@@ -77,6 +85,13 @@ Date: 2026-07-18
   immutable explicit outbox projections, per-application aggregate versions and
   ordering, exact audited dead-letter recovery, and no public Engine API or API
   scope. Internal `DomainEvent` payloads and module PHP APIs remain private.
+- Institution-local API identity/control foundation with a nonportable disabled
+  default, administrator capability plus CSRF management, exact
+  `opportunities.read` and `applications.read` grants, external bounded
+  versioned keyring, verifier-only one-time tokens, mandatory expiry, 24-hour
+  rotation grace, revoke/disable controls, transactional keyed rate limits,
+  redacted 90-day request audit, bounded pruning, and aggregate-only
+  health/metrics/doctor output. It exposes no public HTTP API in this phase.
 - Institution-facing signed webhook Integrations workflow with one-time secret
   reveal, AES-256-GCM storage under an external versioned keyring, bounded
   two-secret rotation overlap, explicit validation before activation, health,

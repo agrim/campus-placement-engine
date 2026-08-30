@@ -19,6 +19,8 @@ php tests/webhook_delivery_concurrency_contract.php
 php tests/webhook_revoke_completion_concurrency_contract.php
 php tests/webhook_capture_revoke_concurrency_contract.php
 php tests/webhook_receiver_example_contract.php
+php tests/api_identity_contract.php
+php tests/api_identity_rotation_concurrency_contract.php
 php tests/postgres_connection_policy_contract.php
 php tests/postgres_tls_contract.php
 php tests/database_contract.php
@@ -90,6 +92,17 @@ without exceeding endpoint/institution caps or changing aggregate order.
 `tests/webhook_receiver_example_contract.php` executes the dependency-light
 consumer's stream reader with a 2 MiB input and proves it consumes exactly the
 1 MiB plus one-byte rejection sentinel rather than buffering the remainder.
+`tests/api_identity_contract.php` runs against SQLite and a fresh dedicated
+PostgreSQL database. It proves paired migration/default parity, external-key
+grammar and HKDF binding, verifier-only one-time token storage, exact
+scope/capability checks, expiry/rotation/revoke/disable lifecycle, missing-key
+readiness, transactional rollback, keyed rate limiting, redacted audit and
+retention, aggregate diagnostics, and the absence of a public API declaration.
+`tests/api_identity_rotation_concurrency_contract.php` releases two independent
+rotators against one account and proves serialized lifecycle state: three total
+historical rows, exactly two unrevoked tokens, one current token, one grace
+token, and an unusable original. CI and release run both contracts against
+separate fresh PostgreSQL databases as well as SQLite.
 `tests/postgres_connection_policy_contract.php` is a no-network parser and
 policy gate. It freezes the Cloud-compatible constructor and raw `fromUrl()`
 signatures while proving strict runtime TLS, pool-mode, timeout, redaction,

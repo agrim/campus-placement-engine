@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Domain;
 
+use App\Api\Operations\ApiHealthService;
 use App\Core\Backup\DatabaseBackupService;
 use App\Core\Backup\BackupMetadata;
 use App\Core\Backup\DatabaseRestoreService;
@@ -48,6 +49,7 @@ final class ReadinessService
         $configurationFrozen = $this->setting('configuration_freeze') === '1';
         $workflowErrors = $this->workflow->validate();
         $webhookHealth = (new WebhookHealthService($this->pdo))->snapshot();
+        $apiHealth = (new ApiHealthService($this->pdo))->snapshot();
 
         return [
             'checks' => [
@@ -134,6 +136,11 @@ final class ReadinessService
                     $webhookHealth['message'],
                 ),
                 $this->check(
+                    'Institution-local API identity',
+                    $apiHealth['status'],
+                    $apiHealth['message'],
+                ),
+                $this->check(
                     'Active users',
                     $activeUsers > 0 ? 'ok' : 'fail',
                     $activeUsers > 0 ? "{$activeUsers} active user(s)." : 'No active users are available.'
@@ -150,6 +157,7 @@ final class ReadinessService
             'notificationDeliveries' => $deliveryStatus,
             'notificationGatewayCertification' => $gatewayCertification,
             'webhookIntegrations' => $webhookHealth,
+            'apiIdentity' => $apiHealth,
             'activeUsers' => $activeUsers,
             'configurationFrozen' => $configurationFrozen,
         ];
