@@ -2135,6 +2135,9 @@ test_case('open-source release governance files and ignore protections exist', f
         'tests/api_identity_rotation_concurrency_worker.php',
         'tests/api_http_contract.php',
         'tests/application_transition_boundary_contract.php',
+        'tests/api_application_transition_command_contract.php',
+        'tests/api_application_transition_command_concurrency_contract.php',
+        'tests/api_application_transition_command_concurrency_worker.php',
         'tests/validate_public_api_contracts.py',
         'contracts/openapi.v1.json',
         'public/router.php',
@@ -2146,7 +2149,7 @@ test_case('open-source release governance files and ignore protections exist', f
         assert_true(is_file($root . '/' . $path), "Missing release governance file: {$path}");
     }
     $ci = (string) file_get_contents($root . '/.github/workflows/ci.yml');
-    foreach (['php tests/run.php', 'php tests/alpha1_release_acceptance.php', 'php tests/backup_restore_contract.php', 'php tests/database_connection_cleanup_contract.php', 'php tests/incident_boundary_contract.php', 'php tests/legacy_backup_compatibility_contract.php', 'php tests/worker_delivery_contract.php', 'php tests/public_event_contract.php', 'php tests/webhook_delivery_contract.php', 'php tests/webhook_delivery_concurrency_contract.php', 'php tests/webhook_revoke_completion_concurrency_contract.php', 'php tests/webhook_receiver_example_contract.php', 'php tests/api_identity_contract.php', 'php tests/api_identity_rotation_concurrency_contract.php', 'php tests/api_http_contract.php', 'php tests/application_transition_boundary_contract.php', 'php tests/database_ownership_contract.php', 'php tests/migration_lock_contract.php', 'php tests/database_lock_release_contract.php', 'php tests/install_concurrency_contract.php', 'php tests/hosted_install_atomicity_contract.php', 'php tests/hosted_install_preflight_contract.php', 'php tests/setup_authorization_contract.php', 'php tests/hosted_install_contract.php', 'php tests/managed_hosting_contract.php', 'php placement publication-check', 'php placement package', 'php placement verify-package', 'php placement install', 'php placement upgrade', 'php placement setup --check', 'php placement serve --help', 'php placement install-demo', 'php placement seed-large-demo', 'php placement browser-qa-plan', 'php placement smoke-http', 'php placement readiness', 'php placement metrics', 'php placement placement-report', 'php placement privacy-report', 'php placement export', 'php placement rollback-import', 'php placement config-export', 'php placement config-validate', 'php placement config-import', 'php placement deliver-notifications', 'php placement work-integrations', 'php placement certify-notifications', 'php placement optimize-slots', 'php placement assign-optimized-slots', 'php -l placement'] as $command) {
+    foreach (['php tests/run.php', 'php tests/alpha1_release_acceptance.php', 'php tests/backup_restore_contract.php', 'php tests/database_connection_cleanup_contract.php', 'php tests/incident_boundary_contract.php', 'php tests/legacy_backup_compatibility_contract.php', 'php tests/worker_delivery_contract.php', 'php tests/public_event_contract.php', 'php tests/webhook_delivery_contract.php', 'php tests/webhook_delivery_concurrency_contract.php', 'php tests/webhook_revoke_completion_concurrency_contract.php', 'php tests/webhook_receiver_example_contract.php', 'php tests/api_identity_contract.php', 'php tests/api_identity_rotation_concurrency_contract.php', 'php tests/api_http_contract.php', 'php tests/application_transition_boundary_contract.php', 'php tests/api_application_transition_command_contract.php', 'php tests/api_application_transition_command_concurrency_contract.php', 'php tests/database_ownership_contract.php', 'php tests/migration_lock_contract.php', 'php tests/database_lock_release_contract.php', 'php tests/install_concurrency_contract.php', 'php tests/hosted_install_atomicity_contract.php', 'php tests/hosted_install_preflight_contract.php', 'php tests/setup_authorization_contract.php', 'php tests/hosted_install_contract.php', 'php tests/managed_hosting_contract.php', 'php placement publication-check', 'php placement package', 'php placement verify-package', 'php placement install', 'php placement upgrade', 'php placement setup --check', 'php placement serve --help', 'php placement install-demo', 'php placement seed-large-demo', 'php placement browser-qa-plan', 'php placement smoke-http', 'php placement readiness', 'php placement metrics', 'php placement placement-report', 'php placement privacy-report', 'php placement export', 'php placement rollback-import', 'php placement config-export', 'php placement config-validate', 'php placement config-import', 'php placement deliver-notifications', 'php placement work-integrations', 'php placement certify-notifications', 'php placement optimize-slots', 'php placement assign-optimized-slots', 'php -l placement'] as $command) {
         assert_true(str_contains($ci, $command), "Missing CI command: {$command}");
     }
     $releaseWorkflow = (string) file_get_contents($root . '/.github/workflows/release.yml');
@@ -2245,6 +2248,16 @@ YAML;
             str_contains($workflow, 'cpe_application_transition_boundary_contract')
                 && str_contains($workflow, 'php tests/application_transition_boundary_contract.php'),
             'CI and release must run the application transition boundary against a fresh PostgreSQL database.',
+        );
+        assert_true(
+            str_contains($workflow, 'cpe_api_application_transition_command_contract')
+                && str_contains($workflow, 'php tests/api_application_transition_command_contract.php'),
+            'CI and release must run API command persistence parity against a fresh PostgreSQL database.',
+        );
+        assert_true(
+            str_contains($workflow, 'cpe_api_application_transition_command_concurrency_contract')
+                && str_contains($workflow, 'php tests/api_application_transition_command_concurrency_contract.php'),
+            'CI and release must run API command same-key concurrency against a fresh PostgreSQL database.',
         );
         assert_true(
             str_contains($workflow, 'cpe_api_http_contract')
@@ -2532,6 +2545,25 @@ test_case('release package includes public source and excludes private runtime d
         assert_true(str_contains($joined, '/tests/api_identity_rotation_concurrency_contract.php'), 'Package should include the API rotation concurrency contract');
         assert_true(str_contains($joined, '/tests/api_identity_rotation_concurrency_worker.php'), 'Package should include the API rotation concurrency worker');
         assert_true(str_contains($joined, '/tests/application_transition_boundary_contract.php'), 'Package should include the application transition boundary contract');
+        assert_true(str_contains($joined, '/tests/api_application_transition_command_contract.php'), 'Package should include the API command persistence contract');
+        assert_true(str_contains($joined, '/tests/api_application_transition_command_concurrency_contract.php'), 'Package should include the API command concurrency contract');
+        assert_true(str_contains($joined, '/tests/api_application_transition_command_concurrency_worker.php'), 'Package should include the API command concurrency worker');
+        foreach ([
+            'app/Api/Commands/ApiCommandConflict.php',
+            'app/Api/Commands/ApiCommandFingerprint.php',
+            'app/Api/Commands/ApiCommandHasher.php',
+            'app/Api/Commands/ApiCommandIdempotencyStore.php',
+            'app/Api/Commands/ApiCommandReservation.php',
+            'app/Api/Commands/ApiCommandUnavailable.php',
+            'app/Api/Commands/InvalidApiCommandInput.php',
+            'database/migrations/054_api_application_transition_commands.sql',
+            'database/migrations/pgsql/018_api_application_transition_commands.sql',
+        ] as $commandPackagePath) {
+            assert_true(
+                str_contains($joined, '/' . $commandPackagePath),
+                'Package should include Phase 4B command foundation file: ' . $commandPackagePath,
+            );
+        }
         foreach ([
             'app/Api/Http/ApiCursorCodec.php',
             'app/Api/Http/ApiHttpException.php',
@@ -2718,6 +2750,22 @@ test_case('release package includes public source and excludes private runtime d
         ]);
         assert_same(0, $tarTransitionCode, 'Git-free extracted tarball application transition boundary contract should pass: ' . $tarTransitionErr);
         assert_true(str_contains($tarTransitionOut, 'PASS application transition boundary contract (sqlite shared transaction'), 'Extracted tarball should run the application transition boundary contract');
+        $tarCommandTmp = $tarExtractDir . '/api-command-tmp';
+        assert_true(mkdir($tarCommandTmp, 0700, true), 'Could not create extracted tarball API command temp directory');
+        [$tarCommandCode, $tarCommandOut, $tarCommandErr] = run_php_from($tarPackageRoot, 'tests/api_application_transition_command_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $tarCommandTmp,
+        ]);
+        assert_same(0, $tarCommandCode, 'Git-free extracted tarball API command contract should pass: ' . $tarCommandErr);
+        assert_true(str_contains($tarCommandOut, 'PASS API application transition command contract (sqlite'), 'Extracted tarball should run the API command contract');
+        [$tarCommandRaceCode, $tarCommandRaceOut, $tarCommandRaceErr] = run_php_from($tarPackageRoot, 'tests/api_application_transition_command_concurrency_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $tarCommandTmp,
+        ]);
+        assert_same(0, $tarCommandRaceCode, 'Git-free extracted tarball API command concurrency contract should pass: ' . $tarCommandRaceErr);
+        assert_true(str_contains($tarCommandRaceOut, 'PASS API application transition command concurrency (sqlite'), 'Extracted tarball should run API command same-key concurrency');
 
         $zipArchive = new PharData($zipPath);
         $zipArchive->extractTo($extractDir);
@@ -2816,6 +2864,22 @@ test_case('release package includes public source and excludes private runtime d
         ]);
         assert_same(0, $packageTransitionCode, 'Git-free extracted ZIP application transition boundary contract should pass: ' . $packageTransitionErr);
         assert_true(str_contains($packageTransitionOut, 'PASS application transition boundary contract (sqlite shared transaction'), 'Extracted ZIP should run the application transition boundary contract');
+        $zipCommandTmp = $extractDir . '/api-command-tmp';
+        assert_true(mkdir($zipCommandTmp, 0700, true), 'Could not create extracted ZIP API command temp directory');
+        [$packageCommandCode, $packageCommandOut, $packageCommandErr] = run_php_from($packageRoot, 'tests/api_application_transition_command_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $zipCommandTmp,
+        ]);
+        assert_same(0, $packageCommandCode, 'Git-free extracted ZIP API command contract should pass: ' . $packageCommandErr);
+        assert_true(str_contains($packageCommandOut, 'PASS API application transition command contract (sqlite'), 'Extracted ZIP should run the API command contract');
+        [$packageCommandRaceCode, $packageCommandRaceOut, $packageCommandRaceErr] = run_php_from($packageRoot, 'tests/api_application_transition_command_concurrency_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $zipCommandTmp,
+        ]);
+        assert_same(0, $packageCommandRaceCode, 'Git-free extracted ZIP API command concurrency contract should pass: ' . $packageCommandRaceErr);
+        assert_true(str_contains($packageCommandRaceOut, 'PASS API application transition command concurrency (sqlite'), 'Extracted ZIP should run API command same-key concurrency');
 
         $packageRuntimeFixture = $packageRoot . '/data/restore-staging/package-contract.sqlite';
         try {

@@ -187,7 +187,7 @@ try {
     $registered->execute([$migration]);
     api_contract_same(1, (int) $registered->fetchColumn(), 'API identity migration was not registered.');
     api_contract_same('0', (string) $pdo->query("SELECT value FROM settings WHERE key = 'api_enabled'")->fetchColumn(), 'API did not default disabled.');
-    foreach (['api_service_accounts', 'api_service_account_scopes', 'api_access_tokens', 'api_rate_limit_buckets', 'api_request_audit_events'] as $table) {
+    foreach (['api_service_accounts', 'api_service_account_scopes', 'api_access_tokens', 'api_rate_limit_buckets', 'api_request_audit_events', 'api_command_idempotency_keys'] as $table) {
         api_contract_same(0, (int) $pdo->query('SELECT COUNT(*) FROM ' . $table)->fetchColumn(), 'Fresh install synthesized API identity state: ' . $table);
     }
 
@@ -555,6 +555,7 @@ try {
     ]);
     $pruned = (new ApiRetentionService($pdo))->prune(1, 100);
     api_contract_assert($pruned['rate_limit_buckets'] >= 1 && $pruned['request_audit_events'] >= 1, 'API retention did not prune expired rows.');
+    api_contract_assert(array_key_exists('command_idempotency_keys', $pruned), 'API retention omitted command-idempotency pruning outcome.');
     $otherBucketCount = $pdo->prepare('SELECT COUNT(*) FROM api_rate_limit_buckets WHERE institution_id = ? AND bucket_key = ?');
     $otherBucketCount->execute([$otherInstitutionId, str_repeat('c', 64)]);
     api_contract_same(1, (int) $otherBucketCount->fetchColumn(), 'API retention pruned another institution rate-limit bucket.');
@@ -577,6 +578,7 @@ try {
         array_merge(
             glob($projectRoot . '/app/Api/Security/*.php') ?: [],
             glob($projectRoot . '/app/Api/Operations/*.php') ?: [],
+            glob($projectRoot . '/app/Api/Commands/*.php') ?: [],
         ),
     ));
     foreach (['WebhookSecretCipher', 'OperationalBearerAuthorization', 'PlacementService', '../cloud', 'Cloud\\'] as $forbiddenDependency) {
@@ -586,6 +588,10 @@ try {
     foreach ([$created['token'], $rotated['token'], $rotatedAgain['token'], $replacement['token'], $missingKeyAccount['token']] as $plaintextToken) {
         api_contract_assert(!str_contains($structuredLog, $plaintextToken), 'Structured log retained a plaintext API token.');
     }
+    api_contract_assert(
+        str_contains((string) file_get_contents($projectRoot . '/placement'), 'Expired command-idempotency keys pruned:'),
+        'API prune CLI omitted command-idempotency retention output.',
+    );
 
     echo 'PASS API identity contract (' . $driver . ")\n";
 } finally {

@@ -19,7 +19,7 @@ final class ApiKeyring
 
     private const MAX_KEYS = 8;
     private const MAX_ENCODED_KEYRING_BYTES = 1024;
-    private const PURPOSES = ['token', 'cursor', 'source'];
+    private const PURPOSES = ['token', 'cursor', 'source', 'command'];
 
     /** @param array<string, string> $keys Raw 32-byte root keys indexed by version. */
     public function __construct(
@@ -159,6 +159,30 @@ final class ApiKeyring
             'sha256',
             implode("\0", ['cpe-api-source', '1', $institutionPublicId, $version]) . "\0" . $source,
             $this->derivedKey('source', $institutionPublicId, $version),
+        );
+    }
+
+    public function commandIdempotencyHash(
+        string $clearKey,
+        string $institutionPublicId,
+        string $operation,
+        ?string $version = null,
+    ): string {
+        if (preg_match('/\A[a-f0-9]{32,64}\z/D', $clearKey) !== 1
+            || $operation !== 'application.transition') {
+            throw new RuntimeException('API command idempotency input is invalid.');
+        }
+        $version ??= $this->activeVersion;
+        return hash_hmac(
+            'sha256',
+            implode("\0", [
+                'cpe-api-command-idempotency-key',
+                '1',
+                $institutionPublicId,
+                $operation,
+                $version,
+            ]) . "\0" . $clearKey,
+            $this->derivedKey('command', $institutionPublicId, $version),
         );
     }
 

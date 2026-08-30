@@ -4,6 +4,7 @@ declare(strict_types=1);
 
 namespace App\Api\Operations;
 
+use App\Api\Commands\ApiCommandIdempotencyStore;
 use App\Api\Security\ApiManagementAuthorization;
 use App\Core\Http\UserVisibleException;
 use App\Core\Institution\InstitutionRepository;
@@ -18,7 +19,7 @@ final class ApiRetentionService
     {
     }
 
-    /** @return array{rate_limit_buckets: int, request_audit_events: int} */
+    /** @return array{rate_limit_buckets: int, request_audit_events: int, command_idempotency_keys: int} */
     public function prune(int $actorUserId, int $limit = 1000): array
     {
         if ($limit < 1 || $limit > 5000) {
@@ -49,10 +50,12 @@ final class ApiRetentionService
             $auditDelete->bindValue(2, $now, PDO::PARAM_STR);
             $auditDelete->bindValue(3, $limit, PDO::PARAM_INT);
             $auditDelete->execute();
+            $commandKeys = (new ApiCommandIdempotencyStore($pdo))->pruneExpiredCurrentInstitution($limit);
             Auth::audit($actorUserId, 'api.retention.prune', 'system', null, '', $pdo);
             return [
                 'rate_limit_buckets' => $bucketDelete->rowCount(),
                 'request_audit_events' => $auditDelete->rowCount(),
+                'command_idempotency_keys' => $commandKeys,
             ];
         });
     }
