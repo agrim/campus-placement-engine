@@ -613,6 +613,7 @@ test_case('placement module owns its routes and capability-filtered navigation',
 
     assert_true(in_array('board', $routeNames, true), 'Placement module should register the board route');
     assert_true(in_array('records', $routeNames, true), 'Placement module should register the records route');
+    assert_true(in_array('operations', $routeNames, true), 'Placement module should register the university operations route');
     assert_same(count($routes), count(array_unique(array_map(
         fn (array $route): string => strtoupper((string) $route['method']) . ' ' . (string) $route['name'],
         $routes
@@ -2092,6 +2093,9 @@ test_case('open-source release governance files and ignore protections exist', f
         'docs/glossary.md',
         'docs/environment.md',
         'docs/integrations/webhooks.md',
+        'docs/operations/integration-worker.md',
+        'docs/operations/support-report.md',
+        'docs/operations/university-workspace.md',
         'docs/api/authentication.md',
         'docs/api/v1.md',
         'docs/configuration-architecture.md',
@@ -2130,6 +2134,7 @@ test_case('open-source release governance files and ignore protections exist', f
         'tests/webhook_revoke_completion_concurrency_contract.php',
         'tests/webhook_revoke_completion_concurrency_worker.php',
         'tests/webhook_receiver_example_contract.php',
+        'tests/operator_simplicity_contract.php',
         'tests/api_identity_contract.php',
         'tests/api_identity_rotation_concurrency_contract.php',
         'tests/api_identity_rotation_concurrency_worker.php',
@@ -2150,7 +2155,7 @@ test_case('open-source release governance files and ignore protections exist', f
         assert_true(is_file($root . '/' . $path), "Missing release governance file: {$path}");
     }
     $ci = (string) file_get_contents($root . '/.github/workflows/ci.yml');
-    foreach (['php tests/run.php', 'php tests/alpha1_release_acceptance.php', 'php tests/backup_restore_contract.php', 'php tests/database_connection_cleanup_contract.php', 'php tests/incident_boundary_contract.php', 'php tests/legacy_backup_compatibility_contract.php', 'php tests/worker_delivery_contract.php', 'php tests/public_event_contract.php', 'php tests/webhook_delivery_contract.php', 'php tests/webhook_delivery_concurrency_contract.php', 'php tests/webhook_revoke_completion_concurrency_contract.php', 'php tests/webhook_receiver_example_contract.php', 'php tests/api_identity_contract.php', 'php tests/api_identity_rotation_concurrency_contract.php', 'php tests/api_http_contract.php', 'php tests/application_transition_boundary_contract.php', 'php tests/api_application_transition_input_contract.php', 'php tests/api_application_transition_command_contract.php', 'php tests/api_application_transition_command_concurrency_contract.php', 'php tests/database_ownership_contract.php', 'php tests/migration_lock_contract.php', 'php tests/database_lock_release_contract.php', 'php tests/install_concurrency_contract.php', 'php tests/hosted_install_atomicity_contract.php', 'php tests/hosted_install_preflight_contract.php', 'php tests/setup_authorization_contract.php', 'php tests/hosted_install_contract.php', 'php tests/managed_hosting_contract.php', 'php placement publication-check', 'php placement package', 'php placement verify-package', 'php placement install', 'php placement upgrade', 'php placement setup --check', 'php placement serve --help', 'php placement install-demo', 'php placement seed-large-demo', 'php placement browser-qa-plan', 'php placement smoke-http', 'php placement readiness', 'php placement metrics', 'php placement placement-report', 'php placement privacy-report', 'php placement export', 'php placement rollback-import', 'php placement config-export', 'php placement config-validate', 'php placement config-import', 'php placement deliver-notifications', 'php placement work-integrations', 'php placement certify-notifications', 'php placement optimize-slots', 'php placement assign-optimized-slots', 'php -l placement'] as $command) {
+    foreach (['php tests/run.php', 'php tests/alpha1_release_acceptance.php', 'php tests/backup_restore_contract.php', 'php tests/database_connection_cleanup_contract.php', 'php tests/incident_boundary_contract.php', 'php tests/legacy_backup_compatibility_contract.php', 'php tests/worker_delivery_contract.php', 'php tests/public_event_contract.php', 'php tests/webhook_delivery_contract.php', 'php tests/webhook_delivery_concurrency_contract.php', 'php tests/webhook_revoke_completion_concurrency_contract.php', 'php tests/webhook_receiver_example_contract.php', 'php tests/operator_simplicity_contract.php', 'php tests/api_identity_contract.php', 'php tests/api_identity_rotation_concurrency_contract.php', 'php tests/api_http_contract.php', 'php tests/application_transition_boundary_contract.php', 'php tests/api_application_transition_input_contract.php', 'php tests/api_application_transition_command_contract.php', 'php tests/api_application_transition_command_concurrency_contract.php', 'php tests/database_ownership_contract.php', 'php tests/migration_lock_contract.php', 'php tests/database_lock_release_contract.php', 'php tests/install_concurrency_contract.php', 'php tests/hosted_install_atomicity_contract.php', 'php tests/hosted_install_preflight_contract.php', 'php tests/setup_authorization_contract.php', 'php tests/hosted_install_contract.php', 'php tests/managed_hosting_contract.php', 'php placement publication-check', 'php placement package', 'php placement verify-package', 'php placement install', 'php placement upgrade', 'php placement setup --check', 'php placement serve --help', 'php placement install-demo', 'php placement seed-large-demo', 'php placement browser-qa-plan', 'php placement smoke-http', 'php placement readiness', 'php placement metrics', 'php placement placement-report', 'php placement privacy-report', 'php placement export', 'php placement rollback-import', 'php placement config-export', 'php placement config-validate', 'php placement config-import', 'php placement deliver-notifications', 'php placement work-integrations', 'php placement certify-notifications', 'php placement optimize-slots', 'php placement assign-optimized-slots', 'php -l placement'] as $command) {
         assert_true(str_contains($ci, $command), "Missing CI command: {$command}");
     }
     $releaseWorkflow = (string) file_get_contents($root . '/.github/workflows/release.yml');
@@ -2224,6 +2229,11 @@ YAML;
             str_contains($workflow, 'cpe_webhook_delivery_contract')
                 && str_contains($workflow, 'php tests/webhook_delivery_contract.php'),
             'CI and release must run the signed webhook delivery contract against a fresh dedicated PostgreSQL database.',
+        );
+        assert_true(
+            str_contains($workflow, 'cpe_operator_simplicity_contract')
+                && str_contains($workflow, 'php tests/operator_simplicity_contract.php'),
+            'CI and release must run the operator simplicity contract against SQLite and a fresh PostgreSQL database.',
         );
         assert_true(
             str_contains($workflow, 'cpe_webhook_delivery_concurrency_contract')
@@ -2542,6 +2552,10 @@ test_case('release package includes public source and excludes private runtime d
         assert_true(str_contains($joined, '/tests/webhook_capture_revoke_concurrency_contract.php'), 'Package should include the webhook capture/revoke concurrency contract');
         assert_true(str_contains($joined, '/tests/webhook_capture_revoke_concurrency_worker.php'), 'Package should include the webhook capture/revoke concurrency worker');
         assert_true(str_contains($joined, '/tests/webhook_receiver_example_contract.php'), 'Package should include the bounded receiver example contract');
+        assert_true(str_contains($joined, '/tests/operator_simplicity_contract.php'), 'Package should include the operator simplicity contract');
+        assert_true(str_contains($joined, '/docs/operations/support-report.md'), 'Package should include the privacy-safe support report guide');
+        assert_true(str_contains($joined, '/app/Operations/SupportReportService.php'), 'Package should include the privacy-safe support report service');
+        assert_true(str_contains($joined, '/app/Modules/Placement/Application/UniversityOperationsWorkspace.php'), 'Package should include the university operations workspace');
         assert_true(str_contains($joined, '/tests/api_identity_contract.php'), 'Package should include the API identity lifecycle contract');
         assert_true(str_contains($joined, '/tests/api_identity_rotation_concurrency_contract.php'), 'Package should include the API rotation concurrency contract');
         assert_true(str_contains($joined, '/tests/api_identity_rotation_concurrency_worker.php'), 'Package should include the API rotation concurrency worker');
@@ -3546,7 +3560,7 @@ test_case('sensitive operational pages are hidden from restricted roles', functi
             assert_true(str_contains($e->getMessage(), 'Only administrators'), 'Role gate should explain admin-only denial');
         }
         $companyNav = render_layout_for_test(['title' => 'Company Nav', 'content' => '']);
-        foreach (['?r=records', '?r=reports', '?r=import', '?r=preferences', '?r=wanted', '?r=admin', '?r=integrations', '?r=system'] as $forbiddenLink) {
+        foreach (['?r=records', '?r=operations', '?r=reports', '?r=import', '?r=preferences', '?r=wanted', '?r=admin', '?r=integrations', '?r=system'] as $forbiddenLink) {
             assert_true(!str_contains($companyNav, $forbiddenLink), 'Company nav should hide ' . $forbiddenLink);
         }
         assert_true(str_contains($companyNav, '?r=notifications'), 'Company nav should keep notifications');
@@ -3574,7 +3588,7 @@ test_case('sensitive operational pages are hidden from restricted roles', functi
 
         $_SESSION['user_id'] = $adminUserId;
         $adminNav = render_layout_for_test(['title' => 'Admin Nav', 'content' => '']);
-        foreach (['?r=records', '?r=reports', '?r=import', '?r=preferences', '?r=wanted', '?r=admin', '?r=system'] as $expectedLink) {
+        foreach (['?r=records', '?r=operations', '?r=reports', '?r=import', '?r=preferences', '?r=wanted', '?r=admin', '?r=system'] as $expectedLink) {
             assert_true(str_contains($adminNav, $expectedLink), 'Admin nav should include ' . $expectedLink);
         }
     } finally {

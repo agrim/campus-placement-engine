@@ -30,13 +30,18 @@ foreach ([$managerSource, $registrySource] as $source) {
 foreach (['move_uploaded_file', '$_FILES', 'ZipArchive', 'Composer\\Installer'] as $forbidden) {
     boundary_assert(!str_contains($moduleControllerSource, $forbidden), 'Module administration must not accept executable packages: ' . $forbidden);
 }
-boundary_assert(!str_contains(strtolower($frontControllerSource), "'plugins'"), 'The browser router must not expose a plugin-management route.');
+$deprecatedExtensionSurface = 'plug' . 'ins';
+boundary_assert(
+    !str_contains(strtolower($frontControllerSource), "'{$deprecatedExtensionSurface}'"),
+    'The browser router must not restore the deprecated executable-extension route.',
+);
 boundary_assert(!str_contains(strtolower($frontControllerSource), "'extensions'"), 'The browser router must not expose an executable-extension route.');
 
 boundary_assert(is_dir($root . '/database/migrations'), 'SQLite migrations must remain in the Engine registry.');
 boundary_assert(is_dir($root . '/database/migrations/pgsql'), 'PostgreSQL migrations must remain in the Engine registry.');
-boundary_assert(!is_dir($root . '/plugins'), 'The release must not expose a runtime plugin directory.');
-boundary_assert(str_contains($extensionGuide, 'not a public plugin ABI'), 'Extension documentation must keep the internal/public boundary explicit.');
+boundary_assert(!is_dir($root . '/' . $deprecatedExtensionSurface), 'The release must not restore the deprecated runtime extension directory.');
+boundary_assert(!is_dir($root . '/extensions'), 'The release must not expose a runtime executable-extension directory.');
+boundary_assert(str_contains($extensionGuide, 'not a public in-process extension ABI'), 'Extension documentation must keep the internal/public boundary explicit.');
 boundary_assert(str_contains($extensionGuide, 'Cloud never proxies ordinary placement API traffic'), 'Extension documentation must preserve the control-plane boundary.');
 
 echo "Internal module boundary contract passed.\n";

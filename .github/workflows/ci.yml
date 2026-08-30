@@ -116,6 +116,7 @@ jobs:
           php tests/webhook_revoke_completion_concurrency_contract.php
           php tests/webhook_capture_revoke_concurrency_contract.php
           php tests/webhook_receiver_example_contract.php
+          php tests/operator_simplicity_contract.php
           php tests/api_identity_contract.php
           php tests/api_identity_rotation_concurrency_contract.php
           php tests/api_http_contract.php
@@ -161,6 +162,15 @@ jobs:
         run: |
           psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_webhook_delivery_contract'
           php tests/webhook_delivery_contract.php
+
+      - name: Run PostgreSQL operator simplicity contract
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_operator_simplicity_contract?sslmode=disable
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_operator_simplicity_contract'
+          php tests/operator_simplicity_contract.php
 
       - name: Run PostgreSQL signed webhook concurrency contract
         env:

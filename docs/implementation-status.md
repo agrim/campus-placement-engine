@@ -49,6 +49,14 @@ Date: 2026-07-18
 > and strict input/OpenAPI contracts. Candidate and all other command/write APIs
 > remain absent; Cloud does not proxy institution API data.
 
+> Operator simplicity update, 2026-08-30: Engine now reconciles existing
+> placement, schedule, workflow, and permitted advising evidence into one
+> university opportunity workspace; standardizes the administrator Integration
+> workflow and five visible states; expands truthful worker/backlog/TLS/key/
+> driver readiness; and provides a bounded privacy-safe JSON support report.
+> Formal eligibility, application-close deadlines, response, rescheduling owner,
+> contact, and escalation state remain deferred where no durable source exists.
+
 ## Implemented
 
 ### Career Services Portal Productization
@@ -131,6 +139,18 @@ Date: 2026-07-18
   defaults, explicit self-hosted private-network opt-in, DNS-to-connection
   pinning, no redirects or proxy inheritance, TLS verification, bounded headers
   and bodies, and deterministic injected-transport coverage.
+- Read-only university opportunity workspace for coverage gaps, eligibility
+  evidence review, configured process cut-offs, schedule clashes, assignment
+  follow-up, repeated no-progress signals, zero-link opportunities, and
+  capability-gated adviser tasks, with explicit evidence limits and no duplicate
+  domain state.
+- Doctor, readiness, and System Integration operations status for scheduler
+  attestation/heartbeat, pending and oldest delivery, dead letters, webhook TLS
+  policy, external key presence, referenced key versions, and PDO-driver
+  readiness.
+- Bounded JSON/CLI support report with an exact metadata allowlist and sentinel
+  tests excluding placement records, names, endpoints, credentials, payloads,
+  database URLs, filesystem paths, and logs.
 - Bounded read-only HTTP load probe with optional `curl_multi` concurrency and a
   PHP streams fallback.
 - Hosted operations, disaster recovery, module development, security operations,

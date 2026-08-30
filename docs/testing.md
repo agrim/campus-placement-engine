@@ -19,6 +19,7 @@ php tests/webhook_delivery_concurrency_contract.php
 php tests/webhook_revoke_completion_concurrency_contract.php
 php tests/webhook_capture_revoke_concurrency_contract.php
 php tests/webhook_receiver_example_contract.php
+php tests/operator_simplicity_contract.php
 php tests/api_identity_contract.php
 php tests/api_identity_rotation_concurrency_contract.php
 php tests/api_http_contract.php
@@ -93,6 +94,14 @@ without exceeding endpoint/institution caps or changing aggregate order.
 `tests/webhook_receiver_example_contract.php` executes the dependency-light
 consumer's stream reader with a 2 MiB input and proves it consumes exactly the
 1 MiB plus one-byte rejection sentinel rather than buffering the remainder.
+`tests/operator_simplicity_contract.php` installs a minimal fixture on SQLite or
+a fresh dedicated PostgreSQL database. A database-enforced read-only boundary
+proves the university opportunity workspace and support report create no domain
+state. The contract covers the outcome queues and their evidence limits,
+reports-plus-sensitive access control, the five Integration states, worker and
+backlog readiness, the exact support-report allowlist, CLI JSON, and sentinel
+exclusion for placement records, endpoints, credentials, payloads, database
+URLs, and filesystem paths.
 `tests/api_identity_contract.php` runs against SQLite and a fresh dedicated
 PostgreSQL database. It proves paired migration/default parity, external-key
 grammar and HKDF binding, verifier-only one-time token storage, exact
@@ -240,6 +249,14 @@ mutates subscription/delivery fixtures:
 ```bash
 export CPE_DATABASE_URL='postgresql://USER:PASSWORD@127.0.0.1:5432/EMPTY_WEBHOOK_DATABASE?sslmode=disable'
 php tests/webhook_delivery_contract.php
+```
+
+Run the operator simplicity contract against another fresh database because it
+installs its own coverage, schedule, advising, and Integration fixtures:
+
+```bash
+export CPE_DATABASE_URL='postgresql://USER:PASSWORD@127.0.0.1:5432/EMPTY_OPERATOR_DATABASE?sslmode=disable'
+php tests/operator_simplicity_contract.php
 ```
 
 Run the two-process claim/circuit contract against another fresh database:

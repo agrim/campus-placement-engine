@@ -30,8 +30,8 @@ This modernization is intentionally dependency-light:
 - SQLite by default; PostgreSQL is supported for hosted and larger deployments.
 - Server-rendered HTML.
 - Vanilla CSS and tiny vanilla JavaScript.
-- No framework, Node build, Redis, external queue service, image assets, or
-  database server required for the default self-hosted install.
+- No framework, Node build, Redis, Kafka, RabbitMQ, container runtime, Cloud,
+  image assets, or database server required for the default self-hosted install.
 
 ## Requirements and manual local start
 
@@ -121,6 +121,7 @@ php tests/webhook_delivery_concurrency_contract.php
 php tests/webhook_revoke_completion_concurrency_contract.php
 php tests/webhook_capture_revoke_concurrency_contract.php
 php tests/webhook_receiver_example_contract.php
+php tests/operator_simplicity_contract.php
 php tests/api_identity_contract.php
 php tests/api_identity_rotation_concurrency_contract.php
 php tests/api_http_contract.php
@@ -146,6 +147,7 @@ php placement seed-demo
 php placement seed-large-demo [candidate-count] [company-count]
 php placement readiness
 php placement metrics
+php placement support-report
 php placement api-status
 php placement api-service-account-create --name=NAME --scopes=opportunities.read,applications.read,applications.transition --actor-user-id=USER_ID
 php placement api-token-rotate --service-account=apisa_ID --actor-user-id=USER_ID
@@ -216,6 +218,14 @@ placement decisions. `configuration_freeze` blocks settings, workflow override
 edits, and `config-import`; `placement_freeze` blocks non-admin placement
 decisions.
 
+The authenticated **Candidate opportunities** workspace reconciles candidate
+coverage gaps, missing eligibility evidence, configured process cut-offs,
+interview/assessment clashes, attendance follow-up, repeated no-progress
+signals, zero-link opportunities, and permitted Career Advising tasks without
+creating a second workflow or eligibility store. Its evidence and deliberate
+limitations are documented in
+[docs/operations/university-workspace.md](docs/operations/university-workspace.md).
+
 ## Project Shape
 
 - `public/` - web entrypoints and tiny static assets.
@@ -253,6 +263,10 @@ workflow, one-time secrets, exact signing headers, Connector verification,
 retry/replay, SSRF policy, and worker operations, see
 [docs/integrations/webhooks.md](docs/integrations/webhooks.md). `DomainEvent`
 and bundled module PHP interfaces remain private Engine implementation details.
+For scheduler attestation and backlog triage, see
+[docs/operations/integration-worker.md](docs/operations/integration-worker.md).
+For the bounded JSON allowlist produced by `php placement support-report`, see
+[docs/operations/support-report.md](docs/operations/support-report.md).
 The disabled-by-default institution-local service-account/token boundary is
 documented in [docs/api/authentication.md](docs/api/authentication.md). The
 opportunity/application read API and its one controlled application-status

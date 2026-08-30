@@ -1,6 +1,6 @@
 # Bundled Module Development
 
-This is an Engine-contributor guide, not a third-party plugin SDK. The portal is
+This is an Engine-contributor guide, not a third-party extension SDK. The portal is
 a modular monolith. A module is first-party PHP code loaded in the same request,
 reviewed and released in the same immutable Engine artifact, and covered by the
 same compatibility matrix. It is not an uploaded package, independently

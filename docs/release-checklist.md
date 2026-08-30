@@ -81,6 +81,12 @@ Use this before a public alpha tag or downloadable archive.
   repeated `work(1)` runs without cap or aggregate-order regression. Run
   `php tests/webhook_receiver_example_contract.php` and confirm oversized input
   stops at the 1 MiB plus one-byte sentinel.
+- Run `php tests/operator_simplicity_contract.php` against SQLite and a fresh
+  dedicated PostgreSQL 17 database. Confirm the university opportunity queues
+  run inside a read-only database boundary, candidate-level access requires both
+  reports and sensitive-record capabilities, readiness exposes worker/backlog/
+  TLS/key/driver state, and the support-report JSON/CLI omit every placement,
+  endpoint, credential, payload, path, and database-URL sentinel.
 - Run `php tests/api_identity_contract.php` and
   `php tests/api_identity_rotation_concurrency_contract.php` against SQLite and
   separate fresh PostgreSQL 17 databases. Confirm `api_enabled` is nonportable
@@ -243,6 +249,8 @@ Use this before a public alpha tag or downloadable archive.
 - Implementation status lists known gaps honestly.
 - Managed-hosting contract, disaster recovery, security operations, module
   development, and testing runbooks are current.
+- University opportunity workspace, Integration worker, and privacy-safe support
+  report runbooks are current and describe their evidence limits.
 - Public event, read API, signed webhook, compatibility, and integration
   threat-model documents match the frozen contracts, strict producer schemas,
   consumer fixtures, exact signing bytes, lifecycle, pagination/recovery,
@@ -260,8 +268,11 @@ Use this before a public alpha tag or downloadable archive.
   `install`, `readiness`, and `export` against a throwaway `CPE_DB_PATH`.
 - Install a fresh demo database.
 - Sign in as the demo admin.
-- Open Board, Records, Reports, Import, Notifications, Admin, System, Public,
-  and Student pages.
+- Open Opportunity coverage, Board, Records, Reports, Import, Notifications,
+  Admin, Integrations, System, Public, and Student pages.
+- Run `php placement support-report`, inspect the JSON allowlist, and confirm it
+  contains no synthetic candidate name, Integration endpoint, credential, path,
+  or free-form log/error text.
 - Run `php placement backup`.
 - Confirm the backup archive has `.metadata.json` and `.sha256` sidecars and that
   `restore` rejects missing/tampered metadata, corrupt checksums, wrong identity,

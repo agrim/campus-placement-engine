@@ -11,9 +11,9 @@ signing secrets, event bodies, application or aggregate IDs, delivery rows, or
 raw diagnostics.
 
 In product language, an **Integration** is the institution-facing connection.
-A **Connector** is the out-of-process receiver. A **Module** remains trusted
-in-process Engine code; webhooks do not load modules, plugins, or arbitrary
-code.
+A **Connector** is the out-of-process software package that receives it. A
+**Module** remains trusted in-process Engine code; webhooks do not load modules,
+uploaded packages, or arbitrary code.
 
 ## Administrator workflow
 
@@ -25,17 +25,17 @@ The visible lifecycle contains only action-changing states:
 
 | State | Meaning and administrator action |
 |---|---|
-| `disabled` | Delivery and future event capture are off. Validate again before activation. |
-| `setup_required` | Complete external encryption-key or signing-secret setup, then validate. |
-| `validating` | The separate signed validation challenge succeeded or is being retried. Activate within 24 hours of success. |
-| `active` | Future selected events are captured for this endpoint. |
-| `degraded` | Delivery failed or dead-lettered. Review the redacted reference and backlog; disable before revalidating. |
+| Disabled | Delivery and future event capture are off. Validate again before activation. |
+| Setup required | Complete external encryption-key or signing-secret setup, then validate. |
+| Validating | The separate signed validation challenge succeeded or is being retried. Activate within 24 hours of success. |
+| Active | Future selected events are captured for this endpoint. |
+| Degraded | Delivery failed or dead-lettered. Review the redacted reference and backlog; disable before revalidating. |
 
 Create and name an endpoint, review its permission, and select
 `application.status_changed` version 1. The first signing secret is generated
 with at least 256 bits of randomness and displayed exactly once. Copy it to the
 Connector's secret manager; it cannot be recovered from Engine. If the external
-encryption keyring is missing, creation safely remains `setup_required` and the
+encryption keyring is missing, creation safely remains **Setup required** and the
 base Engine install continues to work.
 
 Validation sends a separately typed `webhook.validation` JSON challenge. It
@@ -214,7 +214,10 @@ php placement work-integrations --limit=100
 
 For ordinary shared hosting, schedule it every minute with the same PHP binary,
 working directory, database configuration, and keyring as the web process. Do
-not run it in a tight loop. The command records a heartbeat and returns a
+not run it in a tight loop. After installing the schedule, set
+`CPE_INTEGRATION_WORKER_CONFIGURED=1` for the web, CLI, and worker processes.
+This records the operator's scheduler attestation; only the durable heartbeat
+proves a run. The command records that heartbeat and returns a
 non-zero result when a claimed delivery needs retry or review, allowing cron or
 the hosted scheduler to alert without exposing an endpoint or body.
 
@@ -226,6 +229,12 @@ endpoint URLs, event bodies, aggregate IDs, or response bodies.
 Catalog-confirmed absence of the webhook tables is reported as not installed;
 catalog, permission, damaged-schema, and table-read failures remain unavailable
 errors rather than being misreported as a healthy zero state.
+
+`php placement support-report` prints a bounded JSON allowlist of version,
+driver, migration, Module, Integration-state, aggregate backlog, opaque incident,
+scheduler, and redacted transport-policy metadata. It excludes endpoints,
+credentials, payloads, placement records, paths, and logs. See
+[`../operations/support-report.md`](../operations/support-report.md).
 
 `CPE_DOMAIN_EVENT_DIAGNOSTIC_OUTBOX_PATH` remains an optional institution-local
 JSONL diagnostic export for the governed public envelope. It is not production

@@ -30,6 +30,27 @@ does not silently create a database or administrator. To run only the checks:
 php placement setup --check
 ```
 
+## Fastest noninteractive start
+
+For automation, a university-managed server, or a local terminal workflow that
+must not pause for prompts, use the existing preflight and installer directly:
+
+```bash
+php placement setup --check
+CPE_ADMIN_PASSWORD='replace-with-a-strong-secret' php placement install \
+  --college='Example University' \
+  --admin-name='Placement Administrator' \
+  --admin-email='placements@example.edu'
+php placement serve
+```
+
+The install command is noninteractive, consumes the password only from its
+process environment, and refuses an already installed target. Omit `serve` when
+Apache, Nginx, PHP-FPM, or a hosting control panel already serves `public/`.
+This path is still the same installer and migration system as guided setup; it
+does not add a second setup mechanism. The SQLite default requires no Redis,
+Kafka, RabbitMQ, Node.js, container runtime, or Cloud service.
+
 ## Install on university web hosting
 
 1. Confirm the host provides PHP 8.2 or newer with `mbstring`, `pdo_sqlite`, and `sqlite3`.

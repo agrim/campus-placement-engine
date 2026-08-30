@@ -45,6 +45,7 @@ use App\Security\SetupAuthorization;
 use App\Security\SetupHttp;
 use App\Operations\MetricsService;
 use App\Operations\HttpLoadProbe;
+use App\Operations\SupportReportService;
 use App\Support\Csv;
 use App\Support\Database;
 use App\Support\IncidentReporter;
@@ -64,6 +65,7 @@ try {
         'install-demo' => install_demo(),
         'readiness' => readiness(),
         'metrics' => metrics_snapshot(),
+        'support-report' => support_report(array_slice($argv, 2)),
         'api-status' => api_status(),
         'api-enable' => api_global_state(array_slice($argv, 2), true),
         'api-disable' => api_global_state(array_slice($argv, 2), false),
@@ -164,13 +166,57 @@ function doctor(): void
             . '; missing key versions: ' . (int) $api['missing_key_versions'] . "\n";
         $webhooks = (new WebhookHealthService())->snapshot();
         echo strtoupper($webhooks['status'] === 'fail' ? 'ERROR' : $webhooks['status'])
-            . ' signed webhooks: ' . $webhooks['message'] . "\n";
+            . ' Integrations: ' . $webhooks['message'] . "\n";
+        echo 'INFO Integration worker: required=' . ($webhooks['worker_required'] ? 'yes' : 'no')
+            . '; configured=' . ($webhooks['worker_configured'] ? 'yes' : 'no')
+            . '; heartbeat=' . $webhooks['scheduler_freshness']
+            . '; status=' . $webhooks['worker_status']
+            . '; age=' . ($webhooks['worker_heartbeat_age_seconds'] === null
+                ? 'not observed'
+                : (int) $webhooks['worker_heartbeat_age_seconds'] . 's') . "\n";
+        echo 'INFO Integration deliveries: pending=' . (int) $webhooks['pending']
+            . '; oldest=' . ($webhooks['oldest_pending_age_seconds'] === null
+                ? 'none'
+                : (int) $webhooks['oldest_pending_age_seconds'] . 's')
+            . '; dead-lettered=' . (int) $webhooks['dead_lettered'] . "\n";
         echo 'INFO webhook network policy: ' . $webhooks['network_policy'] . "\n";
+        echo 'INFO webhook TLS policy: ' . $webhooks['tls_policy'] . "\n";
+        echo 'INFO webhook encryption key present: '
+            . ($webhooks['encryption_key_present'] ? 'yes' : 'no') . "\n";
         echo 'INFO webhook encryption key version: '
             . ($webhooks['encryption_key_active_version'] !== '' ? $webhooks['encryption_key_active_version'] : 'not configured')
             . "\n";
+        echo 'INFO Integration database driver: ' . $webhooks['database_driver']
+            . '; ready=' . ($webhooks['database_driver_ready'] ? 'yes' : 'no') . "\n";
     }
     $requirements->assertReady();
+}
+
+function support_report(array $args): void
+{
+    if (in_array('--help', $args, true) || in_array('-h', $args, true)) {
+        echo "Print a bounded, privacy-safe support report as JSON:\n";
+        echo "  php placement support-report\n";
+        echo "\nThe report contains only reviewed operational metadata and never includes\n";
+        echo "placement records, secrets, endpoints, filesystem paths, tokens, or logs.\n";
+        return;
+    }
+    if ($args !== []) {
+        throw new UserVisibleException(
+            'CLI_SUPPORT_REPORT_ARGUMENT_INVALID',
+            'Support report does not accept positional arguments.',
+        );
+    }
+    if (!Database::isInstalled()) {
+        throw new UserVisibleException('CLI_APP_NOT_INSTALLED', 'App is not installed.');
+    }
+    if (Database::pendingMigrations() !== []) {
+        throw new UserVisibleException(
+            'CLI_DATABASE_UPGRADE_REQUIRED',
+            'Database migrations are pending. Run `php placement upgrade` before creating a support report.',
+        );
+    }
+    echo (new SupportReportService())->json();
 }
 
 function migrate(): void
@@ -1389,12 +1435,15 @@ function verify_release_package(string $path): void
         'app/Core/Events/PublicEventEnvelope.php',
         'app/Core/Events/PublicEventDeadLetterReplayService.php',
         'app/Core/Events/ReplayOperatorAuthorization.php',
+        'app/Operations/SupportReportService.php',
         'app/Modules/Placement/Application/ApplicationStatusWriter.php',
         'app/Modules/Placement/Application/ApplicationTransitionActor.php',
         'app/Modules/Placement/Application/ApplicationTransitionCommand.php',
         'app/Modules/Placement/Application/ApplicationTransitionResult.php',
         'app/Modules/Placement/Application/ApplicationTransitionService.php',
+        'app/Modules/Placement/Application/UniversityOperationsWorkspace.php',
         'app/Controllers/WebhookController.php',
+        'app/Integrations/IntegrationState.php',
         'app/Integrations/Webhooks/CurlWebhookHttpTransport.php',
         'app/Integrations/Webhooks/WebhookDeliveryReplayService.php',
         'app/Integrations/Webhooks/WebhookDeliveryWorker.php',
@@ -1406,6 +1455,7 @@ function verify_release_package(string $path): void
         'app/Integrations/Webhooks/WebhookSubscriptionService.php',
         'app/Integrations/Webhooks/WebhookTransportException.php',
         'app/Views/webhooks.php',
+        'app/Views/operations.php',
         'app/Controllers/ApiAccessController.php',
         'app/Api/Security/ApiAuthenticationUnavailable.php',
         'app/Api/Security/ApiAuthorizationUnavailable.php',
@@ -1464,6 +1514,9 @@ function verify_release_package(string $path): void
         'contracts/fixtures/api-v1-application-transition.consumer.json',
         'docs/integrations/events.md',
         'docs/integrations/webhooks.md',
+        'docs/operations/integration-worker.md',
+        'docs/operations/support-report.md',
+        'docs/operations/university-workspace.md',
         'docs/api/authentication.md',
         'docs/api/v1.md',
         'docs/compatibility.md',
@@ -1478,6 +1531,7 @@ function verify_release_package(string $path): void
         'tests/webhook_capture_revoke_concurrency_contract.php',
         'tests/webhook_capture_revoke_concurrency_worker.php',
         'tests/webhook_receiver_example_contract.php',
+        'tests/operator_simplicity_contract.php',
         'tests/api_identity_contract.php',
         'tests/api_identity_rotation_concurrency_contract.php',
         'tests/api_identity_rotation_concurrency_worker.php',
@@ -1895,6 +1949,7 @@ function smoke_http(array $args): void
     $pages = [
         'board' => '/?r=board',
         'records' => '/?r=records',
+        'operations' => '/?r=operations',
         'reports' => '/?r=reports',
         'import' => '/?r=import',
         'notifications' => '/?r=notifications',
@@ -1977,6 +2032,7 @@ function smoke_http(array $args): void
 
         $restrictedForbidden = [
             'restricted records block' => '/?r=records',
+            'restricted operations block' => '/?r=operations',
             'restricted reports block' => '/?r=reports',
             'restricted import block' => '/?r=import',
             'restricted preferences block' => '/?r=preferences',
@@ -2117,6 +2173,7 @@ function browser_qa_routes(string $baseUrl): array
         ['label' => 'Board - wanted flag', 'url' => $baseUrl . '/?flag=wanted', 'auth' => 'admin/control/mobile/floor', 'focus' => 'Urgent queue flag is visible without changing layout width.'],
         ['label' => 'Board - conflict flag', 'url' => $baseUrl . '/?flag=conflict', 'auth' => 'admin/control/placement', 'focus' => 'Conflict warning text wraps cleanly.'],
         ['label' => 'Records', 'url' => $baseUrl . '/?r=records', 'auth' => 'admin/control', 'focus' => 'Record grids scroll inside their own container.'],
+        ['label' => 'Opportunity coverage', 'url' => $baseUrl . '/?r=operations', 'auth' => 'admin/placement/auditor', 'focus' => 'Action queues keep outcome, evidence limits, and next steps visible.'],
         ['label' => 'Import', 'url' => $baseUrl . '/?r=import', 'auth' => 'admin/control', 'focus' => 'Preview and rollback panels fit on phone width.'],
         ['label' => 'Notifications', 'url' => $baseUrl . '/?r=notifications', 'auth' => 'role-scoped', 'focus' => 'Queue rows and actions do not overlap.'],
         ['label' => 'Reports', 'url' => $baseUrl . '/?r=reports', 'auth' => 'admin/placement/auditor', 'focus' => 'Summary tables remain scannable.'],
@@ -2167,6 +2224,7 @@ function print_browser_qa_plan_text(array $plan): void
     echo "  php placement seed-large-demo {$plan['candidate_target']} {$plan['company_target']}\n";
     echo "  php placement readiness\n";
     echo "  php placement metrics\n";
+    echo "  php placement support-report\n";
     echo "  php placement api-status\n";
     echo "  php placement api-enable --actor-user-id=USER_ID\n";
     echo "  php placement api-disable --actor-user-id=USER_ID\n";
@@ -2510,6 +2568,9 @@ function publication_check(): void
         'docs/environment.md',
         'docs/integrations/events.md',
         'docs/integrations/webhooks.md',
+        'docs/operations/integration-worker.md',
+        'docs/operations/support-report.md',
+        'docs/operations/university-workspace.md',
         'docs/api/authentication.md',
         'docs/api/v1.md',
         'docs/compatibility.md',
@@ -2525,6 +2586,7 @@ function publication_check(): void
         'app/Core/Events/InternalEventSubscription.php',
         'app/Core/Events/PublicEventDeadLetterReplayService.php',
         'app/Core/Events/ReplayOperatorAuthorization.php',
+        'app/Operations/SupportReportService.php',
         'app/Controllers/WebhookController.php',
         'app/Controllers/ApiAccessController.php',
         'app/Api/Security/ApiAuthenticationUnavailable.php',
@@ -2563,6 +2625,8 @@ function publication_check(): void
         'app/Modules/Placement/Application/ApplicationTransitionCommand.php',
         'app/Modules/Placement/Application/ApplicationTransitionResult.php',
         'app/Modules/Placement/Application/ApplicationTransitionService.php',
+        'app/Modules/Placement/Application/UniversityOperationsWorkspace.php',
+        'app/Integrations/IntegrationState.php',
         'app/Integrations/Webhooks/CurlWebhookHttpTransport.php',
         'app/Integrations/Webhooks/WebhookDeliveryReplayService.php',
         'app/Integrations/Webhooks/WebhookDeliveryWorker.php',
@@ -2574,6 +2638,7 @@ function publication_check(): void
         'app/Integrations/Webhooks/WebhookSubscriptionService.php',
         'app/Integrations/Webhooks/WebhookTransportException.php',
         'app/Views/webhooks.php',
+        'app/Views/operations.php',
         'app/Views/api-access.php',
         'app/Core/Modules/ModuleVersionIntegrity.php',
         'app/Core/Persistence/DatabaseConnectionInvalidException.php',
@@ -2605,6 +2670,7 @@ function publication_check(): void
         'tests/webhook_capture_revoke_concurrency_contract.php',
         'tests/webhook_capture_revoke_concurrency_worker.php',
         'tests/webhook_receiver_example_contract.php',
+        'tests/operator_simplicity_contract.php',
         'tests/api_identity_contract.php',
         'tests/api_identity_rotation_concurrency_contract.php',
         'tests/api_identity_rotation_concurrency_worker.php',
@@ -3326,6 +3392,7 @@ function help(): void
     echo "  php placement install-demo\n";
     echo "  php placement readiness\n";
     echo "  php placement metrics\n";
+    echo "  php placement support-report\n";
     echo "  php placement api-status\n";
     echo "  php placement api-enable --actor-user-id=USER_ID\n";
     echo "  php placement api-disable --actor-user-id=USER_ID\n";

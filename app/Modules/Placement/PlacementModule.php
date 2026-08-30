@@ -73,6 +73,7 @@ final class PlacementModule implements Module, ProvidesPortability, ProvidesPriv
             $this->route('records-panelist', 'POST', RecordsController::class, 'savePanelist'),
             $this->route('records-slot-assignment', 'POST', RecordsController::class, 'saveSlotAssignment'),
             $this->route('records-application', 'POST', RecordsController::class, 'saveApplication'),
+            $this->route('operations', 'GET', ReportsController::class, 'operations'),
             $this->route('reports', 'GET', ReportsController::class, 'show'),
             $this->route('import', 'GET', ImportController::class, 'show'),
             $this->route('import', 'POST', ImportController::class, 'run'),
@@ -115,6 +116,12 @@ final class PlacementModule implements Module, ProvidesPortability, ProvidesPriv
     public function navigation(): array
     {
         return [
+            $this->nav(
+                'operations',
+                'Candidate opportunities',
+                ['placement.reports.view', 'placement.sensitive.view'],
+                5,
+            ),
             $this->nav('board', 'Board', 'placement.board.view', 10, '/'),
             $this->nav('records', 'Records', 'placement.records.view', 20),
             $this->nav('reports', 'Reports', 'placement.reports.view', 30),
@@ -135,8 +142,18 @@ final class PlacementModule implements Module, ProvidesPortability, ProvidesPriv
         return compact('name', 'method', 'controller', 'action');
     }
 
-    private function nav(string $route, string $label, string $capability, int $order, ?string $href = null): array
+    /** @param string|list<string> $capability */
+    private function nav(string $route, string $label, string|array $capability, int $order, ?string $href = null): array
     {
+        if (is_array($capability)) {
+            return [
+                'route' => $route,
+                'label' => $label,
+                'capabilities' => $capability,
+                'order' => $order,
+                'href' => $href,
+            ];
+        }
         return compact('route', 'label', 'capability', 'order', 'href');
     }
 }

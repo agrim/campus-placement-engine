@@ -25,6 +25,10 @@ final class WebhookHealthService
     public function snapshot(): array
     {
         $pdo = $this->connection ?? Database::connection();
+        $driver = strtolower((string) $pdo->getAttribute(PDO::ATTR_DRIVER_NAME));
+        $driverReady = $this->databaseDriverReady($pdo, $driver);
+        $workerConfigured = $this->truthy(getenv('CPE_INTEGRATION_WORKER_CONFIGURED'));
+        $tlsPolicy = $this->tlsPolicy();
         $presentRelations = 0;
         foreach (self::REQUIRED_RELATIONS as $relation) {
             if ($this->tableExists($pdo, $relation)) {
@@ -32,7 +36,13 @@ final class WebhookHealthService
             }
         }
         if ($presentRelations === 0) {
-            return $this->emptySnapshot('not_installed');
+            return $this->emptySnapshot(
+                'not_installed',
+                $driver,
+                $driverReady,
+                $workerConfigured,
+                $tlsPolicy,
+            );
         }
         if ($presentRelations !== count(self::REQUIRED_RELATIONS)) {
             throw new RuntimeException('Webhook health storage is only partially installed.');
@@ -64,6 +74,7 @@ final class WebhookHealthService
             $timestamp = strtotime((string) $heartbeat['finished_at'] . ' UTC');
             $heartbeatAge = $timestamp === false ? null : max(0, time() - $timestamp);
         }
+        $workerStatus = is_array($heartbeat) ? (string) $heartbeat['status'] : 'never_run';
         $activeCount = $states['active'] + $states['degraded'];
         $deadLetters = (int) ($deliveries['dead_letter_count'] ?? 0);
         $keyring = WebhookSecretCipher::environmentStatus();
@@ -89,7 +100,11 @@ final class WebhookHealthService
             $status = 'fail';
         } elseif ($referencedVersions !== [] && (!$keyring['present'] || !$keyReferencesReady)) {
             $status = 'warn';
+        } elseif ($activeCount > 0 && !$workerConfigured) {
+            $status = 'warn';
         } elseif ($activeCount > 0 && ($heartbeatAge === null || $heartbeatAge > 900)) {
+            $status = 'warn';
+        } elseif ($activeCount > 0 && $workerStatus !== 'ok') {
             $status = 'warn';
         } elseif ($states['degraded'] > 0 || $deadLetters > 0) {
             $status = 'warn';
@@ -102,6 +117,7 @@ final class WebhookHealthService
         $privateCount = (int) $pdo->query(
             'SELECT COUNT(*) FROM webhook_subscriptions WHERE allow_private_network = 1',
         )->fetchColumn();
+        $workerFreshness = $this->workerFreshness($activeCount, $heartbeatAge);
         return [
             'status' => $status,
             'configured' => array_sum($states),
@@ -110,12 +126,19 @@ final class WebhookHealthService
             'dead_lettered' => $deadLetters,
             'oldest_pending_age_seconds' => $oldestPendingAge,
             'worker_heartbeat_age_seconds' => $heartbeatAge,
-            'worker_status' => is_array($heartbeat) ? (string) $heartbeat['status'] : 'never_run',
+            'worker_status' => $workerStatus,
+            'worker_required' => $activeCount > 0,
+            'worker_configured' => $workerConfigured,
+            'scheduler_freshness' => $workerFreshness,
             'encryption_key_present' => (bool) $keyring['present'],
             'encryption_key_active_version' => (string) $keyring['active_version'],
             'encryption_key_references_ready' => $keyReferencesReady,
             'missing_encryption_key_versions' => count($missingVersions),
             'network_policy' => $this->hostedMode() ? 'managed_public_egress' : 'self_hosted_explicit_private_opt_in',
+            'tls_policy' => $tlsPolicy['key'],
+            'tls_policy_message' => $tlsPolicy['message'],
+            'database_driver' => $driver,
+            'database_driver_ready' => $driverReady,
             'private_policy_subscriptions' => $privateCount,
             'message' => $this->message(
                 $status,
@@ -123,14 +146,24 @@ final class WebhookHealthService
                 $states['degraded'],
                 $deadLetters,
                 $heartbeatAge,
+                $workerStatus,
+                $workerConfigured,
                 (bool) $keyring['present'],
                 count($missingVersions),
             ),
         ];
     }
 
-    private function emptySnapshot(string $workerStatus): array
+    /** @param array{key: string, message: string} $tlsPolicy */
+    private function emptySnapshot(
+        string $workerStatus,
+        string $driver,
+        bool $driverReady,
+        bool $workerConfigured,
+        array $tlsPolicy,
+    ): array
     {
+        $keyring = WebhookSecretCipher::environmentStatus();
         return [
             'status' => 'ok',
             'configured' => 0,
@@ -140,11 +173,18 @@ final class WebhookHealthService
             'oldest_pending_age_seconds' => null,
             'worker_heartbeat_age_seconds' => null,
             'worker_status' => $workerStatus,
-            'encryption_key_present' => WebhookSecretCipher::environmentStatus()['present'],
-            'encryption_key_active_version' => '',
+            'worker_required' => false,
+            'worker_configured' => $workerConfigured,
+            'scheduler_freshness' => 'not_required',
+            'encryption_key_present' => (bool) $keyring['present'],
+            'encryption_key_active_version' => (string) $keyring['active_version'],
             'encryption_key_references_ready' => true,
             'missing_encryption_key_versions' => 0,
             'network_policy' => $this->hostedMode() ? 'managed_public_egress' : 'self_hosted_explicit_private_opt_in',
+            'tls_policy' => $tlsPolicy['key'],
+            'tls_policy_message' => $tlsPolicy['message'],
+            'database_driver' => $driver,
+            'database_driver_ready' => $driverReady,
             'private_policy_subscriptions' => 0,
             'message' => 'No signed webhook integration is configured.',
         ];
@@ -156,10 +196,12 @@ final class WebhookHealthService
         int $degraded,
         int $deadLetters,
         ?int $heartbeatAge,
+        string $workerStatus,
+        bool $workerConfigured,
         bool $keyPresent,
         int $missingKeyVersions,
     ): string {
-        if (!$keyPresent) {
+        if (!$keyPresent && ($active > 0 || $missingKeyVersions > 0)) {
             return $active > 0
                 ? 'Active webhook integrations cannot decrypt signing secrets; restore the external keyring.'
                 : 'Stored webhook signing secrets require the external keyring before activation.';
@@ -172,8 +214,14 @@ final class WebhookHealthService
         if ($active === 0) {
             return 'No active signed webhook integration requires a worker.';
         }
+        if (!$workerConfigured) {
+            return 'Active integrations exist, but scheduler configuration has not been attested with CPE_INTEGRATION_WORKER_CONFIGURED.';
+        }
         if ($heartbeatAge === null || $heartbeatAge > 900) {
             return 'The signed webhook worker has no recent heartbeat.';
+        }
+        if ($workerStatus !== 'ok') {
+            return 'The latest signed webhook worker run needs review.';
         }
         if ($degraded > 0 || $deadLetters > 0) {
             return $degraded . ' integration(s) are degraded and ' . $deadLetters . ' delivery or deliveries need review.';
@@ -229,6 +277,60 @@ final class WebhookHealthService
 
     private function hostedMode(): bool
     {
-        return in_array(strtolower(trim((string) (getenv('CPE_HOSTED_MODE') ?: ''))), ['1', 'true', 'yes', 'on'], true);
+        return $this->truthy(getenv('CPE_HOSTED_MODE'));
+    }
+
+    /** @return array{key: string, message: string} */
+    private function tlsPolicy(): array
+    {
+        if ($this->hostedMode()) {
+            return [
+                'key' => 'https_public_egress_only',
+                'message' => 'HTTPS on public egress only; TLS verification is required and redirects and inherited proxies are disabled.',
+            ];
+        }
+        if ($this->truthy(getenv('CPE_WEBHOOK_ALLOW_HTTP'))) {
+            return [
+                'key' => 'https_default_private_http_opt_in',
+                'message' => 'HTTPS is the default. HTTP is limited to an explicitly approved private-network integration and port; redirects and inherited proxies are disabled.',
+            ];
+        }
+        return [
+            'key' => 'https_required',
+            'message' => 'HTTPS and peer/hostname verification are required; redirects and inherited proxies are disabled.',
+        ];
+    }
+
+    private function workerFreshness(int $activeCount, ?int $heartbeatAge): string
+    {
+        if ($activeCount === 0) {
+            return 'not_required';
+        }
+        if ($heartbeatAge === null) {
+            return 'never_observed';
+        }
+        return $heartbeatAge <= 900 ? 'fresh' : 'stale';
+    }
+
+    private function databaseDriverReady(PDO $pdo, string $driver): bool
+    {
+        $extensionReady = match ($driver) {
+            'sqlite' => extension_loaded('pdo_sqlite'),
+            'pgsql' => extension_loaded('pdo_pgsql'),
+            default => false,
+        };
+        if (!$extensionReady) {
+            return false;
+        }
+        try {
+            return (int) $pdo->query('SELECT 1')->fetchColumn() === 1;
+        } catch (\Throwable) {
+            return false;
+        }
+    }
+
+    private function truthy(string|false $value): bool
+    {
+        return in_array(strtolower(trim((string) $value)), ['1', 'true', 'yes', 'on'], true);
     }
 }

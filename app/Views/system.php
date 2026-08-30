@@ -58,6 +58,20 @@ ob_start();
 </section>
 
 <section class="panel">
+  <h2>Integration delivery operations</h2>
+  <?php $integrationHealth = $readiness['webhookIntegrations']; ?>
+  <table class="table">
+    <tr><th>Worker required / configured</th><td><?= $integrationHealth['worker_required'] ? 'Yes' : 'No' ?> / <?= $integrationHealth['worker_configured'] ? 'Yes' : 'No' ?></td></tr>
+    <tr><th>Worker heartbeat</th><td><?= h($integrationHealth['scheduler_freshness']) ?> · last run <?= h($integrationHealth['worker_status']) ?><?= $integrationHealth['worker_heartbeat_age_seconds'] === null ? '' : ' · ' . (int) $integrationHealth['worker_heartbeat_age_seconds'] . ' seconds ago' ?></td></tr>
+    <tr><th>Delivery backlog</th><td><?= (int) $integrationHealth['pending'] ?> pending · <?= (int) $integrationHealth['dead_lettered'] ?> dead-lettered · oldest <?= $integrationHealth['oldest_pending_age_seconds'] === null ? 'none' : (int) $integrationHealth['oldest_pending_age_seconds'] . ' seconds' ?></td></tr>
+    <tr><th>Webhook TLS policy</th><td><?= h($integrationHealth['tls_policy_message']) ?></td></tr>
+    <tr><th>External encryption key</th><td><?= $integrationHealth['encryption_key_present'] ? 'Present' : 'Not configured' ?> · referenced versions <?= $integrationHealth['encryption_key_references_ready'] ? 'ready' : 'need review' ?></td></tr>
+    <tr><th>Database driver</th><td><?= h($integrationHealth['database_driver']) ?> · <?= $integrationHealth['database_driver_ready'] ? 'Ready' : 'Unavailable' ?></td></tr>
+  </table>
+  <p class="muted">Set <code>CPE_INTEGRATION_WORKER_CONFIGURED=1</code> only after the documented cron or scheduler entry is installed. A heartbeat proves a run; the setting records the operator's scheduler attestation.</p>
+</section>
+
+<section class="panel">
   <h2>Workflow validation</h2>
   <?php if (!$workflowErrors): ?>
     <p class="flash success">Workflow configuration is valid.</p>

@@ -8,7 +8,7 @@
 | Board | Role-aware operational view of applications grouped by status |
 | Candidate | Student or participant in the placement process |
 | Company tracker | User or screen scoped to one hiring organization |
-| Connector | Out-of-process consumer of a governed Integration contract |
+| Connector | Out-of-process software package that consumes a governed Integration contract |
 | Control room | Central placement-day coordination function |
 | Event | Append-only application movement record |
 | Floor coordinator | Operator confirming arrival and room-level movement |
@@ -16,7 +16,7 @@
 | Inside | Candidate is inside a company process or interview room |
 | Integration | Institution-facing configured connection, such as one signed webhook endpoint |
 | Mobile tracker | Operator moving candidates between control room and venues |
-| Module | Trusted in-process Engine feature; not an uploaded plugin or external Connector |
+| Module | Trusted in-process Engine feature shipped in the Engine release; not an uploaded executable package or external Connector |
 | Offer upgrade | Policy allowing a placed candidate to continue pursuing a higher/preferred offer |
 | Panelist availability | Per-round roster status showing whether a configured panelist is active, on break, or unavailable |
 | Placement freeze | Policy preventing non-admin placement decisions during sensitive periods |

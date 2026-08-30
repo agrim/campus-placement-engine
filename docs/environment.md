@@ -125,6 +125,7 @@ reviewed proxy and use `php placement sso-link` for explicit subject links.
 |---|---|
 | `CPE_LOG_PATH` | Optional JSONL structured log path. PHP error logging is the fallback. |
 | `CPE_METRICS_TOKEN` | Bearer token of at least 24 characters for `public/metrics.php` and managed-hosting readiness. |
+| `CPE_ENGINE_ARTIFACT_SHA256` | Optional 64-character SHA-256 of the deployed release archive for the privacy-safe support report. It may use a `sha256:` prefix; malformed values are omitted. |
 
 `public/health.php` liveness needs no token and does not load a platform adapter,
 tenant, session, or database. Readiness is selected with `?ready=1`. It remains
@@ -143,6 +144,7 @@ only deployer-controlled cryptography and outbound policy:
 |---|---|
 | `CPE_WEBHOOK_ENCRYPTION_KEYS` | One to eight semicolon-separated `version=key` entries. Each key is exactly 32 bytes in canonical unpadded base64url. Keep it outside the database. |
 | `CPE_WEBHOOK_ACTIVE_KEY_VERSION` | Version used for new AES-256-GCM ciphertext. It must name one keyring entry. |
+| `CPE_INTEGRATION_WORKER_CONFIGURED` | Set to `1` only after `php placement work-integrations` is installed in cron or the hosted scheduler. This attests configuration; the durable heartbeat proves a run. |
 | `CPE_WEBHOOK_ALLOWED_PORTS` | Comma-separated approved ports, at most 16. Defaults to `443`. |
 | `CPE_WEBHOOK_ALLOW_HTTP` | Self-hosted-only HTTP opt-in. The subscription must also explicitly allow a private-network endpoint and its port must be approved. Managed mode ignores this and remains public-egress only. |
 | `CPE_WEBHOOK_LEASE_SECONDS` | Stale delivery-claim threshold, clamped to 30-3600 seconds; default 300. |
@@ -151,11 +153,13 @@ only deployer-controlled cryptography and outbound policy:
 | `CPE_WEBHOOK_INSTITUTION_CONCURRENCY` | Per-institution in-flight claim cap, clamped to 1-100; default 5. |
 
 Run `php placement work-integrations` every minute from cron or the hosted
-scheduler. The same database and keyring must reach the web and worker
+scheduler, then set `CPE_INTEGRATION_WORKER_CONFIGURED=1` consistently for web,
+CLI, and scheduler processes. The same database and keyring must reach the web and worker
 processes. Missing encryption keys do not break a base Engine install, but an
 active integration whose referenced key is unavailable makes readiness fail
-closed. See `docs/integrations/webhooks.md` for the exact keyring grammar,
-signing contract, network policy, retry schedule, and shared-hosting example.
+closed. See `docs/operations/integration-worker.md` and
+`docs/integrations/webhooks.md` for scheduling, readiness, the exact keyring
+grammar, signing contract, network policy, and retry behavior.
 
 `CPE_DOMAIN_EVENT_DIAGNOSTIC_OUTBOX_PATH` is an optional institution-local
 JSONL diagnostic export of governed public envelopes. The older

@@ -40,7 +40,7 @@ final class IncidentReporter
             'board', 'move', 'return-to-idle', 'board-preferences', 'notifications',
             'notification-acknowledge', 'candidate', 'records', 'records-candidate', 'records-company',
             'records-round', 'records-schedule', 'records-panelist', 'records-slot-assignment',
-            'records-application', 'reports', 'import', 'import-rollback', 'admin', 'admin-user',
+            'records-application', 'operations', 'reports', 'import', 'import-rollback', 'admin', 'admin-user',
             'admin-users', 'admin-password', 'admin-workflow', 'preferences', 'preferences-resolve',
             'wanted', 'wanted-resolve', 'system', 'system-clear-demo', 'advising',
             'advising-appointment', 'advising-status', 'advising-note', 'advising-task',

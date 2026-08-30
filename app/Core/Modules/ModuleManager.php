@@ -103,9 +103,17 @@ final class ModuleManager
         $items = [];
         foreach ($this->modules() as $module) {
             foreach ($module->navigation() as $item) {
-                $capability = (string) ($item['capability'] ?? 'portal.access');
-                if (!$this->capabilities->allows($user, $capability)) {
-                    continue;
+                $required = $item['capabilities'] ?? [$item['capability'] ?? 'portal.access'];
+                if (!is_array($required) || $required === []) {
+                    throw new RuntimeException('Module navigation capability metadata is invalid.');
+                }
+                foreach ($required as $capability) {
+                    if (!is_string($capability) || $capability === '') {
+                        throw new RuntimeException('Module navigation capability metadata is invalid.');
+                    }
+                    if (!$this->capabilities->allows($user, $capability)) {
+                        continue 2;
+                    }
                 }
                 $item['module'] = $module->key();
                 $items[] = $item;

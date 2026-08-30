@@ -9,7 +9,7 @@ use RuntimeException;
 /**
  * Manifest for an Engine-shipped module.
  *
- * @internal This catalog is release input, not an installable plugin format.
+ * @internal This catalog is release input, not an installable extension format.
  */
 final class ModuleManifest
 {

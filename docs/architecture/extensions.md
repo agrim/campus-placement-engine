@@ -5,7 +5,7 @@ Status: accepted boundary
 ## The short version
 
 The Engine is a dependency-light modular monolith. Its source-bundled modules
-are internal product components, not a public plugin ABI. Third-party systems
+are internal product components, not a public in-process extension ABI. Third-party systems
 extend the product out of process through versioned events and APIs.
 
 This keeps an institution's placement workflows usable when an optional
@@ -17,10 +17,9 @@ process, filesystem, database, sessions, secrets, or privileged templates.
 - **Module:** an Engine-owned product component shipped, reviewed, migrated,
   tested, and released with the Engine artifact.
 - **Integration:** an institution-visible connection to another system.
-- **Connector:** an out-of-process implementation of an integration that uses
-  documented event and API contracts with explicit permissions.
-- **Plugin:** unsupported terminology unless a future, separately governed
-  executable-package program is approved. No such program exists today.
+- **Connector:** an out-of-process software package that implements an
+  integration through documented event and API contracts with explicit
+  permissions.
 
 ## Trust boundary
 
@@ -35,7 +34,7 @@ External integrations may not:
 - scan or load code from writable directories;
 - install Composer packages from an administrator page;
 - register migrations outside the Engine migration registry;
-- access the database, service container, sessions, filesystem, or templates;
+- access the database, internal services, sessions, filesystem, or templates;
 - inject HTML or JavaScript into privileged pages;
 - perform network or other irreversible work inside a core transaction.
 
@@ -79,8 +78,9 @@ not a Cloud control-plane worker.
 
 ## Explicit non-goals
 
-The project does not provide uploaded PHP or JavaScript plugins, a public module
-marketplace, a generic workflow language, GraphQL by default, a mandatory
+The project does not load uploaded PHP or JavaScript, publish an in-process
+extension ABI, provide a public module marketplace, introduce a generic workflow language,
+enable GraphQL by default, require a
 message broker, arbitrary privileged UI slots, or an exactly-once delivery
 claim. Executable extension packages remain deferred unless stable events and
 APIs prove insufficient and a signing, revocation, migration, isolation,
