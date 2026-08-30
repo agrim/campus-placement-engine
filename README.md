@@ -147,7 +147,7 @@ php placement seed-large-demo [candidate-count] [company-count]
 php placement readiness
 php placement metrics
 php placement api-status
-php placement api-service-account-create --name=NAME --scopes=opportunities.read,applications.read --actor-user-id=USER_ID
+php placement api-service-account-create --name=NAME --scopes=opportunities.read,applications.read,applications.transition --actor-user-id=USER_ID
 php placement api-token-rotate --service-account=apisa_ID --actor-user-id=USER_ID
 php placement api-token-revoke --token-id=LOOKUP_ID --actor-user-id=USER_ID
 php placement api-enable --actor-user-id=USER_ID
@@ -255,10 +255,11 @@ retry/replay, SSRF policy, and worker operations, see
 and bundled module PHP interfaces remain private Engine implementation details.
 The disabled-by-default institution-local service-account/token boundary is
 documented in [docs/api/authentication.md](docs/api/authentication.md). The
-GET/HEAD-only opportunity and application API, privacy allowlists, cursor
-recovery, errors, rate limits, OpenAPI, and self-host/managed parity are in
-[docs/api/v1.md](docs/api/v1.md). There are no candidate or command/write API
-endpoints, and Cloud does not proxy ordinary institution API traffic.
+opportunity/application read API and its one controlled application-status
+transition command, privacy allowlists, ETags, idempotency, cursor recovery,
+errors, rate limits, OpenAPI, and self-host/managed parity are in
+[docs/api/v1.md](docs/api/v1.md). There are no candidate or other command/write
+API endpoints, and Cloud does not proxy ordinary institution API traffic.
 For health, metrics,
 SSO, sessions, logs, and outbox operations, see
 [docs/security-operations.md](docs/security-operations.md).

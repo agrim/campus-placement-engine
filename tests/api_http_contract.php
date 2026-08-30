@@ -172,8 +172,18 @@ function api_http_request(int $port, string $method, string $path, array $header
         $request .= $name . ': ' . $value . "\r\n";
     }
     if ($body !== '') {
-        $request .= 'Content-Type: application/json' . "\r\n"
-            . 'Content-Length: ' . strlen($body) . "\r\n";
+        $hasContentType = false;
+        $hasContentLength = false;
+        foreach (array_keys($headers) as $headerName) {
+            $hasContentType = $hasContentType || strcasecmp($headerName, 'Content-Type') === 0;
+            $hasContentLength = $hasContentLength || strcasecmp($headerName, 'Content-Length') === 0;
+        }
+        if (!$hasContentType) {
+            $request .= 'Content-Type: application/json' . "\r\n";
+        }
+        if (!$hasContentLength) {
+            $request .= 'Content-Length: ' . strlen($body) . "\r\n";
+        }
     }
     fwrite($socket, $request . "\r\n" . $body);
     $response = stream_get_contents($socket);
@@ -262,6 +272,37 @@ function api_http_assert_audit_classification(
     api_http_same('denied', (string) $row['outcome'], $message . ' audit outcome differs.');
     api_http_same($statusCode, (int) $row['status_code'], $message . ' audit status differs.');
     api_http_same($detailCode, (string) $row['detail_code'], $message . ' audit detail differs.');
+}
+
+/** @return array{status: string, version: int, events: int, workflow: int, outbox: int, audits: int} */
+function api_http_transition_evidence(PDO $pdo, int $applicationId): array
+{
+    $application = $pdo->prepare('SELECT current_status, aggregate_version FROM applications WHERE id = ?');
+    $application->execute([$applicationId]);
+    $row = $application->fetch(PDO::FETCH_ASSOC);
+    if (!is_array($row)) {
+        throw new RuntimeException('HTTP transition evidence application is missing.');
+    }
+    $count = static function (string $sql) use ($pdo, $applicationId): int {
+        $query = $pdo->prepare($sql);
+        $query->execute([$applicationId]);
+        return (int) $query->fetchColumn();
+    };
+    return [
+        'status' => (string) $row['current_status'],
+        'version' => (int) $row['aggregate_version'],
+        'events' => $count('SELECT COUNT(*) FROM events WHERE application_id = ?'),
+        'workflow' => $count('SELECT COUNT(*) FROM workflow_transition_events WHERE application_id = ?'),
+        'outbox' => $count(
+            "SELECT COUNT(*) FROM domain_event_outbox event
+             JOIN applications application ON application.public_id = event.aggregate_public_id
+             WHERE application.id = ? AND event.event_name = 'placement.application.transitioned'",
+        ),
+        'audits' => $count(
+            "SELECT COUNT(*) FROM audit_logs
+             WHERE action = 'transition' AND subject_type = 'application' AND subject_id = ?",
+        ),
+    ];
 }
 
 /** @param array<string, string> $authorization */
@@ -468,7 +509,11 @@ try {
     $pdo = Database::connection();
     $keyring = ApiKeyring::fromEnvironment();
     $service = new ApiServiceAccountService($pdo, $keyring);
-    $full = $service->create('API HTTP full reader', ['opportunities.read', 'applications.read'], $adminId);
+    $full = $service->create(
+        'API HTTP governed connector',
+        ['opportunities.read', 'applications.read', 'applications.transition'],
+        $adminId,
+    );
     $opportunitiesOnly = $service->create('API HTTP opportunity reader', ['opportunities.read'], $adminId);
     $revocable = $service->create('API HTTP revocable reader', ['opportunities.read'], $adminId);
     $cross = api_http_insert_cross_institution($pdo);
@@ -619,6 +664,443 @@ try {
         $crossItem = api_http_request($port, 'GET', $path, $authorization);
         api_http_same(404, $crossItem['status'], 'Cross-institution ' . $label . ' item was visible.');
         api_http_same('not_found', api_http_error_shape($crossItem)['code'], 'Cross-institution item denial differs.');
+    }
+
+    $commandTarget = $pdo->query(
+        "SELECT application.id, application.public_id, application.current_status,
+                transition.transition_key, transition.to_state_key
+         FROM applications application
+         JOIN placement_cycle_participants participant ON participant.id = application.participant_id
+         JOIN placement_cycles cycle ON cycle.id = participant.cycle_id
+         JOIN workflow_instances instance ON instance.application_id = application.id
+         JOIN workflow_transitions transition
+           ON transition.workflow_version_id = instance.workflow_version_id
+          AND transition.from_state_key = application.current_status
+          AND transition.is_correction = 0
+          AND transition.required_capability = 'placement.application.transition'
+         WHERE cycle.institution_id = (SELECT id FROM institutions WHERE slug = 'default')
+           AND application.opportunity_id IS NOT NULL
+         ORDER BY application.id LIMIT 1",
+    )->fetch(PDO::FETCH_ASSOC);
+    api_http_assert(is_array($commandTarget), 'HTTP command fixture has no ordinary transition target.');
+    $commandPath = '/api/v1/applications/' . $commandTarget['public_id'] . '/transitions';
+    $commandItem = api_http_request(
+        $port,
+        'GET',
+        '/api/v1/applications/' . $commandTarget['public_id'],
+        $authorization,
+    );
+    api_http_same(200, $commandItem['status'], 'HTTP command target GET failed.');
+    $commandBeforePayload = api_http_json($commandItem);
+    $commandBeforeEtag = (string) ($commandItem['headers']['etag'][0] ?? '');
+    api_http_assert(
+        preg_match('/\A"[a-f0-9]{64}"\z/D', $commandBeforeEtag) === 1,
+        'HTTP command target GET omitted a strong ETag.',
+    );
+    $commandBody = json_encode([
+        'transition_key' => (string) $commandTarget['transition_key'],
+        'target_status' => (string) $commandTarget['to_state_key'],
+        'note' => 'HTTP governed transition',
+    ], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
+    $commandKey = str_repeat('a', 32);
+    $commandHeaders = [
+        ...$authorization,
+        'Idempotency-Key' => $commandKey,
+        'If-Match' => $commandBeforeEtag,
+    ];
+
+    foreach ([
+        ['GET', $commandPath],
+        ['HEAD', $commandPath],
+        ['OPTIONS', $commandPath],
+    ] as [$unsupportedMethod, $unsupportedPath]) {
+        $unsupported = api_http_request($port, $unsupportedMethod, $unsupportedPath, $authorization);
+        api_http_same(405, $unsupported['status'], 'Transition resource accepted an unsupported method.');
+        api_http_same('POST', (string) ($unsupported['headers']['allow'][0] ?? ''), 'Transition Allow header differs.');
+        if ($unsupportedMethod === 'HEAD') {
+            api_http_same('', $unsupported['body'], 'Transition HEAD 405 returned a body.');
+        }
+    }
+    $postItem = api_http_request(
+        $port,
+        'POST',
+        '/api/v1/applications/' . $commandTarget['public_id'],
+        $commandHeaders,
+        $commandBody,
+    );
+    api_http_same(405, $postItem['status'], 'Application item accepted POST outside the transition resource.');
+    api_http_same('GET, HEAD', (string) ($postItem['headers']['allow'][0] ?? ''), 'Application item Allow header differs.');
+
+    $crossCommand = api_http_request(
+        $port,
+        'POST',
+        '/api/v1/applications/' . $cross['application'] . '/transitions',
+        [
+            ...$authorization,
+            'Idempotency-Key' => str_repeat('b', 32),
+            'If-Match' => '"' . str_repeat('1', 64) . '"',
+        ],
+        $commandBody,
+    );
+    api_http_same(404, $crossCommand['status'], 'Cross-institution application command was distinguishable.');
+    api_http_same('not_found', api_http_error_shape($crossCommand)['code'], 'Cross-institution command error differs.');
+    $malformedCommand = api_http_request(
+        $port,
+        'POST',
+        '/api/v1/applications/application_bad/transitions',
+        [
+            ...$authorization,
+            'Idempotency-Key' => str_repeat('c', 32),
+            'If-Match' => '"' . str_repeat('1', 64) . '"',
+        ],
+        $commandBody,
+    );
+    api_http_same(404, $malformedCommand['status'], 'Malformed application public ID did not use item 404 semantics.');
+
+    $parserFailures = [
+        api_http_request($port, 'POST', $commandPath . '?unknown=1', $commandHeaders, $commandBody),
+        api_http_request($port, 'POST', $commandPath, [...$commandHeaders, 'Content-Type' => 'text/plain'], $commandBody),
+        api_http_request($port, 'POST', $commandPath, [...$authorization, 'If-Match' => $commandBeforeEtag], $commandBody),
+        api_http_request($port, 'POST', $commandPath, [...$authorization, 'Idempotency-Key' => str_repeat('d', 32)], $commandBody),
+        api_http_request(
+            $port,
+            'POST',
+            $commandPath,
+            [...$commandHeaders, 'If-Match' => 'W/' . $commandBeforeEtag],
+            $commandBody,
+        ),
+        api_http_request(
+            $port,
+            'POST',
+            $commandPath,
+            $commandHeaders,
+            '{"transition_key":"x","transition_key":"y","target_status":"z"}',
+        ),
+        api_http_request(
+            $port,
+            'POST',
+            $commandPath,
+            $commandHeaders,
+            '{"transition_key":"x","target_status":"y","unknown":"z"}',
+        ),
+    ];
+    api_http_same(
+        [400, 415, 400, 428, 400, 400, 400],
+        array_column($parserFailures, 'status'),
+        'Strict HTTP command parser status map differs.',
+    );
+    foreach ($parserFailures as $parserFailure) {
+        api_http_assert_boundary($parserFailure);
+    }
+    $oversizedCommand = api_http_request(
+        $port,
+        'POST',
+        $commandPath,
+        $commandHeaders,
+        '{"transition_key":"x","target_status":"y","note":"' . str_repeat('q', 17000) . '"}',
+    );
+    api_http_same(413, $oversizedCommand['status'], 'Oversized command body was accepted.');
+
+    $wrongCommandScope = api_http_request(
+        $port,
+        'POST',
+        $commandPath,
+        [
+            'Authorization' => 'Bearer ' . $opportunitiesOnly['token'],
+            'Idempotency-Key' => str_repeat('e', 32),
+            'If-Match' => $commandBeforeEtag,
+        ],
+        $commandBody,
+    );
+    api_http_same(403, $wrongCommandScope['status'], 'Missing applications.transition scope was not denied.');
+    api_http_same('insufficient_scope', api_http_error_shape($wrongCommandScope)['code'], 'Command scope error differs.');
+
+    $commandBefore = api_http_transition_evidence($pdo, (int) $commandTarget['id']);
+    $commandSuccess = api_http_request($port, 'POST', $commandPath, $commandHeaders, $commandBody);
+    api_http_same(200, $commandSuccess['status'], 'Governed application transition command failed.');
+    api_http_assert_boundary($commandSuccess);
+    $commandSuccessPayload = api_http_json($commandSuccess);
+    api_http_keys($commandSuccessPayload, ['data', 'meta'], 'Command success envelope differs.');
+    api_http_keys(
+        $commandSuccessPayload['data'],
+        ['id', 'participant_id', 'opportunity_id', 'status', 'aggregate_version', 'created_at', 'updated_at'],
+        'Command application field allowlist differs.',
+    );
+    $commandResponseRequestId = (string) ($commandSuccess['headers']['x-request-id'][0] ?? '');
+    api_http_same(
+        $commandResponseRequestId,
+        (string) ($commandSuccessPayload['meta']['request_id'] ?? ''),
+        'Command response body and header request IDs differ.',
+    );
+    $commandResponseEtag = (string) ($commandSuccess['headers']['etag'][0] ?? '');
+    api_http_assert(
+        preg_match('/\A"[a-f0-9]{64}"\z/D', $commandResponseEtag) === 1
+            && !hash_equals($commandBeforeEtag, $commandResponseEtag),
+        'Command response ETag did not reflect the new public representation.',
+    );
+    api_http_same(
+        (string) $commandTarget['to_state_key'],
+        (string) ($commandSuccessPayload['data']['status'] ?? ''),
+        'Command response returned the wrong status.',
+    );
+    $commandGetAfter = api_http_request(
+        $port,
+        'GET',
+        '/api/v1/applications/' . $commandTarget['public_id'],
+        $authorization,
+    );
+    api_http_same($commandResponseEtag, (string) ($commandGetAfter['headers']['etag'][0] ?? ''), 'GET and command ETags differ.');
+    $commandResponseData = $commandSuccessPayload['data'];
+    $commandGetData = api_http_json($commandGetAfter)['data'];
+    ksort($commandResponseData, SORT_STRING);
+    ksort($commandGetData, SORT_STRING);
+    api_http_same(
+        $commandResponseData,
+        $commandGetData,
+        'GET and command application representations differ.',
+    );
+    $commandAfter = api_http_transition_evidence($pdo, (int) $commandTarget['id']);
+    api_http_same($commandBefore['version'] + 1, $commandAfter['version'], 'HTTP command version increment differs.');
+    foreach (['events', 'workflow', 'outbox', 'audits'] as $evidenceKey) {
+        api_http_same(
+            $commandBefore[$evidenceKey] + 1,
+            $commandAfter[$evidenceKey],
+            'HTTP command evidence differs for ' . $evidenceKey . '.',
+        );
+    }
+    $fullAccountIdQuery = $pdo->prepare('SELECT id FROM api_service_accounts WHERE public_id = ?');
+    $fullAccountIdQuery->execute([$full['service_account_id']]);
+    $fullAccountId = (int) $fullAccountIdQuery->fetchColumn();
+    $fullAccountIdQuery->closeCursor();
+    foreach (['events', 'workflow_transition_events'] as $table) {
+        $commandActor = $pdo->prepare(
+            "SELECT actor_user_id, actor_service_account_id, actor_role
+             FROM {$table} WHERE application_id = ? ORDER BY id DESC LIMIT 1",
+        );
+        $commandActor->execute([(int) $commandTarget['id']]);
+        $commandActorRow = $commandActor->fetch(PDO::FETCH_ASSOC);
+        $commandActor->closeCursor();
+        api_http_same(
+            [
+                'actor_user_id' => null,
+                'actor_service_account_id' => $fullAccountId,
+                'actor_role' => 'service_account',
+            ],
+            $commandActorRow,
+            'HTTP command attribution differs in ' . $table . '.',
+        );
+    }
+    $commandAudit = $pdo->prepare(
+        'SELECT route_class, required_scope, outcome, status_code, detail_code
+         FROM api_request_audit_events WHERE request_id = ? ORDER BY id DESC LIMIT 1',
+    );
+    $commandAudit->execute([$commandResponseRequestId]);
+    $commandAuditRow = $commandAudit->fetch(PDO::FETCH_ASSOC);
+    $commandAudit->closeCursor();
+    api_http_same(
+        [
+            'route_class' => 'api.v1.applications.transition',
+            'required_scope' => 'applications.transition',
+            'outcome' => 'succeeded',
+            'status_code' => 200,
+            'detail_code' => 'OK',
+        ],
+        array_map(
+            static fn (mixed $value): int|string => is_numeric($value) && (string) $value === '200'
+                ? 200
+                : (string) $value,
+            $commandAuditRow,
+        ),
+        'HTTP command request audit classification differs.',
+    );
+    $browserCommandKey = $pdo->prepare('SELECT COUNT(*) FROM idempotency_keys WHERE key = ?');
+    $browserCommandKey->execute([$commandKey]);
+    api_http_same(0, (int) $browserCommandKey->fetchColumn(), 'HTTP command wrote browser form idempotency state.');
+    $browserCommandKey->closeCursor();
+
+    $commandReplay = api_http_request($port, 'POST', $commandPath, $commandHeaders, $commandBody);
+    api_http_same(
+        200,
+        $commandReplay['status'],
+        'Identical HTTP command replay failed: ' . $commandReplay['body'] . ' state=' . json_encode(
+            $pdo->query(
+                'SELECT operation, key_version, lifecycle_state, response_status, response_etag
+                 FROM api_command_idempotency_keys ORDER BY id',
+            )->fetchAll(PDO::FETCH_ASSOC),
+            JSON_THROW_ON_ERROR,
+        ),
+    );
+    api_http_same($commandSuccess['body'], $commandReplay['body'], 'HTTP command replay body changed.');
+    api_http_same($commandResponseEtag, (string) ($commandReplay['headers']['etag'][0] ?? ''), 'HTTP command replay ETag changed.');
+    api_http_same(
+        $commandResponseRequestId,
+        (string) ($commandReplay['headers']['x-request-id'][0] ?? ''),
+        'HTTP command replay did not retain the original response request ID.',
+    );
+    api_http_same(
+        $commandAfter,
+        api_http_transition_evidence($pdo, (int) $commandTarget['id']),
+        'HTTP command replay duplicated domain evidence.',
+    );
+    api_http_same(
+        1,
+        (int) $pdo->query(
+            "SELECT COUNT(*) FROM api_request_audit_events
+             WHERE route_class = 'api.v1.applications.transition'
+               AND detail_code = 'IDEMPOTENT_REPLAY'",
+        )->fetchColumn(),
+        'HTTP command replay audit classification differs.',
+    );
+
+    $changedCommandBody = json_encode([
+        'transition_key' => (string) $commandTarget['transition_key'],
+        'target_status' => (string) $commandTarget['to_state_key'],
+        'note' => 'changed idempotent request',
+    ], JSON_THROW_ON_ERROR);
+    $changedCommand = api_http_request($port, 'POST', $commandPath, $commandHeaders, $changedCommandBody);
+    api_http_same(409, $changedCommand['status'], 'Same command key with changed body was accepted.');
+    api_http_same('idempotency_conflict', api_http_error_shape($changedCommand)['code'], 'Command key conflict error differs.');
+    $staleCommand = api_http_request(
+        $port,
+        'POST',
+        $commandPath,
+        [...$authorization, 'Idempotency-Key' => str_repeat('f', 32), 'If-Match' => $commandBeforeEtag],
+        $commandBody,
+    );
+    api_http_same(409, $staleCommand['status'], 'Stale command precondition was accepted.');
+    api_http_same('transition_conflict', api_http_error_shape($staleCommand)['code'], 'Stale command error differs.');
+
+    $correctionRow = $pdo->prepare(
+        'SELECT transition.transition_key, transition.to_state_key
+         FROM applications application
+         JOIN workflow_transitions transition
+           ON transition.workflow_version_id = application.workflow_version_id
+          AND transition.from_state_key = application.current_status
+          AND transition.is_correction = 1
+         WHERE application.id = ? ORDER BY transition.id LIMIT 1',
+    );
+    $correctionRow->execute([(int) $commandTarget['id']]);
+    $correction = $correctionRow->fetch(PDO::FETCH_ASSOC);
+    $correctionRow->closeCursor();
+    api_http_assert(is_array($correction), 'HTTP command fixture has no correction transition.');
+    $correctionBody = json_encode([
+        'transition_key' => (string) $correction['transition_key'],
+        'target_status' => (string) $correction['to_state_key'],
+    ], JSON_THROW_ON_ERROR);
+    $correctionDenied = api_http_request(
+        $port,
+        'POST',
+        $commandPath,
+        [...$authorization, 'Idempotency-Key' => str_repeat('1', 32), 'If-Match' => $commandResponseEtag],
+        $correctionBody,
+    );
+    api_http_same(422, $correctionDenied['status'], 'HTTP command exposed a correction transition.');
+    api_http_same('transition_rejected', api_http_error_shape($correctionDenied)['code'], 'Command domain-rule error differs.');
+
+    $scopeDelete = $pdo->prepare(
+        'DELETE FROM api_service_account_scopes WHERE service_account_id = ? AND scope = ?',
+    );
+    $scopeDelete->execute([$fullAccountId, 'applications.transition']);
+    $scopeDrift = api_http_request(
+        $port,
+        'POST',
+        $commandPath,
+        [...$authorization, 'Idempotency-Key' => str_repeat('2', 32), 'If-Match' => $commandResponseEtag],
+        $correctionBody,
+    );
+    api_http_same(403, $scopeDrift['status'], 'Command scope drift did not fail closed.');
+    $pdo->prepare(
+        'INSERT INTO api_service_account_scopes
+         (service_account_id, scope, created_by_user_id, created_at) VALUES (?, ?, ?, ?)',
+    )->execute([$fullAccountId, 'applications.transition', $adminId, cpe_now()]);
+
+    $auditFailureTargetQuery = $pdo->prepare(
+        "SELECT application.id, application.public_id, transition.transition_key,
+                transition.to_state_key
+         FROM applications application
+         JOIN placement_cycle_participants participant ON participant.id = application.participant_id
+         JOIN placement_cycles cycle ON cycle.id = participant.cycle_id
+         JOIN workflow_instances instance ON instance.application_id = application.id
+         JOIN workflow_transitions transition
+           ON transition.workflow_version_id = instance.workflow_version_id
+          AND transition.from_state_key = application.current_status
+          AND transition.is_correction = 0
+          AND transition.required_capability = 'placement.application.transition'
+         WHERE cycle.institution_id = (SELECT id FROM institutions WHERE slug = 'default')
+           AND application.opportunity_id IS NOT NULL AND application.id <> ?
+         ORDER BY application.id LIMIT 1",
+    );
+    $auditFailureTargetQuery->execute([(int) $commandTarget['id']]);
+    $auditFailureTarget = $auditFailureTargetQuery->fetch(PDO::FETCH_ASSOC);
+    $auditFailureTargetQuery->closeCursor();
+    api_http_assert(is_array($auditFailureTarget), 'HTTP command fixture has no post-commit audit target.');
+    $auditFailureItem = api_http_request(
+        $port,
+        'GET',
+        '/api/v1/applications/' . $auditFailureTarget['public_id'],
+        $authorization,
+    );
+    api_http_same(200, $auditFailureItem['status'], 'Post-commit audit target GET failed.');
+    $auditFailureEtag = (string) ($auditFailureItem['headers']['etag'][0] ?? '');
+    $auditFailureBody = json_encode([
+        'transition_key' => (string) $auditFailureTarget['transition_key'],
+        'target_status' => (string) $auditFailureTarget['to_state_key'],
+    ], JSON_THROW_ON_ERROR);
+    $auditFailureHeaders = [
+        ...$authorization,
+        'Idempotency-Key' => str_repeat('3', 32),
+        'If-Match' => $auditFailureEtag,
+    ];
+    $auditFailureEvidence = api_http_transition_evidence($pdo, (int) $auditFailureTarget['id']);
+    api_http_install_audit_failure($pdo, $postgres);
+    try {
+        $committedDespiteAudit = api_http_request(
+            $port,
+            'POST',
+            '/api/v1/applications/' . $auditFailureTarget['public_id'] . '/transitions',
+            $auditFailureHeaders,
+            $auditFailureBody,
+        );
+        api_http_same(200, $committedDespiteAudit['status'], 'Post-commit request-audit failure replaced command success.');
+        $replayedDespiteAudit = api_http_request(
+            $port,
+            'POST',
+            '/api/v1/applications/' . $auditFailureTarget['public_id'] . '/transitions',
+            $auditFailureHeaders,
+            $auditFailureBody,
+        );
+        api_http_same(200, $replayedDespiteAudit['status'], 'Post-commit request-audit failure replaced exact replay.');
+        api_http_same($committedDespiteAudit['body'], $replayedDespiteAudit['body'], 'Audit-failed replay body changed.');
+        api_http_same(
+            (string) ($committedDespiteAudit['headers']['x-request-id'][0] ?? ''),
+            (string) ($replayedDespiteAudit['headers']['x-request-id'][0] ?? ''),
+            'Audit-failed replay request ID changed.',
+        );
+    } finally {
+        api_http_drop_audit_failure($pdo, $postgres);
+    }
+    $auditFailureAfter = api_http_transition_evidence($pdo, (int) $auditFailureTarget['id']);
+    api_http_same($auditFailureEvidence['version'] + 1, $auditFailureAfter['version'], 'Audit-failed command did not commit once.');
+    foreach (['events', 'workflow', 'outbox', 'audits'] as $evidenceKey) {
+        api_http_same(
+            $auditFailureEvidence[$evidenceKey] + 1,
+            $auditFailureAfter[$evidenceKey],
+            'Audit-failed command evidence differs for ' . $evidenceKey . '.',
+        );
+    }
+
+    $auditSafeCommandRows = json_encode(
+        $pdo->query(
+            "SELECT * FROM api_request_audit_events
+             WHERE route_class = 'api.v1.applications.transition'",
+        )->fetchAll(PDO::FETCH_ASSOC),
+        JSON_THROW_ON_ERROR,
+    );
+    foreach ([$commandKey, $commandBody, $commandPath, $full['token']] as $forbiddenCommandAuditValue) {
+        api_http_assert(
+            !str_contains($auditSafeCommandRows, $forbiddenCommandAuditValue),
+            'Command request audit retained clear key, body, path, or token material.',
+        );
     }
 
     $firstPage = api_http_request($port, 'GET', '/api/v1/opportunities?limit=1', $authorization);
@@ -928,11 +1410,36 @@ try {
     api_http_same(503, $missingKey['status'], 'Missing referenced API keyring did not fail readiness closed.');
     api_http_same('service_unavailable', api_http_error_shape($missingKey)['code'], 'Missing-keyring response differs.');
     api_http_assert_boundary($missingKey);
+    $missingKeyCommand = api_http_request(
+        $missingKeyPort,
+        'POST',
+        $commandPath,
+        [
+            ...$authorization,
+            'Idempotency-Key' => str_repeat('4', 32),
+            'If-Match' => $commandResponseEtag,
+        ],
+        $correctionBody,
+    );
+    api_http_same(503, $missingKeyCommand['status'], 'Missing command keyring did not fail closed.');
 
     $service->setApiEnabled(false, $adminId);
     $disabledMissingKeyAuditCount = (int) $pdo->query('SELECT COUNT(*) FROM api_request_audit_events')->fetchColumn();
     $disabledMissingKeyBucketCount = (int) $pdo->query('SELECT COUNT(*) FROM api_rate_limit_buckets')->fetchColumn();
     api_http_assert_disabled_classification($missingKeyPort, $authorization, 'Disabled API without keyring');
+    $disabledCommand = api_http_request(
+        $missingKeyPort,
+        'POST',
+        $commandPath,
+        [
+            ...$authorization,
+            'Idempotency-Key' => str_repeat('5', 32),
+            'If-Match' => $commandResponseEtag,
+        ],
+        $correctionBody,
+    );
+    api_http_same(401, $disabledCommand['status'], 'Disabled command route depended on the optional keyring.');
+    api_http_same('invalid_credentials', api_http_error_shape($disabledCommand)['code'], 'Disabled command denial differs.');
     api_http_same(
         $disabledMissingKeyAuditCount,
         (int) $pdo->query('SELECT COUNT(*) FROM api_request_audit_events')->fetchColumn(),

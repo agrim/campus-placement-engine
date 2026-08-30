@@ -108,12 +108,17 @@ separate fresh PostgreSQL databases as well as SQLite.
 runs with PHP's clean-path router against SQLite and a fresh PostgreSQL 17
 database and proves sessionless/no-cookie/no-CORS routing, exact Bearer and
 scope states, institution joins, privacy allowlists, collections/items,
-GET/HEAD/ETag/304, cursor snapshot and tamper bindings, bounded input, fixed
-errors, atomic rate limiting, direct-peer/redacted audit, audit-failure denial,
-and missing-key readiness. It invokes
+GET/HEAD/ETag/304, cursor snapshot and tamper bindings, the one strict
+application-transition POST, ETag preconditions, exact idempotent replay,
+service attribution, post-commit audit behavior, bounded input, fixed errors,
+atomic rate limiting, direct-peer/redacted audit, and missing-key readiness. It invokes
 `tests/validate_public_api_contracts.py` with the same pinned Draft 2020-12
 dependencies to validate OpenAPI 3.1 structure, schema reference resolution,
 examples, frozen consumers, and strict producer rejection of undeclared fields.
+`tests/api_application_transition_command_concurrency_contract.php` additionally
+releases two independent workers against the same key and application on SQLite
+and a fresh PostgreSQL database, proving one mutation/evidence set plus one
+exact replay and no durable pending command.
 `tests/postgres_connection_policy_contract.php` is a no-network parser and
 policy gate. It freezes the Cloud-compatible constructor and raw `fromUrl()`
 signatures while proving strict runtime TLS, pool-mode, timeout, redaction,

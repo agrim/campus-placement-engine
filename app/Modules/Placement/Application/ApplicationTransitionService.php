@@ -71,10 +71,7 @@ final class ApplicationTransitionService
             $this->denyServiceAccount();
         }
         return WriteTransaction::run($this->pdo, function () use ($command, $actor): ApplicationTransitionResult {
-            // Canonical PostgreSQL service-command lock order is module,
-            // institution, service account, exact scope, capability catalog.
-            $this->lockServicePlacementModule();
-            $this->revalidateServiceAccount($actor);
+            $this->authorizeServiceAccountWithinTransaction($actor);
             $implementation = new LegacyPlacementService($this->pdo);
             $result = $implementation->applyServiceAccountMove(
                 $command->applicationId(),
@@ -86,6 +83,24 @@ final class ApplicationTransitionService
             );
             return ApplicationTransitionResult::fromLegacyResult($result);
         });
+    }
+
+    /**
+     * Establish the durable service-actor decision and canonical locks for a
+     * larger command transaction before it acquires aggregate/idempotency rows.
+     */
+    public function authorizeServiceAccountWithinTransaction(ApplicationTransitionActor $actor): void
+    {
+        if (!$actor->isServiceAccount()) {
+            $this->denyServiceAccount();
+        }
+        if (!WriteTransaction::isActive($this->pdo)) {
+            throw new \RuntimeException('Service-account authorization requires an active write transaction.');
+        }
+        // Canonical PostgreSQL service-command lock order is module,
+        // institution, service account, exact scope, capability catalog.
+        $this->lockServicePlacementModule();
+        $this->revalidateServiceAccount($actor);
     }
 
     /** @return array<string, mixed> */

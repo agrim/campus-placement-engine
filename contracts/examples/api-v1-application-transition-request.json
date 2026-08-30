@@ -1,0 +1,5 @@
+{
+  "transition_key": "advance_to_interview",
+  "target_status": "interview",
+  "note": "Advanced by the institution integration"
+}

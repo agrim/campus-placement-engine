@@ -94,6 +94,7 @@ def validate_openapi(openapi: dict[str, Any], schema_names: set[str]) -> None:
         "/api/v1/opportunities/{public_id}",
         "/api/v1/applications",
         "/api/v1/applications/{public_id}",
+        "/api/v1/applications/{public_id}/transitions",
     }
     paths = openapi.get("paths")
     if not isinstance(paths, dict) or set(paths) != expected_paths:
@@ -104,12 +105,18 @@ def validate_openapi(openapi: dict[str, Any], schema_names: set[str]) -> None:
         if not isinstance(path_item, dict):
             raise AssertionError(f"OpenAPI path item is invalid: {path}")
         methods = set(path_item).intersection(http_methods)
-        if methods != {"get", "head"}:
-            raise AssertionError(f"OpenAPI path is not GET/HEAD-only: {path}")
+        expected_methods = (
+            {"post"}
+            if path == "/api/v1/applications/{public_id}/transitions"
+            else {"get", "head"}
+        )
+        if methods != expected_methods:
+            raise AssertionError(f"OpenAPI method map differs: {path}")
         for method in methods:
             operation = path_item[method]
-            if not isinstance(operation, dict) or "requestBody" in operation:
-                raise AssertionError(f"OpenAPI operation has an invalid write body: {method} {path}")
+            command = path == "/api/v1/applications/{public_id}/transitions"
+            if not isinstance(operation, dict) or ("requestBody" in operation) != command:
+                raise AssertionError(f"OpenAPI operation request body differs: {method} {path}")
             operation_id = operation.get("operationId")
             if not isinstance(operation_id, str) or operation_id in operation_ids:
                 raise AssertionError("OpenAPI operation IDs must be present and unique")
@@ -117,21 +124,27 @@ def validate_openapi(openapi: dict[str, Any], schema_names: set[str]) -> None:
             responses = operation.get("responses")
             if not isinstance(responses, dict) or "200" not in responses:
                 raise AssertionError(f"OpenAPI operation has no explicit 200 response: {method} {path}")
-            expected_statuses = {"200", "400", "401", "414", "429", "431", "500", "503"}
-            if path != "/api/v1":
-                expected_statuses.add("403")
-            item_operation = path.endswith("/{public_id}")
-            if item_operation:
-                expected_statuses.update({"304", "404"})
+            if command:
+                expected_statuses = {
+                    "200", "400", "401", "403", "404", "409", "413", "414",
+                    "415", "422", "428", "429", "431", "500", "503",
+                }
+            else:
+                expected_statuses = {"200", "400", "401", "414", "429", "431", "500", "503"}
+                if path != "/api/v1":
+                    expected_statuses.add("403")
+                item_operation = path.endswith("/{public_id}")
+                if item_operation:
+                    expected_statuses.update({"304", "404"})
             if set(responses) != expected_statuses:
                 raise AssertionError(f"OpenAPI response status map differs: {method} {path}")
 
             expected_bound_refs = {
                 "414": "#/components/responses/RequestTargetTooLarge"
-                if method == "get"
+                if method != "head"
                 else "#/components/responses/HeadRequestTargetTooLarge",
                 "431": "#/components/responses/RequestHeadersTooLarge"
-                if method == "get"
+                if method != "head"
                 else "#/components/responses/HeadRequestHeadersTooLarge",
             }
             for status, expected_ref in expected_bound_refs.items():
@@ -149,14 +162,22 @@ def validate_openapi(openapi: dict[str, Any], schema_names: set[str]) -> None:
                     expected_headers.add("WWW-Authenticate")
                 if status in {"429", "503"}:
                     expected_headers.add("Retry-After")
-                if item_operation and status in {"200", "304"}:
+                item_operation = path in {
+                    "/api/v1/opportunities/{public_id}",
+                    "/api/v1/applications/{public_id}",
+                }
+                if (item_operation and status in {"200", "304"}) or (command and status == "200"):
                     expected_headers.add("ETag")
                 headers = response.get("headers", {})
                 if not isinstance(headers, dict) or set(headers) != expected_headers:
                     raise AssertionError(
                         f"OpenAPI response header map differs: {status} {method} {path}"
                     )
-                expected_content = {"application/json"} if method == "get" and status != "304" else set()
+                expected_content = (
+                    {"application/json"}
+                    if method != "head" and status != "304"
+                    else set()
+                )
                 content = response.get("content", {})
                 if not isinstance(content, dict) or set(content) != expected_content:
                     raise AssertionError(
@@ -178,6 +199,40 @@ def validate_openapi(openapi: dict[str, Any], schema_names: set[str]) -> None:
             }
             if refs != collection_parameter_refs:
                 raise AssertionError(f"OpenAPI collection parameters differ: {method} {path}")
+
+    command = paths["/api/v1/applications/{public_id}/transitions"]["post"]
+    command_parameters = command.get("parameters")
+    command_parameter_refs = {
+        item.get("$ref")
+        for item in command_parameters
+        if isinstance(command_parameters, list) and isinstance(item, dict)
+    }
+    if command_parameter_refs != {
+        "#/components/parameters/IdempotencyKey",
+        "#/components/parameters/IfMatch",
+    }:
+        raise AssertionError("OpenAPI command header parameters differ")
+    if command.get("requestBody") != {
+        "required": True,
+        "content": {
+            "application/json": {
+                "schema": {"$ref": "schemas/api-v1-application-transition-request.schema.json"}
+            }
+        },
+    }:
+        raise AssertionError("OpenAPI command request body differs")
+    if command.get("x-cpe-required-scope") != "applications.transition":
+        raise AssertionError("OpenAPI command scope differs")
+    if command.get("x-cpe-idempotency-horizon-hours") != 48:
+        raise AssertionError("OpenAPI command retry horizon differs")
+    if openapi["components"]["parameters"]["IdempotencyKey"]["schema"] != {
+        "type": "string", "pattern": "^[a-f0-9]{32,64}$",
+    }:
+        raise AssertionError("OpenAPI Idempotency-Key grammar differs")
+    if openapi["components"]["parameters"]["IfMatch"]["schema"] != {
+        "type": "string", "pattern": '^\\"[a-f0-9]{64}\\"$',
+    }:
+        raise AssertionError("OpenAPI If-Match grammar differs")
 
     schemes = openapi.get("components", {}).get("securitySchemes", {})
     if schemes != {
@@ -209,6 +264,8 @@ def validate_openapi(openapi: dict[str, Any], schema_names: set[str]) -> None:
         "opportunity_collection",
         "application_item",
         "application_collection",
+        "application_transition_request",
+        "application_transition_response",
         "error",
     }:
         raise AssertionError("OpenAPI contract example declaration differs")
@@ -219,8 +276,8 @@ def validate_openapi(openapi: dict[str, Any], schema_names: set[str]) -> None:
 
 def main() -> None:
     schema_paths = sorted((CONTRACTS / "schemas").glob("api-v1-*.schema.json"))
-    if len(schema_paths) != 10:
-        raise AssertionError("Public API v1 requires exactly ten strict schemas")
+    if len(schema_paths) != 11:
+        raise AssertionError("Public API v1 requires exactly eleven strict schemas")
     schemas: dict[str, dict[str, Any]] = {}
     resources: list[tuple[str, Resource[Any]]] = []
     for path in schema_paths:
@@ -248,9 +305,12 @@ def main() -> None:
         ("opportunity collection example", "urn:cpe:api:v1:opportunity-collection", "contracts/examples/api-v1-opportunity-collection.json"),
         ("application item example", "urn:cpe:api:v1:application-item", "contracts/examples/api-v1-application-item.json"),
         ("application collection example", "urn:cpe:api:v1:application-collection", "contracts/examples/api-v1-application-collection.json"),
+        ("application transition request example", "urn:cpe:api:v1:application-transition-request", "contracts/examples/api-v1-application-transition-request.json"),
+        ("application transition response example", "urn:cpe:api:v1:application-item", "contracts/examples/api-v1-application-transition-response.json"),
         ("error example", "urn:cpe:api:v1:error", "contracts/examples/api-v1-error.json"),
         ("frozen opportunity consumer", "urn:cpe:api:v1:opportunity-item", "contracts/fixtures/api-v1-opportunity.consumer.json"),
         ("frozen application consumer", "urn:cpe:api:v1:application-item", "contracts/fixtures/api-v1-application.consumer.json"),
+        ("frozen application transition consumer", "urn:cpe:api:v1:application-item", "contracts/fixtures/api-v1-application-transition.consumer.json"),
     ]
     for label, schema_id, relative in cases:
         assert_valid(label, validators[schema_id], load(relative))
@@ -276,7 +336,7 @@ def main() -> None:
     if catalog != {
         "schema": 1,
         "event_schemas": {"application.status_changed": [1]},
-        "api_scopes": ["opportunities.read", "applications.read"],
+        "api_scopes": ["opportunities.read", "applications.read", "applications.transition"],
         "engine_api": ["v1"],
     }:
         raise AssertionError("public integration catalog differs")

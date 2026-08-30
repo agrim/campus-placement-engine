@@ -46,15 +46,17 @@ contract in `contracts/public-integration.v1.json` provides:
 
 1. `application.status_changed` schema 1, delivered at least once through the
    existing outbox sinks;
-2. institution-local read-only API v1 for opportunities and applications;
+2. institution-local API v1 for opportunity/application reads and one
+   controlled application-status transition;
 3. broader out-of-process connector capabilities only after their public
    contracts are governed.
 
 API v1 uses the Phase 3A disabled-by-default service-account, exact-scope,
 verifier-only token, rate-limit, and redacted-audit controls. Its five GET/HEAD
-paths, exact projections, schemas, and compatibility rules are documented in
-`docs/api/v1.md` and `docs/api/authentication.md`. Candidate resources and
-command/write APIs remain outside the public surface.
+paths, one application-transition POST, exact projections/request, shared
+domain policy, schemas, and compatibility rules are documented in
+`docs/api/v1.md` and `docs/api/authentication.md`. Candidate resources and all
+other command/write APIs remain outside the public surface.
 
 Internal PHP class names, database tables, templates, and module subscriber
 interfaces are not public contracts. The public compatibility policy is

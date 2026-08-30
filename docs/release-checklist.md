@@ -87,15 +87,17 @@ Use this before a public alpha tag or downloadable archive.
   and defaults to `0`, only verifier material is stored, exact scope and key
   readiness fail closed, lifecycle/audit changes are atomic, two concurrent
   rotations retain one current plus one grace token, aggregate diagnostics are
-  redacted, and the public integration declaration exposes only v1 and the two
-  exact read scopes.
+  redacted, and the public integration declaration exposes only v1 and three
+  exact scopes, including `applications.transition`.
 - Run `php tests/api_http_contract.php` against SQLite and a separate fresh
   PostgreSQL 17 database with the pinned schema validator. Confirm clean-path
   routing, static assets, no sessions/cookies/CORS/redirects, exact auth and
   scopes, institution filtering, privacy allowlists, GET/HEAD/ETag/304, cursor
-  tamper/filter/route/institution/snapshot binding, bounded request rejection,
-  rate/audit enforcement, and fixed errors. Repeat it from extracted ZIP and
-  tar packages.
+  tamper/filter/route/institution/snapshot binding, strict transition request,
+  ETag precondition, exact replay/conflict/rollback, service attribution,
+  post-commit audit behavior, bounded request rejection, rate/audit enforcement,
+  and fixed errors. Run the command race contract on SQLite and fresh
+  PostgreSQL, and repeat package-focused contracts from extracted ZIP and tar.
 - Run `php tests/managed_hosting_contract.php` and confirm the external resolver
   seam, tenant database identity, module entitlements, and session binding fail
   closed as documented.
@@ -115,6 +117,9 @@ Use this before a public alpha tag or downloadable archive.
   `tests/webhook_receiver_example_contract.php`,
   `tests/api_identity_contract.php`, and
   `tests/api_identity_rotation_concurrency_contract.php`, and
+  `tests/api_application_transition_input_contract.php`,
+  `tests/api_application_transition_command_contract.php`,
+  `tests/api_application_transition_command_concurrency_contract.php`, and
   `tests/api_http_contract.php` without relying on repository
   metadata.
 - Run CLI first-run install against a throwaway database with

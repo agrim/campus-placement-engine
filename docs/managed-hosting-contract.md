@@ -207,7 +207,7 @@ path.
 
 `ModuleLifecycleService::CONTRACT_VERSION` versions these release-pinned,
 idempotent adapter operations. They are private Engine PHP APIs, not part of the
-public read API declared as `engine_api: ["v1"]`. Version 1 includes:
+public institution API declared as `engine_api: ["v1"]`. Version 1 includes:
 
 - `ModuleLifecycleService::modules()` returns the release capability manifest
   together with installed, configured, entitled, and effective state.

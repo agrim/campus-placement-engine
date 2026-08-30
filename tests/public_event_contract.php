@@ -319,7 +319,7 @@ try {
     public_event_same([
         'schema' => 1,
         'event_schemas' => ['application.status_changed' => [1]],
-        'api_scopes' => ['opportunities.read', 'applications.read'],
+        'api_scopes' => ['opportunities.read', 'applications.read', 'applications.transition'],
         'engine_api' => ['v1'],
     ], $contract, 'Public integration catalog differs.');
     $jsonDocuments = [];

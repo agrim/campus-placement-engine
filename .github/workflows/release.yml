@@ -120,6 +120,7 @@ jobs:
           php tests/api_identity_rotation_concurrency_contract.php
           php tests/api_http_contract.php
           php tests/application_transition_boundary_contract.php
+          php tests/api_application_transition_input_contract.php
           php tests/api_application_transition_command_contract.php
           php tests/api_application_transition_command_concurrency_contract.php
           php tests/postgres_connection_policy_contract.php

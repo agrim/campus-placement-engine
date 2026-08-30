@@ -23,6 +23,36 @@ final class ApiHttpResponse
         if (!is_string($body)) {
             throw new RuntimeException('API response encoding failed.');
         }
+        self::emit($status, $body, $requestId, $head, $headers);
+    }
+
+    /** Send already-validated canonical command bytes for exact replay. */
+    public static function sendEncoded(
+        int $status,
+        string $body,
+        string $requestId,
+        bool $head = false,
+        array $headers = [],
+    ): void {
+        try {
+            $decoded = json_decode($body, true, 8, JSON_THROW_ON_ERROR);
+        } catch (\JsonException $failure) {
+            throw new RuntimeException('Encoded API response is invalid.', 0, $failure);
+        }
+        if (!is_array($decoded) || $decoded === [] || array_is_list($decoded) || strlen($body) > 16384) {
+            throw new RuntimeException('Encoded API response is invalid.');
+        }
+        self::emit($status, $body, $requestId, $head, $headers);
+    }
+
+    /** @param array<string, string> $headers */
+    private static function emit(
+        int $status,
+        string $body,
+        string $requestId,
+        bool $head,
+        array $headers,
+    ): void {
         if (!headers_sent()) {
             header_remove('Set-Cookie');
             header_remove('Location');

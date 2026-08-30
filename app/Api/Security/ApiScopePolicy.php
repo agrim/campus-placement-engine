@@ -15,6 +15,7 @@ final class ApiScopePolicy
     private const SCOPE_CAPABILITIES = [
         'opportunities.read' => 'placement.records.view',
         'applications.read' => 'placement.records.view',
+        'applications.transition' => 'placement.application.transition',
     ];
 
     public function __construct(private readonly PDO $pdo)
@@ -47,7 +48,8 @@ final class ApiScopePolicy
                 'SELECT COUNT(*) FROM api_service_accounts account
                  JOIN api_service_account_scopes grant_row ON grant_row.service_account_id = account.id
                  WHERE account.id = ? AND account.public_id = ? AND account.institution_id = ?
-                   AND account.status = ? AND grant_row.scope = ?',
+                   AND account.status = ? AND account.disabled_at IS NULL AND account.revoked_at IS NULL
+                   AND grant_row.scope = ?',
             );
             $account->execute([
                 $principal->serviceAccountId(),

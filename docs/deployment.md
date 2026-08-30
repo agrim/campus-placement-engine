@@ -213,6 +213,15 @@ Adjust `server_name`, filesystem paths, and `fastcgi_pass` for the PHP-FPM
 socket or host used by the server. Keep `data/` writable by the PHP user but
 outside the Nginx root.
 
+Both starter web-server configurations preserve clean `/api/v1/...` paths and
+pass the application transition command body plus `Authorization`,
+`Idempotency-Key`, `If-Match`, and `Content-Type` headers to the front
+controller. Do not add a proxy cache, CORS layer, path rewrite that drops the
+public ID, request-body transformation, or Cloud/control-plane proxy in front
+of this institution-local API. Keep the server request-body ceiling compatible
+with Engine's stricter 16 KiB command limit so oversize requests remain a
+bounded denial.
+
 ## CLI Install
 
 Technical operators can also run the same first-run setup without opening the

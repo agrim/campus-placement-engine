@@ -36,12 +36,18 @@ Date: 2026-07-18
 > execution and production TLS remain release-environment
 > proof gates rather than claims made by this working tree.
 
-> Phase 3B API update, 2026-08-30: the Engine now exposes five sessionless,
+> Phase 3B API update, 2026-08-30: at that gate the Engine exposed five sessionless,
 > GET/HEAD-only `/api/v1` routes for exact opportunity and application read
 > projections. Authentication, scopes, rate limits, redacted audit, institution
 > joins, signed cursor pagination, ETags, fixed JSON errors, OpenAPI 3.1, and
-> strict Draft 2020-12 contracts are governed together. Candidate and
-> command/write APIs remain absent; Cloud does not proxy institution API data.
+> strict Draft 2020-12 contracts were governed together.
+
+> Phase 4C API update, 2026-08-30: API v1 now adds exactly one controlled
+> `POST /api/v1/applications/{public_id}/transitions` command with exact
+> service-account scope, shared browser domain policy, strong ETag precondition,
+> 48-hour hashed idempotency, atomic service attribution/outbox/replay evidence,
+> and strict input/OpenAPI contracts. Candidate and all other command/write APIs
+> remain absent; Cloud does not proxy institution API data.
 
 ## Implemented
 
@@ -90,22 +96,25 @@ Date: 2026-07-18
 - Governed public integration contract v1 with
   `application.status_changed` schema 1, strict privacy-minimized envelopes,
   immutable explicit outbox projections, per-application aggregate versions and
-  ordering, exact audited dead-letter recovery, plus the read-only Engine API v1
-  and its two exact scopes. Internal `DomainEvent` payloads and module PHP APIs
+  ordering, exact audited dead-letter recovery, plus Engine API v1 and its three
+  exact scopes. Internal `DomainEvent` payloads and module PHP APIs
   remain private.
 - Institution-local API identity/control foundation with a nonportable disabled
   default, administrator capability plus CSRF management, exact
-  `opportunities.read` and `applications.read` grants, external bounded
+  `opportunities.read`, `applications.read`, and `applications.transition`
+  grants, external bounded
   versioned keyring, verifier-only one-time tokens, mandatory expiry, 24-hour
   rotation grace, revoke/disable controls, transactional keyed rate limits,
   redacted 90-day request audit, bounded pruning, and aggregate-only
   health/metrics/doctor output.
-- Sessionless GET/HEAD-only API routes for the service descriptor,
-  opportunities, and applications; exact privacy allowlists and
+- Sessionless GET/HEAD API routes for the service descriptor, opportunities,
+  and applications plus one application-transition POST; exact privacy allowlists and
   current-institution joins; default-50/max-100 signed cursor pagination bound
   to institution/route/filter/snapshot/tuple; item ETags and `304`; fixed
   no-store JSON failures; direct-peer atomic throttling; OpenAPI 3.1, strict
-  Draft 2020-12 schemas, examples, and consumer fixtures. No candidate or
+  Draft 2020-12 schemas, examples, and consumer fixtures. The command uses the
+  shared transition boundary, strong ETag, 48-hour hashed idempotency, exclusive
+  service attribution, and atomic replay evidence. No candidate or other
   command/write endpoint exists.
 - Institution-facing signed webhook Integrations workflow with one-time secret
   reveal, AES-256-GCM storage under an external versioned keyring, bounded

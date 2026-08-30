@@ -1420,6 +1420,9 @@ function verify_release_package(string $path): void
         'app/Api/Operations/ApiRateLimiter.php',
         'app/Api/Operations/ApiRequestAuditService.php',
         'app/Api/Operations/ApiRetentionService.php',
+        'app/Api/Commands/ApiApplicationTransitionCommandService.php',
+        'app/Api/Commands/ApiApplicationTransitionInput.php',
+        'app/Api/Commands/ApiApplicationTransitionOutcome.php',
         'app/Api/Commands/ApiCommandConflict.php',
         'app/Api/Commands/ApiCommandFingerprint.php',
         'app/Api/Commands/ApiCommandHasher.php',
@@ -1428,10 +1431,12 @@ function verify_release_package(string $path): void
         'app/Api/Commands/ApiCommandUnavailable.php',
         'app/Api/Commands/InvalidApiCommandInput.php',
         'app/Api/Http/ApiCursorCodec.php',
+        'app/Api/Http/ApiApplicationTransitionRequestParser.php',
         'app/Api/Http/ApiHttpException.php',
         'app/Api/Http/ApiHttpRequest.php',
         'app/Api/Http/ApiHttpResponse.php',
         'app/Api/Http/ApiReadService.php',
+        'app/Api/Http/ApiRepresentationEtag.php',
         'app/Api/Http/ApiStorageUnavailable.php',
         'app/Api/Http/ApiV1Kernel.php',
         'app/Views/api-access.php',
@@ -1453,6 +1458,10 @@ function verify_release_package(string $path): void
         'contracts/fixtures/application.status_changed.v1.consumer.json',
         'contracts/fixtures/application.status_changed.v1.future-optional.consumer.json',
         'contracts/openapi.v1.json',
+        'contracts/schemas/api-v1-application-transition-request.schema.json',
+        'contracts/examples/api-v1-application-transition-request.json',
+        'contracts/examples/api-v1-application-transition-response.json',
+        'contracts/fixtures/api-v1-application-transition.consumer.json',
         'docs/integrations/events.md',
         'docs/integrations/webhooks.md',
         'docs/api/authentication.md',
@@ -1477,6 +1486,7 @@ function verify_release_package(string $path): void
         'tests/api_application_transition_command_contract.php',
         'tests/api_application_transition_command_concurrency_contract.php',
         'tests/api_application_transition_command_concurrency_worker.php',
+        'tests/api_application_transition_input_contract.php',
         'tests/validate_public_api_contracts.py',
         'tests/validate_public_event_schemas.py',
         'tests/requirements-public-event-schema.txt',
@@ -2160,7 +2170,7 @@ function print_browser_qa_plan_text(array $plan): void
     echo "  php placement api-status\n";
     echo "  php placement api-enable --actor-user-id=USER_ID\n";
     echo "  php placement api-disable --actor-user-id=USER_ID\n";
-    echo "  php placement api-service-account-create --name=NAME --scopes=opportunities.read,applications.read --actor-user-id=USER_ID [--expiry-days=90]\n";
+    echo "  php placement api-service-account-create --name=NAME --scopes=opportunities.read,applications.read,applications.transition --actor-user-id=USER_ID [--expiry-days=90]\n";
     echo "  php placement api-service-account-list --actor-user-id=USER_ID\n";
     echo "  php placement api-service-account-enable --service-account=apisa_ID --actor-user-id=USER_ID\n";
     echo "  php placement api-service-account-disable --service-account=apisa_ID --actor-user-id=USER_ID\n";
@@ -2530,6 +2540,9 @@ function publication_check(): void
         'app/Api/Operations/ApiRateLimiter.php',
         'app/Api/Operations/ApiRequestAuditService.php',
         'app/Api/Operations/ApiRetentionService.php',
+        'app/Api/Commands/ApiApplicationTransitionCommandService.php',
+        'app/Api/Commands/ApiApplicationTransitionInput.php',
+        'app/Api/Commands/ApiApplicationTransitionOutcome.php',
         'app/Api/Commands/ApiCommandConflict.php',
         'app/Api/Commands/ApiCommandFingerprint.php',
         'app/Api/Commands/ApiCommandHasher.php',
@@ -2538,10 +2551,12 @@ function publication_check(): void
         'app/Api/Commands/ApiCommandUnavailable.php',
         'app/Api/Commands/InvalidApiCommandInput.php',
         'app/Api/Http/ApiCursorCodec.php',
+        'app/Api/Http/ApiApplicationTransitionRequestParser.php',
         'app/Api/Http/ApiHttpException.php',
         'app/Api/Http/ApiHttpRequest.php',
         'app/Api/Http/ApiHttpResponse.php',
         'app/Api/Http/ApiReadService.php',
+        'app/Api/Http/ApiRepresentationEtag.php',
         'app/Api/Http/ApiStorageUnavailable.php',
         'app/Api/Http/ApiV1Kernel.php',
         'app/Modules/Placement/Application/ApplicationTransitionActor.php',
@@ -2598,6 +2613,7 @@ function publication_check(): void
         'tests/api_application_transition_command_contract.php',
         'tests/api_application_transition_command_concurrency_contract.php',
         'tests/api_application_transition_command_concurrency_worker.php',
+        'tests/api_application_transition_input_contract.php',
         'tests/validate_public_api_contracts.py',
         'tests/validate_public_event_schemas.py',
         'tests/requirements-public-event-schema.txt',
@@ -2679,17 +2695,21 @@ function public_integration_artifact_paths(): array
         'contracts/schemas/api-v1-application-item.schema.json',
         'contracts/schemas/api-v1-opportunity-collection.schema.json',
         'contracts/schemas/api-v1-application-collection.schema.json',
+        'contracts/schemas/api-v1-application-transition-request.schema.json',
         'contracts/examples/application.status_changed.v1.json',
         'contracts/examples/api-v1-service.json',
         'contracts/examples/api-v1-opportunity-item.json',
         'contracts/examples/api-v1-opportunity-collection.json',
         'contracts/examples/api-v1-application-item.json',
         'contracts/examples/api-v1-application-collection.json',
+        'contracts/examples/api-v1-application-transition-request.json',
+        'contracts/examples/api-v1-application-transition-response.json',
         'contracts/examples/api-v1-error.json',
         'contracts/fixtures/application.status_changed.v1.consumer.json',
         'contracts/fixtures/application.status_changed.v1.future-optional.consumer.json',
         'contracts/fixtures/api-v1-opportunity.consumer.json',
         'contracts/fixtures/api-v1-application.consumer.json',
+        'contracts/fixtures/api-v1-application-transition.consumer.json',
         'contracts/fixtures/api-v1-opportunity.future-field.consumer.json',
     ];
 }
@@ -2727,11 +2747,11 @@ function public_integration_artifact_failures(array $documents): array
     $expectedContract = [
         'schema' => 1,
         'event_schemas' => ['application.status_changed' => [1]],
-        'api_scopes' => ['opportunities.read', 'applications.read'],
+        'api_scopes' => ['opportunities.read', 'applications.read', 'applications.transition'],
         'engine_api' => ['v1'],
     ];
     if ($decoded[$contractPath] !== $expectedContract) {
-        $failures[] = 'public-integration.v1.json differs from the frozen event and read-API declaration';
+        $failures[] = 'public-integration.v1.json differs from the frozen event and governed API declaration';
     }
 
     $requiredEnvelope = [
@@ -2798,6 +2818,7 @@ function public_integration_artifact_failures(array $documents): array
         'contracts/schemas/api-v1-application-item.schema.json' => 'urn:cpe:api:v1:application-item',
         'contracts/schemas/api-v1-opportunity-collection.schema.json' => 'urn:cpe:api:v1:opportunity-collection',
         'contracts/schemas/api-v1-application-collection.schema.json' => 'urn:cpe:api:v1:application-collection',
+        'contracts/schemas/api-v1-application-transition-request.schema.json' => 'urn:cpe:api:v1:application-transition-request',
     ];
     foreach ($apiSchemaPaths as $path => $schemaId) {
         $schema = $decoded[$path];
@@ -2832,6 +2853,7 @@ function public_integration_artifact_failures(array $documents): array
         '/api/v1/opportunities/{public_id}',
         '/api/v1/applications',
         '/api/v1/applications/{public_id}',
+        '/api/v1/applications/{public_id}/transitions',
     ];
     $actualApiPaths = is_array($openapi['paths'] ?? null) ? array_keys($openapi['paths']) : [];
     sort($expectedApiPaths);
@@ -2855,13 +2877,17 @@ function public_integration_artifact_failures(array $documents): array
         }
         $methods = array_values(array_intersect(array_keys($pathItem), $httpMethods));
         sort($methods);
-        if ($methods !== ['get', 'head']) {
-            $failures[] = 'OpenAPI path is not GET/HEAD-only: ' . $path;
+        $expectedMethods = $path === '/api/v1/applications/{public_id}/transitions'
+            ? ['post']
+            : ['get', 'head'];
+        if ($methods !== $expectedMethods) {
+            $failures[] = 'OpenAPI method map differs: ' . $path;
         }
         foreach ($methods as $method) {
             $operation = $pathItem[$method] ?? null;
+            $command = $path === '/api/v1/applications/{public_id}/transitions';
             if (!is_array($operation)
-                || array_key_exists('requestBody', $operation)
+                || array_key_exists('requestBody', $operation) !== $command
                 || !is_string($operation['operationId'] ?? null)
                 || !is_array($operation['responses'] ?? null)
                 || !array_key_exists('200', $operation['responses'])) {
@@ -2875,6 +2901,8 @@ function public_integration_artifact_failures(array $documents): array
         'opportunity_collection' => 'examples/api-v1-opportunity-collection.json',
         'application_item' => 'examples/api-v1-application-item.json',
         'application_collection' => 'examples/api-v1-application-collection.json',
+        'application_transition_request' => 'examples/api-v1-application-transition-request.json',
+        'application_transition_response' => 'examples/api-v1-application-transition-response.json',
         'error' => 'examples/api-v1-error.json',
     ];
     if (($openapi['x-cpe-contract-examples'] ?? null) !== $expectedExamples) {
@@ -2898,7 +2926,9 @@ function public_integration_artifact_failures(array $documents): array
     }
     foreach ([
         'contracts/examples/api-v1-application-item.json',
+        'contracts/examples/api-v1-application-transition-response.json',
         'contracts/fixtures/api-v1-application.consumer.json',
+        'contracts/fixtures/api-v1-application-transition.consumer.json',
     ] as $path) {
         if (array_keys($decoded[$path]) !== ['data', 'meta']
             || array_keys($decoded[$path]['data'] ?? []) !== $applicationFields
@@ -3299,7 +3329,7 @@ function help(): void
     echo "  php placement api-status\n";
     echo "  php placement api-enable --actor-user-id=USER_ID\n";
     echo "  php placement api-disable --actor-user-id=USER_ID\n";
-    echo "  php placement api-service-account-create --name=NAME --scopes=opportunities.read,applications.read --actor-user-id=USER_ID [--expiry-days=90]\n";
+    echo "  php placement api-service-account-create --name=NAME --scopes=opportunities.read,applications.read,applications.transition --actor-user-id=USER_ID [--expiry-days=90]\n";
     echo "  php placement api-service-account-list --actor-user-id=USER_ID\n";
     echo "  php placement api-service-account-enable --service-account=apisa_ID --actor-user-id=USER_ID\n";
     echo "  php placement api-service-account-disable --service-account=apisa_ID --actor-user-id=USER_ID\n";

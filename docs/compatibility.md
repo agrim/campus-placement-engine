@@ -11,7 +11,8 @@ The machine-readable compatibility declaration is
   },
   "api_scopes": [
     "opportunities.read",
-    "applications.read"
+    "applications.read",
+    "applications.transition"
   ],
   "engine_api": [
     "v1"
@@ -19,9 +20,10 @@ The machine-readable compatibility declaration is
 }
 ```
 
-This declares the governed event schema plus the read-only Engine API v1 and
-its two exact scopes. The API surface is limited to the five paths in
-`contracts/openapi.v1.json`; it declares no candidate or command/write API.
+This declares the governed event schema plus Engine API v1 and its three exact
+scopes. The API surface is limited to six paths in `contracts/openapi.v1.json`,
+including one controlled application transition command; it declares no
+candidate or other command/write API.
 Internal PHP module APIs, `DomainEvent` payloads, database schemas, and observer
 subscriptions remain outside this compatibility promise.
 
@@ -41,7 +43,8 @@ subscriptions remain outside this compatibility promise.
   catalog update.
 - API v1 uses the strict schemas in `contracts/schemas/api-v1-*.schema.json`.
   The OpenAPI document, producer examples, frozen consumer fixtures, exact
-  path/method set, privacy allowlists, and cursor behavior are validated by the
+  path/method set, privacy allowlists, command/idempotency contract, and cursor
+  behavior are validated by the
   pinned contract gate. Removing or changing a v1 field, method, status,
   authentication rule, or pagination meaning incompatibly requires a new API
   path version and catalog update.

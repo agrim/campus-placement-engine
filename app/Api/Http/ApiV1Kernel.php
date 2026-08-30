@@ -4,6 +4,10 @@ declare(strict_types=1);
 
 namespace App\Api\Http;
 
+use App\Api\Commands\ApiApplicationTransitionCommandService;
+use App\Api\Commands\ApiCommandConflict;
+use App\Api\Commands\ApiCommandUnavailable;
+use App\Api\Commands\InvalidApiCommandInput;
 use App\Api\Operations\ApiRateLimiter;
 use App\Api\Operations\ApiRequestAuditService;
 use App\Api\Security\ApiAuthenticationUnavailable;
@@ -13,6 +17,7 @@ use App\Api\Security\ApiPrincipal;
 use App\Api\Security\ApiScopePolicy;
 use App\Api\Security\ApiTokenAuthenticator;
 use App\Api\Security\InvalidApiCredential;
+use App\Core\Http\UserVisibleException;
 use App\Core\Install\InstallationStateUnavailable;
 use App\Hosted\Tenant\HostedResolutionException;
 use App\Operations\RequestTelemetry;
@@ -21,7 +26,7 @@ use App\Support\IncidentReporter;
 use PDO;
 use Throwable;
 
-/** Sessionless, read-only HTTP boundary for the version-one public API. */
+/** Sessionless HTTP boundary for version-one reads and one governed command. */
 final class ApiV1Kernel
 {
     private const AUTHENTICATE_HEADER = 'Bearer realm="Campus Placement Engine API"';
@@ -133,6 +138,55 @@ final class ApiV1Kernel
                 );
             }
 
+            if ($route['kind'] === 'command') {
+                try {
+                    $outcome = (new ApiApplicationTransitionCommandService($pdo, $keyring))->execute(
+                        $principal,
+                        (string) $route['id'],
+                        $parameters['command'],
+                        $requestId,
+                    );
+                } catch (ApiCommandConflict $failure) {
+                    throw new ApiHttpException(
+                        409,
+                        'idempotency_conflict',
+                        'The Idempotency-Key conflicts with an earlier request.',
+                        $failure->reason() === ApiCommandConflict::ACCOUNT
+                            ? 'IDEMPOTENCY_ACCOUNT_CONFLICT'
+                            : 'IDEMPOTENCY_REQUEST_CONFLICT',
+                    );
+                } catch (ApiCommandUnavailable|InvalidApiCommandInput $failure) {
+                    throw new ApiStorageUnavailable('API command idempotency state is unavailable.', $failure);
+                } catch (UserVisibleException $failure) {
+                    throw self::transitionFailure($failure);
+                }
+
+                // Domain state, outbox, attribution, and replay bytes are
+                // committed at this point. Request-audit telemetry is
+                // deliberately best effort so failure cannot falsify the
+                // result of a committed command or exact replay.
+                self::audit(
+                    $pdo,
+                    $keyring,
+                    $principal,
+                    (string) $route['audit_route'],
+                    (string) $route['scope'],
+                    'succeeded',
+                    $outcome->status(),
+                    $outcome->isReplay() ? 'IDEMPOTENT_REPLAY' : 'OK',
+                    $request->source(),
+                    $requestId,
+                );
+                ApiHttpResponse::sendEncoded(
+                    $outcome->status(),
+                    $outcome->responseJson(),
+                    $outcome->responseRequestId(),
+                    false,
+                    ['ETag' => $outcome->etag()],
+                );
+                return;
+            }
+
             $read = new ApiReadService($pdo, $keyring);
             $status = 200;
             $responseHeaders = [];
@@ -161,9 +215,9 @@ final class ApiV1Kernel
                         'RESOURCE_NOT_FOUND',
                     );
                 }
-                $etag = self::etag($item);
+                $etag = ApiRepresentationEtag::forRepresentation($item);
                 $responseHeaders['ETag'] = $etag;
-                if (self::etagMatches($request->ifNoneMatch(), $etag)) {
+                if (ApiRepresentationEtag::matchesIfNoneMatch($request->ifNoneMatch(), $etag)) {
                     $status = 304;
                     $payload = [];
                 } else {
@@ -274,7 +328,7 @@ final class ApiV1Kernel
      * @param array<string, mixed> $server
      * @param-out ApiHttpRequest|null $request
      * @param-out array<string, mixed>|null $route
-     * @return array{limit: int, updated_after: ?string, cursor: ?string}
+     * @return array{limit: int, updated_after: ?string, cursor: ?string, command: ?\App\Api\Commands\ApiApplicationTransitionInput}
      */
     private static function classifyRequest(
         array $server,
@@ -289,17 +343,26 @@ final class ApiV1Kernel
         if ($route === null) {
             throw new ApiHttpException(404, 'not_found', 'The requested API resource was not found.', 'ROUTE_NOT_FOUND');
         }
-        if (!in_array($request->method(), ['GET', 'HEAD'], true)) {
+        $methods = (array) ($route['methods'] ?? []);
+        if (!in_array($request->method(), $methods, true)) {
             throw new ApiHttpException(
                 405,
                 'method_not_allowed',
-                'Only GET and HEAD are supported for this API resource.',
+                'The method is not supported for this API resource.',
                 'METHOD_NOT_ALLOWED',
-                ['Allow' => 'GET, HEAD'],
+                ['Allow' => implode(', ', $methods)],
             );
         }
+        if ($route['kind'] === 'command') {
+            return [
+                'limit' => 50,
+                'updated_after' => null,
+                'cursor' => null,
+                'command' => (new ApiApplicationTransitionRequestParser())->parse($request),
+            ];
+        }
         $request->assertNoBody();
-        return self::parameters($request, $route);
+        return self::parameters($request, $route) + ['command' => null];
     }
 
     /**
@@ -336,12 +399,35 @@ final class ApiV1Kernel
     }
 
     /**
-     * @return null|array{kind: string, resource: string, scope: string, audit_route: string, id?: string}
+     * @return null|array{kind: string, resource: string, scope: string, audit_route: string, methods: list<string>, id?: string}
      */
     private static function route(string $path): ?array
     {
         if ($path === '/api/v1') {
-            return ['kind' => 'root', 'resource' => '', 'scope' => '', 'audit_route' => 'api.v1.root'];
+            return [
+                'kind' => 'root',
+                'resource' => '',
+                'scope' => '',
+                'audit_route' => 'api.v1.root',
+                'methods' => ['GET', 'HEAD'],
+            ];
+        }
+        $transitionPrefix = '/api/v1/applications/';
+        if (str_starts_with($path, $transitionPrefix)) {
+            $tail = substr($path, strlen($transitionPrefix));
+            if (str_ends_with($tail, '/transitions')) {
+                $publicId = substr($tail, 0, -strlen('/transitions'));
+                if ($publicId !== '' && !str_contains($publicId, '/')) {
+                    return [
+                        'kind' => 'command',
+                        'resource' => 'applications',
+                        'scope' => 'applications.transition',
+                        'audit_route' => 'api.v1.applications.transition',
+                        'methods' => ['POST'],
+                        'id' => $publicId,
+                    ];
+                }
+            }
         }
         foreach (['opportunities', 'applications'] as $resource) {
             $scope = $resource . '.read';
@@ -351,6 +437,7 @@ final class ApiV1Kernel
                     'resource' => $resource,
                     'scope' => $scope,
                     'audit_route' => 'api.v1.' . $resource . '.list',
+                    'methods' => ['GET', 'HEAD'],
                 ];
             }
             $prefix = '/api/v1/' . $resource . '/';
@@ -362,6 +449,7 @@ final class ApiV1Kernel
                     'resource' => $resource,
                     'scope' => $scope,
                     'audit_route' => 'api.v1.' . $resource . '.item',
+                    'methods' => ['GET', 'HEAD'],
                     'id' => substr($path, strlen($prefix)),
                 ];
             }
@@ -495,28 +583,34 @@ final class ApiV1Kernel
         return $values[0] === '1';
     }
 
-    /** @param array<string, mixed> $data */
-    private static function etag(array $data): string
+    private static function transitionFailure(UserVisibleException $failure): ApiHttpException
     {
-        $encoded = json_encode($data, JSON_UNESCAPED_SLASHES | JSON_THROW_ON_ERROR);
-        return '"' . hash('sha256', (string) $encoded) . '"';
-    }
-
-    private static function etagMatches(string $header, string $etag): bool
-    {
-        if (trim($header) === '*') {
-            return true;
-        }
-        foreach (explode(',', $header) as $candidate) {
-            $candidate = trim($candidate);
-            if (str_starts_with($candidate, 'W/')) {
-                $candidate = substr($candidate, 2);
-            }
-            if ($candidate !== '' && hash_equals($etag, $candidate)) {
-                return true;
-            }
-        }
-        return false;
+        return match ($failure->publicCode()) {
+            'API_APPLICATION_TRANSITION_FORBIDDEN' => new ApiHttpException(
+                403,
+                'transition_forbidden',
+                'The service account cannot transition this application.',
+                'TRANSITION_AUTHORIZATION_DENIED',
+            ),
+            'PLACEMENT_APPLICATION_NOT_FOUND', 'WORKFLOW_APPLICATION_NOT_FOUND' => new ApiHttpException(
+                404,
+                'not_found',
+                'The requested API resource was not found.',
+                'RESOURCE_NOT_FOUND',
+            ),
+            'PLACEMENT_BOARD_STALE' => new ApiHttpException(
+                409,
+                'transition_conflict',
+                'The application changed before the transition could be applied.',
+                'TRANSITION_CONCURRENT',
+            ),
+            default => new ApiHttpException(
+                422,
+                'transition_rejected',
+                'The requested application transition is not allowed.',
+                'TRANSITION_RULE_REJECTED',
+            ),
+        };
     }
 
     /** @param array<string, mixed> $server */
@@ -533,6 +627,10 @@ final class ApiV1Kernel
     {
         if ($path === '/api/v1') {
             return 'api-v1-root';
+        }
+        if (str_starts_with($path, '/api/v1/applications/')
+            && str_ends_with($path, '/transitions')) {
+            return 'api-v1-applications-transition';
         }
         foreach (['opportunities', 'applications'] as $resource) {
             if ($path === '/api/v1/' . $resource) {

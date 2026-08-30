@@ -100,6 +100,76 @@ final class ApiHttpRequest
         return is_string($value) && strlen($value) <= self::MAX_HEADER_BYTES ? $value : '';
     }
 
+    public function ifMatch(): string
+    {
+        $value = $this->server['HTTP_IF_MATCH'] ?? '';
+        return is_string($value) && strlen($value) <= self::MAX_HEADER_BYTES ? trim($value) : '';
+    }
+
+    public function idempotencyKey(): string
+    {
+        $value = $this->server['HTTP_IDEMPOTENCY_KEY'] ?? '';
+        return is_string($value) && strlen($value) <= self::MAX_HEADER_BYTES ? trim($value) : '';
+    }
+
+    public function contentType(): string
+    {
+        $value = $this->server['CONTENT_TYPE'] ?? '';
+        return is_string($value) && strlen($value) <= self::MAX_HEADER_BYTES ? $value : '';
+    }
+
+    /** Read one bounded required request body; production callers omit the override. */
+    public function requiredBody(int $maxBytes, ?string $bodyOverride = null): string
+    {
+        if ($maxBytes < 1 || $maxBytes > 1048576) {
+            throw new \RuntimeException('API request body boundary is invalid.');
+        }
+        $contentLength = $this->server['CONTENT_LENGTH'] ?? '';
+        if ($contentLength !== ''
+            && (!is_string($contentLength) || preg_match('/\A[0-9]{1,10}\z/D', $contentLength) !== 1)) {
+            throw self::invalidBody();
+        }
+        if ($contentLength !== '' && (int) $contentLength > $maxBytes) {
+            throw self::payloadTooLarge();
+        }
+        $transferEncoding = $this->server['HTTP_TRANSFER_ENCODING'] ?? '';
+        if (!is_string($transferEncoding) || trim($transferEncoding) !== '') {
+            throw self::invalidBody();
+        }
+
+        if ($bodyOverride !== null) {
+            $body = $bodyOverride;
+        } else {
+            $input = fopen('php://input', 'rb');
+            if (!is_resource($input)) {
+                throw self::invalidBody();
+            }
+            try {
+                $body = stream_get_contents($input, $maxBytes + 1);
+            } finally {
+                fclose($input);
+            }
+            if (!is_string($body)) {
+                throw self::invalidBody();
+            }
+        }
+        if (strlen($body) > $maxBytes) {
+            throw self::payloadTooLarge();
+        }
+        if ($body === '') {
+            throw new ApiHttpException(
+                400,
+                'request_body_required',
+                'A JSON request body is required.',
+                'BODY_REQUIRED',
+            );
+        }
+        if ($contentLength !== '' && (int) $contentLength !== strlen($body)) {
+            throw self::invalidBody();
+        }
+        return $body;
+    }
+
     public function assertNoBody(): void
     {
         $contentLength = $this->server['CONTENT_LENGTH'] ?? '';
@@ -199,6 +269,16 @@ final class ApiHttpRequest
     private static function requestBodyRejected(): ApiHttpException
     {
         return new ApiHttpException(400, 'request_body_not_allowed', 'Request bodies are not allowed.', 'BODY_NOT_ALLOWED');
+    }
+
+    private static function invalidBody(): ApiHttpException
+    {
+        return new ApiHttpException(400, 'invalid_request_body', 'The API request body is invalid.', 'BODY_INVALID');
+    }
+
+    private static function payloadTooLarge(): ApiHttpException
+    {
+        return new ApiHttpException(413, 'payload_too_large', 'The API request body is too large.', 'BODY_TOO_LARGE');
     }
 
     private static function requestTargetTooLarge(): ApiHttpException

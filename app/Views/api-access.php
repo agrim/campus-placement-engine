@@ -7,8 +7,8 @@ ob_start();
 ?>
 <section class="panel">
   <h1>API identity controls</h1>
-  <p>Create institution-local service accounts and short-lived access tokens for the future read-only API.</p>
-  <p class="muted">This phase exposes no <code>/api/v1</code> resource. The supported public integration contract remains event-only until a separately reviewed API contract ships.</p>
+  <p>Create institution-local service accounts and short-lived access tokens for API v1.</p>
+  <p class="muted">API v1 can read opportunities and applications and apply one controlled application status transition. Candidate data and all other changes remain unavailable. Cloud does not proxy this traffic.</p>
 </section>
 
 <?php if ($revealedToken !== null): ?>
@@ -33,7 +33,7 @@ ob_start();
   <?php else: ?>
     <form method="post" action="<?= h(url('api-enable')) ?>">
       <?= Csrf::input() ?>
-      <button type="submit">Enable identity controls</button>
+      <button type="submit">Enable API access</button>
     </form>
   <?php endif; ?>
 </section>

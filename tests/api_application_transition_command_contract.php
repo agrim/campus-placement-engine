@@ -27,15 +27,23 @@ define('CPE_SKIP_HTTP_BOOTSTRAP', true);
 require $projectRoot . '/app/bootstrap.php';
 require $projectRoot . '/tests/authorized_setup_recovery_fixture.php';
 
+use App\Api\Commands\ApiApplicationTransitionCommandService;
+use App\Api\Commands\ApiApplicationTransitionInput;
 use App\Api\Commands\ApiCommandConflict;
 use App\Api\Commands\ApiCommandHasher;
 use App\Api\Commands\ApiCommandIdempotencyStore;
 use App\Api\Commands\ApiCommandUnavailable;
 use App\Api\Commands\InvalidApiCommandInput;
+use App\Api\Http\ApiHttpException;
+use App\Api\Http\ApiReadService;
+use App\Api\Http\ApiRepresentationEtag;
+use App\Api\Http\ApiStorageUnavailable;
 use App\Api\Operations\ApiRetentionService;
 use App\Api\Security\ApiKeyring;
 use App\Api\Security\ApiScopePolicy;
 use App\Api\Security\ApiServiceAccountService;
+use App\Api\Security\ApiPrincipal;
+use App\Core\Http\UserVisibleException;
 use App\Core\Persistence\WriteTransaction;
 use App\Install\Installer;
 use App\Support\Database;
@@ -92,12 +100,19 @@ function api_command_application(PDO $pdo): array
     $row = $pdo->query(
         'SELECT application.id, application.public_id, application.candidate_id, application.company_id,
                 instance.id AS workflow_instance_id, instance.workflow_version_id,
-                instance.current_state_key
+                instance.current_state_key, transition.transition_key,
+                transition.to_state_key AS transition_target
          FROM applications application
          JOIN placement_cycle_participants participant ON participant.id = application.participant_id
          JOIN placement_cycles cycle ON cycle.id = participant.cycle_id
          JOIN workflow_instances instance ON instance.application_id = application.id
+         JOIN workflow_transitions transition
+           ON transition.workflow_version_id = instance.workflow_version_id
+          AND transition.from_state_key = instance.current_state_key
+          AND transition.is_correction = 0
+          AND transition.required_capability = \'placement.application.transition\'
          WHERE cycle.institution_id = (SELECT id FROM institutions WHERE slug = \'default\')
+           AND application.opportunity_id IS NOT NULL
          ORDER BY application.id LIMIT 1',
     )->fetch(PDO::FETCH_ASSOC);
     if (!is_array($row)) {
@@ -173,6 +188,131 @@ function api_command_other_institution(PDO $pdo, int $actorUserId): array
     ];
 }
 
+function api_command_restore_cross_application_projection(PDO $pdo): void
+{
+    $now = cpe_now();
+    $institutionId = (int) $pdo->query(
+        "SELECT id FROM institutions WHERE slug = 'api-command-other'",
+    )->fetchColumn();
+    $cycleId = (int) $pdo->query(
+        "SELECT id FROM placement_cycles WHERE institution_id = {$institutionId} ORDER BY id LIMIT 1",
+    )->fetchColumn();
+    $participantId = (int) $pdo->query(
+        "SELECT id FROM placement_cycle_participants
+         WHERE public_id = 'participant_" . str_repeat('9', 32) . "'",
+    )->fetchColumn();
+    $applicationId = (int) $pdo->query(
+        "SELECT id FROM applications WHERE public_id = 'application_" . str_repeat('9', 32) . "'",
+    )->fetchColumn();
+    $companyId = (int) $pdo->query(
+        "SELECT company_id FROM applications WHERE id = {$applicationId}",
+    )->fetchColumn();
+    if (min($institutionId, $cycleId, $participantId, $applicationId, $companyId) < 1) {
+        throw new RuntimeException('Could not restore the cross-institution command fixture.');
+    }
+    $pdo->prepare(
+        'INSERT INTO organizations
+         (public_id, institution_id, legacy_company_id, code, name, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)',
+    )->execute([
+        'organization_' . str_repeat('8', 32),
+        $institutionId,
+        null,
+        'OTHER-COMMAND-ORG',
+        'Other command organization',
+        $now,
+        $now,
+    ]);
+    $organizationId = Database::lastInsertId($pdo);
+    $pdo->prepare(
+        'INSERT INTO placement_opportunities
+         (public_id, cycle_id, organization_id, legacy_company_id, opportunity_key,
+          title, status, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+    )->execute([
+        'opportunity_' . str_repeat('8', 32),
+        $cycleId,
+        $organizationId,
+        null,
+        'other-command',
+        'Other command opportunity',
+        'open',
+        $now,
+        $now,
+    ]);
+    $opportunityId = Database::lastInsertId($pdo);
+    $pdo->prepare(
+        'UPDATE applications SET participant_id = ?, opportunity_id = ?, updated_at = ? WHERE id = ?',
+    )->execute([$participantId, $opportunityId, $now, $applicationId]);
+}
+
+/** @return array{status: string, version: int, events: int, workflow: int, outbox: int, audits: int} */
+function api_command_transition_evidence(PDO $pdo, int $applicationId): array
+{
+    $application = $pdo->prepare(
+        'SELECT current_status, aggregate_version FROM applications WHERE id = ?',
+    );
+    $application->execute([$applicationId]);
+    $row = $application->fetch(PDO::FETCH_ASSOC);
+    if (!is_array($row)) {
+        throw new RuntimeException('API command evidence application is missing.');
+    }
+    $count = static function (string $sql) use ($pdo, $applicationId): int {
+        $query = $pdo->prepare($sql);
+        $query->execute([$applicationId]);
+        return (int) $query->fetchColumn();
+    };
+    return [
+        'status' => (string) $row['current_status'],
+        'version' => (int) $row['aggregate_version'],
+        'events' => $count('SELECT COUNT(*) FROM events WHERE application_id = ?'),
+        'workflow' => $count('SELECT COUNT(*) FROM workflow_transition_events WHERE application_id = ?'),
+        'outbox' => $count(
+            "SELECT COUNT(*) FROM domain_event_outbox event
+             JOIN applications application ON application.public_id = event.aggregate_public_id
+             WHERE application.id = ? AND event.event_name = 'placement.application.transitioned'",
+        ),
+        'audits' => $count(
+            "SELECT COUNT(*) FROM audit_logs
+             WHERE action = 'transition' AND subject_type = 'application' AND subject_id = ?",
+        ),
+    ];
+}
+
+function api_command_install_completion_failure(PDO $pdo, bool $postgres): void
+{
+    if ($postgres) {
+        $pdo->exec(
+            "CREATE FUNCTION cpe_api_command_completion_fail() RETURNS trigger LANGUAGE plpgsql AS $$
+             BEGIN RAISE EXCEPTION 'synthetic API command completion failure'; END;
+             $$",
+        );
+        $pdo->exec(
+            "CREATE TRIGGER cpe_api_command_completion_fail
+             BEFORE UPDATE ON api_command_idempotency_keys
+             FOR EACH ROW WHEN (NEW.lifecycle_state = 'completed')
+             EXECUTE FUNCTION cpe_api_command_completion_fail()",
+        );
+        return;
+    }
+    $pdo->exec(
+        "CREATE TRIGGER cpe_api_command_completion_fail
+         BEFORE UPDATE ON api_command_idempotency_keys
+         WHEN NEW.lifecycle_state = 'completed'
+         BEGIN SELECT RAISE(ABORT, 'synthetic API command completion failure'); END",
+    );
+}
+
+function api_command_drop_completion_failure(PDO $pdo, bool $postgres): void
+{
+    if ($postgres) {
+        $pdo->exec('DROP TRIGGER cpe_api_command_completion_fail ON api_command_idempotency_keys');
+        $pdo->exec('DROP FUNCTION cpe_api_command_completion_fail()');
+        return;
+    }
+    $pdo->exec('DROP TRIGGER cpe_api_command_completion_fail');
+}
+
 try {
     Database::migrate();
     $institutionPublicId = 'tenant_' . str_repeat('7', 32);
@@ -195,8 +335,16 @@ try {
 
     $keyring = ApiKeyring::fromEnvironment();
     $accountService = new ApiServiceAccountService($pdo, $keyring);
-    $firstAccount = $accountService->create('Transition connector one', ['applications.read'], 1);
-    $secondAccount = $accountService->create('Transition connector two', ['applications.read'], 1);
+    $firstAccount = $accountService->create(
+        'Transition connector one',
+        ['applications.read', 'applications.transition'],
+        1,
+    );
+    $secondAccount = $accountService->create(
+        'Transition connector two',
+        ['applications.read', 'applications.transition'],
+        1,
+    );
     $accountIdQuery = $pdo->prepare('SELECT id FROM api_service_accounts WHERE public_id = ?');
     $accountIdQuery->execute([$firstAccount['service_account_id']]);
     $firstAccountId = (int) $accountIdQuery->fetchColumn();
@@ -216,13 +364,18 @@ try {
     $sameInstitutionApplicationId = (int) $sameInstitutionApplication->fetchColumn();
     api_command_assert($sameInstitutionApplicationId > 0, 'API command fixture has no second same-institution application.');
 
-    $pdo->prepare(
-        'INSERT INTO api_service_account_scopes
-         (service_account_id, scope, created_by_user_id, created_at) VALUES (?, ?, ?, ?)',
-    )->execute([$firstAccountId, 'applications.transition', 1, cpe_now()]);
     api_command_assert(
-        !in_array('applications.transition', ApiScopePolicy::supportedScopes(), true),
-        'Phase 4B prematurely advertised the transition scope in runtime policy.',
+        in_array('applications.transition', ApiScopePolicy::supportedScopes(), true),
+        'Phase 4C did not advertise the exact transition scope in runtime policy.',
+    );
+    $createdScopes = $pdo->prepare(
+        'SELECT scope FROM api_service_account_scopes WHERE service_account_id = ? ORDER BY scope',
+    );
+    $createdScopes->execute([$firstAccountId]);
+    api_command_same(
+        ['applications.read', 'applications.transition'],
+        array_map('strval', $createdScopes->fetchAll(PDO::FETCH_COLUMN)),
+        'Service-account provisioning did not retain the exact command scope.',
     );
     api_command_rejects(
         static fn (): bool => $pdo->prepare(
@@ -574,6 +727,342 @@ try {
         static fn () => WriteTransaction::run($pdo, static fn () => $store->reserve($firstAccountId, $pendingFingerprint)),
         'Committed pending command row was treated as permission to retry.',
         ApiCommandUnavailable::class,
+    );
+
+    $tokenRecord = $pdo->prepare(
+        'SELECT id, lookup_id FROM api_access_tokens WHERE lookup_id = ?',
+    );
+    $tokenRecord->execute([$firstAccount['token_lookup_id']]);
+    $firstToken = $tokenRecord->fetch(PDO::FETCH_ASSOC);
+    $tokenRecord->execute([$secondAccount['token_lookup_id']]);
+    $secondToken = $tokenRecord->fetch(PDO::FETCH_ASSOC);
+    api_command_assert(is_array($firstToken) && is_array($secondToken), 'API command principal token fixtures are missing.');
+    $firstPrincipal = new ApiPrincipal(
+        $defaultInstitutionId = (int) $pdo->query(
+            "SELECT id FROM institutions WHERE slug = 'default'",
+        )->fetchColumn(),
+        $institutionPublicId,
+        $firstAccountId,
+        $firstAccount['service_account_id'],
+        (int) $firstToken['id'],
+        (string) $firstToken['lookup_id'],
+        ['applications.read', 'applications.transition'],
+    );
+    $secondPrincipal = new ApiPrincipal(
+        $defaultInstitutionId,
+        $institutionPublicId,
+        $secondAccountId,
+        $secondAccount['service_account_id'],
+        (int) $secondToken['id'],
+        (string) $secondToken['lookup_id'],
+        ['applications.read', 'applications.transition'],
+    );
+    $readService = new ApiReadService($pdo, $keyring);
+    $initialTarget = WriteTransaction::run(
+        $pdo,
+        static fn () => $readService->applicationForTransition((string) $application['public_id']),
+    );
+    api_command_assert(is_array($initialTarget), 'API command public transition target is unavailable.');
+    api_command_same(
+        ApiRepresentationEtag::forRepresentation($initialTarget['item']),
+        $initialTarget['etag'],
+        'GET and command application ETag calculations differ.',
+    );
+    $endpointClearKey = str_repeat('0', 32);
+    $endpointInput = new ApiApplicationTransitionInput(
+        (string) $application['transition_key'],
+        (string) $application['transition_target'],
+        'controlled service transition',
+        $endpointClearKey,
+        $initialTarget['etag'],
+    );
+    $endpointBefore = api_command_transition_evidence($pdo, (int) $application['id']);
+    $endpoint = new ApiApplicationTransitionCommandService($pdo, $keyring);
+    $endpointRequestId = 'req_' . str_repeat('8', 32);
+    $freshOutcome = $endpoint->execute(
+        $firstPrincipal,
+        (string) $application['public_id'],
+        $endpointInput,
+        $endpointRequestId,
+    );
+    api_command_assert(!$freshOutcome->isReplay(), 'Fresh API transition was marked as replay.');
+    api_command_same($endpointRequestId, $freshOutcome->responseRequestId(), 'Fresh command request ID changed.');
+    $freshPayload = json_decode($freshOutcome->responseJson(), true, 8, JSON_THROW_ON_ERROR);
+    api_command_same($endpointRequestId, $freshPayload['meta']['request_id'] ?? null, 'Stored command response request ID differs.');
+    api_command_same(
+        (string) $application['transition_target'],
+        $freshPayload['data']['status'] ?? null,
+        'Command response did not return the transitioned public status.',
+    );
+    api_command_same(
+        $freshOutcome->etag(),
+        ApiRepresentationEtag::forRepresentation($freshPayload['data']),
+        'Stored command ETag is not derived from the normal public application representation.',
+    );
+    $publicAfter = $readService->item('applications', (string) $application['public_id']);
+    api_command_assert(is_array($publicAfter), 'Transitioned application disappeared from the public read projection.');
+    api_command_same(
+        ApiCommandHasher::canonicalObject($freshPayload['data']),
+        ApiCommandHasher::canonicalObject($publicAfter),
+        'Command and GET application representations differ.',
+    );
+    api_command_same(
+        $freshOutcome->etag(),
+        ApiRepresentationEtag::forRepresentation($publicAfter),
+        'Command and GET application ETags differ after mutation.',
+    );
+    $endpointAfter = api_command_transition_evidence($pdo, (int) $application['id']);
+    api_command_same((string) $application['transition_target'], $endpointAfter['status'], 'Command status was not committed.');
+    api_command_same($endpointBefore['version'] + 1, $endpointAfter['version'], 'Command aggregate version increment differs.');
+    foreach (['events', 'workflow', 'outbox', 'audits'] as $evidenceKey) {
+        api_command_same(
+            $endpointBefore[$evidenceKey] + 1,
+            $endpointAfter[$evidenceKey],
+            'Command domain evidence count differs for ' . $evidenceKey . '.',
+        );
+    }
+    foreach (['events', 'workflow_transition_events'] as $table) {
+        $actorRow = $pdo->prepare(
+            "SELECT actor_user_id, actor_service_account_id, actor_role
+             FROM {$table} WHERE application_id = ? ORDER BY id DESC LIMIT 1",
+        );
+        $actorRow->execute([(int) $application['id']]);
+        api_command_same(
+            [
+                'actor_user_id' => null,
+                'actor_service_account_id' => $firstAccountId,
+                'actor_role' => 'service_account',
+            ],
+            $actorRow->fetch(PDO::FETCH_ASSOC),
+            'Command actor attribution differs in ' . $table . '.',
+        );
+    }
+    $auditActor = $pdo->prepare(
+        "SELECT actor_user_id, actor_service_account_id
+         FROM audit_logs WHERE action = 'transition' AND subject_type = 'application'
+           AND subject_id = ? ORDER BY id DESC LIMIT 1",
+    );
+    $auditActor->execute([(int) $application['id']]);
+    api_command_same(
+        ['actor_user_id' => null, 'actor_service_account_id' => $firstAccountId],
+        $auditActor->fetch(PDO::FETCH_ASSOC),
+        'Command audit lost exclusive service-account attribution.',
+    );
+    $browserIdempotency = $pdo->prepare('SELECT COUNT(*) FROM idempotency_keys WHERE key = ?');
+    $browserIdempotency->execute([$endpointClearKey]);
+    api_command_same(0, (int) $browserIdempotency->fetchColumn(), 'API command wrote browser form idempotency state.');
+
+    $replayOutcome = $endpoint->execute(
+        $firstPrincipal,
+        (string) $application['public_id'],
+        $endpointInput,
+        'req_' . str_repeat('9', 32),
+    );
+    api_command_assert($replayOutcome->isReplay(), 'Identical endpoint retry was not an exact replay.');
+    api_command_same($freshOutcome->responseJson(), $replayOutcome->responseJson(), 'Endpoint replay body changed.');
+    api_command_same($freshOutcome->etag(), $replayOutcome->etag(), 'Endpoint replay ETag changed.');
+    api_command_same($endpointRequestId, $replayOutcome->responseRequestId(), 'Endpoint replay did not retain the original request ID.');
+    api_command_same(
+        $endpointAfter,
+        api_command_transition_evidence($pdo, (int) $application['id']),
+        'Endpoint replay repeated domain mutation evidence.',
+    );
+
+    $changedEndpoint = api_command_rejects(
+        static fn () => $endpoint->execute(
+            $firstPrincipal,
+            (string) $application['public_id'],
+            new ApiApplicationTransitionInput(
+                (string) $application['transition_key'],
+                (string) $application['transition_target'],
+                'changed request',
+                $endpointClearKey,
+                $initialTarget['etag'],
+            ),
+            'req_' . str_repeat('a', 32),
+        ),
+        'Endpoint accepted the same key with a changed request.',
+        ApiCommandConflict::class,
+    );
+    api_command_same(ApiCommandConflict::REQUEST, $changedEndpoint->reason(), 'Endpoint changed-request conflict differs.');
+    $changedAccount = api_command_rejects(
+        static fn () => $endpoint->execute(
+            $secondPrincipal,
+            (string) $application['public_id'],
+            $endpointInput,
+            'req_' . str_repeat('b', 32),
+        ),
+        'Endpoint accepted the same key under another account.',
+        ApiCommandConflict::class,
+    );
+    api_command_same(ApiCommandConflict::ACCOUNT, $changedAccount->reason(), 'Endpoint changed-account conflict differs.');
+
+    $commandRowCount = (int) $pdo->query('SELECT COUNT(*) FROM api_command_idempotency_keys')->fetchColumn();
+    $stale = api_command_rejects(
+        static fn () => $endpoint->execute(
+            $firstPrincipal,
+            (string) $application['public_id'],
+            new ApiApplicationTransitionInput(
+                (string) $application['transition_key'],
+                (string) $application['transition_target'],
+                '',
+                str_repeat('1', 32),
+                $initialTarget['etag'],
+            ),
+            'req_' . str_repeat('c', 32),
+        ),
+        'Endpoint accepted a stale application precondition.',
+        ApiHttpException::class,
+    );
+    api_command_same(409, $stale->status(), 'Stale endpoint precondition status differs.');
+    api_command_same(
+        $commandRowCount,
+        (int) $pdo->query('SELECT COUNT(*) FROM api_command_idempotency_keys')->fetchColumn(),
+        'Stale endpoint precondition retained a pending reservation.',
+    );
+
+    api_command_restore_cross_application_projection($pdo);
+    foreach (['application_bad', 'application_' . str_repeat('9', 32)] as $missingPublicId) {
+        if ($missingPublicId !== 'application_bad') {
+            api_command_same(
+                null,
+                $readService->item('applications', $missingPublicId),
+                'Cross-institution application entered the public read projection.',
+            );
+        }
+        $missing = api_command_rejects(
+            static fn () => $endpoint->execute(
+                $firstPrincipal,
+                $missingPublicId,
+                new ApiApplicationTransitionInput(
+                    'advance',
+                    'applied',
+                    '',
+                    $missingPublicId === 'application_bad' ? str_repeat('3', 32) : str_repeat('4', 32),
+                    '"' . str_repeat('1', 64) . '"',
+                ),
+                'req_' . str_repeat('d', 32),
+            ),
+            'Endpoint exposed a malformed or cross-institution application.',
+            ApiHttpException::class,
+        );
+        api_command_same(404, $missing->status(), 'Endpoint missing-resource status differs for ' . $missingPublicId . '.');
+    }
+
+    $currentTarget = WriteTransaction::run(
+        $pdo,
+        static fn () => $readService->applicationForTransition((string) $application['public_id']),
+    );
+    api_command_assert(is_array($currentTarget), 'Current endpoint target is unavailable.');
+    $correction = $pdo->prepare(
+        'SELECT transition_key, to_state_key FROM workflow_transitions
+         WHERE workflow_version_id = ? AND from_state_key = ? AND is_correction = 1
+         ORDER BY id LIMIT 1',
+    );
+    $correction->execute([(int) $application['workflow_version_id'], $currentTarget['current_status']]);
+    $correctionRow = $correction->fetch(PDO::FETCH_ASSOC);
+    api_command_assert(is_array($correctionRow), 'Endpoint fixture has no correction transition.');
+    $domainBefore = api_command_transition_evidence($pdo, (int) $application['id']);
+    $domainDenied = api_command_rejects(
+        static fn () => $endpoint->execute(
+            $firstPrincipal,
+            (string) $application['public_id'],
+            new ApiApplicationTransitionInput(
+                (string) $correctionRow['transition_key'],
+                (string) $correctionRow['to_state_key'],
+                '',
+                str_repeat('2', 32),
+                $currentTarget['etag'],
+            ),
+            'req_' . str_repeat('e', 32),
+        ),
+        'Endpoint allowed a correction transition.',
+        UserVisibleException::class,
+    );
+    api_command_same('WORKFLOW_TRANSITION_UNAVAILABLE', $domainDenied->publicCode(), 'Correction denial code differs.');
+    api_command_same($domainBefore, api_command_transition_evidence($pdo, (int) $application['id']), 'Domain denial retained mutation evidence.');
+
+    $pdo->prepare(
+        "UPDATE api_service_accounts SET status = 'disabled', disabled_at = ?, updated_at = ? WHERE id = ?",
+    )->execute([cpe_now(), cpe_now(), $firstAccountId]);
+    $authorizationDenied = api_command_rejects(
+        static fn () => $endpoint->execute(
+            $firstPrincipal,
+            (string) $application['public_id'],
+            new ApiApplicationTransitionInput(
+                'advance',
+                'applied',
+                '',
+                str_repeat('6', 32),
+                $currentTarget['etag'],
+            ),
+            'req_' . str_repeat('f', 32),
+        ),
+        'Disabled service account reached the command store.',
+        UserVisibleException::class,
+    );
+    api_command_same(
+        'API_APPLICATION_TRANSITION_FORBIDDEN',
+        $authorizationDenied->publicCode(),
+        'Disabled service-account command denial differs.',
+    );
+    $pdo->prepare(
+        "UPDATE api_service_accounts SET status = 'enabled', disabled_at = NULL, updated_at = ? WHERE id = ?",
+    )->execute([cpe_now(), $firstAccountId]);
+
+    $rollbackTargetQuery = $pdo->prepare(
+        'SELECT application.id, application.public_id, transition.transition_key,
+                transition.to_state_key
+         FROM applications application
+         JOIN placement_cycle_participants participant ON participant.id = application.participant_id
+         JOIN placement_cycles cycle ON cycle.id = participant.cycle_id
+         JOIN workflow_instances instance ON instance.application_id = application.id
+         JOIN workflow_transitions transition
+           ON transition.workflow_version_id = instance.workflow_version_id
+          AND transition.from_state_key = application.current_status
+          AND transition.is_correction = 0
+          AND transition.required_capability = ?
+         WHERE cycle.institution_id = ? AND application.opportunity_id IS NOT NULL
+           AND application.id <> ? ORDER BY application.id LIMIT 1',
+    );
+    $rollbackTargetQuery->execute([
+        'placement.application.transition',
+        $defaultInstitutionId,
+        (int) $application['id'],
+    ]);
+    $rollbackTarget = $rollbackTargetQuery->fetch(PDO::FETCH_ASSOC);
+    api_command_assert(is_array($rollbackTarget), 'Endpoint fixture has no rollback target.');
+    $rollbackProjection = WriteTransaction::run(
+        $pdo,
+        static fn () => $readService->applicationForTransition((string) $rollbackTarget['public_id']),
+    );
+    api_command_assert(is_array($rollbackProjection), 'Endpoint rollback projection is unavailable.');
+    $rollbackEvidence = api_command_transition_evidence($pdo, (int) $rollbackTarget['id']);
+    api_command_install_completion_failure($pdo, $postgres);
+    try {
+        api_command_rejects(
+            static fn () => $endpoint->execute(
+                $firstPrincipal,
+                (string) $rollbackTarget['public_id'],
+                new ApiApplicationTransitionInput(
+                    (string) $rollbackTarget['transition_key'],
+                    (string) $rollbackTarget['to_state_key'],
+                    'must roll back',
+                    str_repeat('7', 32),
+                    $rollbackProjection['etag'],
+                ),
+                'req_' . str_repeat('7', 32),
+            ),
+            'Completion-storage failure did not fail the endpoint.',
+            ApiStorageUnavailable::class,
+        );
+    } finally {
+        api_command_drop_completion_failure($pdo, $postgres);
+    }
+    api_command_same(
+        $rollbackEvidence,
+        api_command_transition_evidence($pdo, (int) $rollbackTarget['id']),
+        'Completion-storage failure retained state, event, audit, or outbox evidence.',
     );
 
     $tableRows = json_encode(

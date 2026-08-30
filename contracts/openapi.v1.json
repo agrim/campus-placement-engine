@@ -2,9 +2,9 @@
   "openapi": "3.1.0",
   "jsonSchemaDialect": "https://json-schema.org/draft/2020-12/schema",
   "info": {
-    "title": "Campus Placement Engine read API",
+    "title": "Campus Placement Engine API",
     "version": "1.0.0",
-    "description": "Institution-local, read-only API v1. Cloud does not proxy this API."
+    "description": "Institution-local API v1 with governed reads and one controlled application-transition command. Cloud does not proxy this API."
   },
   "servers": [
     { "url": "/", "description": "The institution's own Engine origin" }
@@ -267,6 +267,59 @@
           "503": { "$ref": "#/components/responses/HeadUnavailable" }
         }
       }
+    },
+    "/api/v1/applications/{public_id}/transitions": {
+      "parameters": [
+        { "$ref": "#/components/parameters/ApplicationPublicId" }
+      ],
+      "post": {
+        "operationId": "transitionApiV1Application",
+        "tags": ["applications"],
+        "summary": "Apply one ordinary application status transition",
+        "description": "Uses the same transition policy and effects as the browser board. Corrections are unavailable. A completed idempotent replay returns the originally committed body, ETag, status, and X-Request-ID. Request-audit telemetry is attempted after commit and cannot replace an already committed command response.",
+        "parameters": [
+          { "$ref": "#/components/parameters/IdempotencyKey" },
+          { "$ref": "#/components/parameters/IfMatch" }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "schemas/api-v1-application-transition-request.schema.json" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "Committed transition result or exact completed replay",
+            "headers": {
+              "X-Request-ID": { "$ref": "#/components/headers/RequestId" },
+              "ETag": { "$ref": "#/components/headers/EntityTag" }
+            },
+            "content": {
+              "application/json": {
+                "schema": { "$ref": "schemas/api-v1-application-item.schema.json" }
+              }
+            }
+          },
+          "400": { "$ref": "#/components/responses/BadRequest" },
+          "401": { "$ref": "#/components/responses/Unauthorized" },
+          "403": { "$ref": "#/components/responses/Forbidden" },
+          "404": { "$ref": "#/components/responses/NotFound" },
+          "409": { "$ref": "#/components/responses/Conflict" },
+          "413": { "$ref": "#/components/responses/ContentTooLarge" },
+          "414": { "$ref": "#/components/responses/RequestTargetTooLarge" },
+          "415": { "$ref": "#/components/responses/UnsupportedMediaType" },
+          "422": { "$ref": "#/components/responses/UnprocessableContent" },
+          "428": { "$ref": "#/components/responses/PreconditionRequired" },
+          "429": { "$ref": "#/components/responses/RateLimited" },
+          "431": { "$ref": "#/components/responses/RequestHeadersTooLarge" },
+          "500": { "$ref": "#/components/responses/InternalError" },
+          "503": { "$ref": "#/components/responses/Unavailable" }
+        },
+        "x-cpe-required-scope": "applications.transition",
+        "x-cpe-idempotency-horizon-hours": 48
+      }
     }
   },
   "components": {
@@ -332,6 +385,20 @@
         "in": "header",
         "required": false,
         "schema": { "type": "string", "maxLength": 4096 }
+      },
+      "IdempotencyKey": {
+        "name": "Idempotency-Key",
+        "in": "header",
+        "required": true,
+        "description": "One memory-only clear retry key. Engine stores only its keyed hash for 48 hours.",
+        "schema": { "type": "string", "pattern": "^[a-f0-9]{32,64}$" }
+      },
+      "IfMatch": {
+        "name": "If-Match",
+        "in": "header",
+        "required": true,
+        "description": "The exact strong ETag returned by GET for the current application representation.",
+        "schema": { "type": "string", "pattern": "^\\\"[a-f0-9]{64}\\\"$" }
       }
     },
     "responses": {
@@ -339,7 +406,12 @@
       "Unauthorized": { "$ref": "#/components/responses/Error401" },
       "Forbidden": { "$ref": "#/components/responses/Error403" },
       "NotFound": { "$ref": "#/components/responses/Error404" },
+      "Conflict": { "$ref": "#/components/responses/Error409" },
+      "ContentTooLarge": { "$ref": "#/components/responses/Error413" },
       "RequestTargetTooLarge": { "$ref": "#/components/responses/Error414" },
+      "UnsupportedMediaType": { "$ref": "#/components/responses/Error415" },
+      "UnprocessableContent": { "$ref": "#/components/responses/Error422" },
+      "PreconditionRequired": { "$ref": "#/components/responses/Error428" },
       "RateLimited": { "$ref": "#/components/responses/Error429" },
       "RequestHeadersTooLarge": { "$ref": "#/components/responses/Error431" },
       "InternalError": { "$ref": "#/components/responses/Error500" },
@@ -358,7 +430,7 @@
         "content": { "application/json": { "schema": { "$ref": "schemas/api-v1-error.schema.json" } } }
       },
       "Error403": {
-        "description": "The exact required read scope is absent or unavailable by policy",
+        "description": "The exact required scope or enabled Placement policy is absent",
         "headers": { "X-Request-ID": { "$ref": "#/components/headers/RequestId" } },
         "content": { "application/json": { "schema": { "$ref": "schemas/api-v1-error.schema.json" } } }
       },
@@ -367,8 +439,33 @@
         "headers": { "X-Request-ID": { "$ref": "#/components/headers/RequestId" } },
         "content": { "application/json": { "schema": { "$ref": "schemas/api-v1-error.schema.json" } } }
       },
+      "Error409": {
+        "description": "Idempotency conflict, stale precondition, concurrent mutation, or invalid concurrent transition",
+        "headers": { "X-Request-ID": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "schemas/api-v1-error.schema.json" } } }
+      },
+      "Error413": {
+        "description": "Request body is too large",
+        "headers": { "X-Request-ID": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "schemas/api-v1-error.schema.json" } } }
+      },
       "Error414": {
         "description": "Request target is too large",
+        "headers": { "X-Request-ID": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "schemas/api-v1-error.schema.json" } } }
+      },
+      "Error415": {
+        "description": "Content-Type is not exactly application/json",
+        "headers": { "X-Request-ID": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "schemas/api-v1-error.schema.json" } } }
+      },
+      "Error422": {
+        "description": "The named ordinary transition is not allowed by current domain policy",
+        "headers": { "X-Request-ID": { "$ref": "#/components/headers/RequestId" } },
+        "content": { "application/json": { "schema": { "$ref": "schemas/api-v1-error.schema.json" } } }
+      },
+      "Error428": {
+        "description": "A strong If-Match precondition is required",
         "headers": { "X-Request-ID": { "$ref": "#/components/headers/RequestId" } },
         "content": { "application/json": { "schema": { "$ref": "schemas/api-v1-error.schema.json" } } }
       },
@@ -433,6 +530,8 @@
     "opportunity_collection": "examples/api-v1-opportunity-collection.json",
     "application_item": "examples/api-v1-application-item.json",
     "application_collection": "examples/api-v1-application-collection.json",
+    "application_transition_request": "examples/api-v1-application-transition-request.json",
+    "application_transition_response": "examples/api-v1-application-transition-response.json",
     "error": "examples/api-v1-error.json"
   }
 }

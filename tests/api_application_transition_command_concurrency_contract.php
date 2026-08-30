@@ -27,6 +27,8 @@ require $projectRoot . '/tests/authorized_setup_recovery_fixture.php';
 
 use App\Api\Security\ApiKeyring;
 use App\Api\Security\ApiServiceAccountService;
+use App\Api\Http\ApiReadService;
+use App\Core\Persistence\WriteTransaction;
 use App\Install\Installer;
 use App\Support\Database;
 
@@ -138,6 +140,40 @@ function api_command_race_remove_tree(string $path): void
     rmdir($path);
 }
 
+/** @return array{status: string, version: int, events: int, workflow: int, outbox: int, audits: int} */
+function api_command_race_evidence(PDO $pdo, int $applicationId): array
+{
+    $application = $pdo->prepare('SELECT current_status, aggregate_version FROM applications WHERE id = ?');
+    $application->execute([$applicationId]);
+    $row = $application->fetch(PDO::FETCH_ASSOC);
+    $application->closeCursor();
+    if (!is_array($row)) {
+        throw new RuntimeException('API transition race application is missing.');
+    }
+    $count = static function (string $sql) use ($pdo, $applicationId): int {
+        $query = $pdo->prepare($sql);
+        $query->execute([$applicationId]);
+        $value = (int) $query->fetchColumn();
+        $query->closeCursor();
+        return $value;
+    };
+    return [
+        'status' => (string) $row['current_status'],
+        'version' => (int) $row['aggregate_version'],
+        'events' => $count('SELECT COUNT(*) FROM events WHERE application_id = ?'),
+        'workflow' => $count('SELECT COUNT(*) FROM workflow_transition_events WHERE application_id = ?'),
+        'outbox' => $count(
+            "SELECT COUNT(*) FROM domain_event_outbox event
+             JOIN applications application ON application.public_id = event.aggregate_public_id
+             WHERE application.id = ? AND event.event_name = 'placement.application.transitioned'",
+        ),
+        'audits' => $count(
+            "SELECT COUNT(*) FROM audit_logs
+             WHERE action = 'transition' AND subject_type = 'application' AND subject_id = ?",
+        ),
+    ];
+}
+
 $workers = [];
 try {
     Database::migrate();
@@ -152,18 +188,27 @@ try {
     ], $institutionPublicId, test_authorized_setup_recovery_authority());
     $pdo = Database::connection();
     $created = (new ApiServiceAccountService($pdo, ApiKeyring::fromEnvironment()))
-        ->create('Concurrent transition connector', ['applications.read'], 1);
+        ->create('Concurrent transition connector', ['applications.read', 'applications.transition'], 1);
     $account = $pdo->prepare('SELECT id FROM api_service_accounts WHERE public_id = ?');
     $account->execute([$created['service_account_id']]);
     $accountId = (int) $account->fetchColumn();
-    $applicationPublicId = (string) $pdo->query(
-        'SELECT application.public_id
+    $account->closeCursor();
+    $applicationRow = $pdo->query(
+        "SELECT application.id, application.public_id, transition.transition_key,
+                transition.to_state_key
          FROM applications application
          JOIN placement_cycle_participants participant ON participant.id = application.participant_id
          JOIN placement_cycles cycle ON cycle.id = participant.cycle_id
-         WHERE cycle.institution_id = (SELECT id FROM institutions WHERE slug = \'default\')
-         ORDER BY application.id LIMIT 1',
-    )->fetchColumn();
+         JOIN workflow_instances instance ON instance.application_id = application.id
+         JOIN workflow_transitions transition
+           ON transition.workflow_version_id = instance.workflow_version_id
+          AND transition.from_state_key = application.current_status
+          AND transition.is_correction = 0
+          AND transition.required_capability = 'placement.application.transition'
+         WHERE cycle.institution_id = (SELECT id FROM institutions WHERE slug = 'default')
+         ORDER BY application.id LIMIT 1",
+    )->fetch(PDO::FETCH_ASSOC);
+    $applicationPublicId = is_array($applicationRow) ? (string) $applicationRow['public_id'] : '';
     api_command_race_assert($accountId > 0 && $applicationPublicId !== '', 'API command race fixture is incomplete.');
 
     $fixture = [
@@ -268,6 +313,96 @@ try {
     api_command_race_assert(
         (int) $pdo->query('SELECT COUNT(*) FROM api_command_idempotency_keys')->fetchColumn() === 2,
         'Cross-account/key-version race created duplicate command records.',
+    );
+
+    api_command_race_assert(is_array($applicationRow), 'Full API transition race fixture is unavailable.');
+    $token = $pdo->prepare('SELECT id, lookup_id FROM api_access_tokens WHERE lookup_id = ?');
+    $token->execute([$created['token_lookup_id']]);
+    $tokenRow = $token->fetch(PDO::FETCH_ASSOC);
+    $token->closeCursor();
+    api_command_race_assert(is_array($tokenRow), 'Full API transition race token fixture is unavailable.');
+    $institutionId = (int) $pdo->query(
+        "SELECT id FROM institutions WHERE slug = 'default'",
+    )->fetchColumn();
+    $keyring = ApiKeyring::fromEnvironment();
+    $transitionTarget = WriteTransaction::run(
+        $pdo,
+        static fn () => (new ApiReadService($pdo, $keyring))->applicationForTransition($applicationPublicId),
+    );
+    api_command_race_assert(is_array($transitionTarget), 'Full API transition race projection is unavailable.');
+    $transitionBefore = api_command_race_evidence($pdo, (int) $applicationRow['id']);
+    $transitionFixture = [
+        'CPE_API_COMMAND_TEST_MODE' => 'transition',
+        'CPE_API_COMMAND_TEST_ACCOUNT_ID' => $accountId,
+        'CPE_API_COMMAND_TEST_ACCOUNT_PUBLIC_ID' => $created['service_account_id'],
+        'CPE_API_COMMAND_TEST_INSTITUTION_ID' => $institutionId,
+        'CPE_API_COMMAND_TEST_INSTITUTION_PUBLIC_ID' => $institutionPublicId,
+        'CPE_API_COMMAND_TEST_TOKEN_ID' => (int) $tokenRow['id'],
+        'CPE_API_COMMAND_TEST_TOKEN_LOOKUP_ID' => (string) $tokenRow['lookup_id'],
+        'CPE_API_COMMAND_TEST_APPLICATION_PUBLIC_ID' => $applicationPublicId,
+        'CPE_API_COMMAND_TEST_TRANSITION_KEY' => (string) $applicationRow['transition_key'],
+        'CPE_API_COMMAND_TEST_TARGET_STATUS' => (string) $applicationRow['to_state_key'],
+        'CPE_API_COMMAND_TEST_IF_MATCH' => (string) $transitionTarget['etag'],
+        'CPE_API_COMMAND_TEST_KEY' => str_repeat('d', 32),
+    ];
+    Database::reset();
+    unset($pdo, $token, $transitionTarget);
+    $transitionReady = [$testRoot . '/ready-e', $testRoot . '/ready-f'];
+    $transitionStart = $testRoot . '/transition-start';
+    $workers[] = api_command_race_spawn(
+        $transitionFixture + ['CPE_API_COMMAND_TEST_REQUEST_ID' => 'req_' . str_repeat('a', 32)],
+        $transitionReady[0],
+        $transitionStart,
+    );
+    $workers[] = api_command_race_spawn(
+        $transitionFixture + ['CPE_API_COMMAND_TEST_REQUEST_ID' => 'req_' . str_repeat('b', 32)],
+        $transitionReady[1],
+        $transitionStart,
+    );
+    api_command_race_wait($transitionReady, 'full transition worker readiness');
+    if (file_put_contents($transitionStart, "start\n") === false) {
+        throw new RuntimeException('Could not publish full transition race start.');
+    }
+    $transitionResults = api_command_race_collect($workers);
+    $transitionOutcomes = array_column($transitionResults, 'outcome');
+    sort($transitionOutcomes, SORT_STRING);
+    api_command_race_assert(
+        $transitionOutcomes === ['new', 'replay'],
+        'Full same-key transition race did not serialize to one mutation and one replay.',
+    );
+    api_command_race_assert(
+        count(array_unique(array_column($transitionResults, 'response_json'))) === 1
+            && count(array_unique(array_column($transitionResults, 'response_etag'))) === 1
+            && count(array_unique(array_column($transitionResults, 'response_request_id'))) === 1,
+        'Full transition race did not return one exact committed response.',
+    );
+    $pdo = Database::connection();
+    $transitionAfter = api_command_race_evidence($pdo, (int) $applicationRow['id']);
+    api_command_race_assert(
+        $transitionAfter['status'] === (string) $applicationRow['to_state_key']
+            && $transitionAfter['version'] === $transitionBefore['version'] + 1,
+        'Full transition race did not apply exactly one aggregate mutation.',
+    );
+    foreach (['events', 'workflow', 'outbox', 'audits'] as $evidence) {
+        api_command_race_assert(
+            $transitionAfter[$evidence] === $transitionBefore[$evidence] + 1,
+            'Full transition race duplicated ' . $evidence . ' evidence.',
+        );
+    }
+    $completedForAggregate = $pdo->prepare(
+        "SELECT COUNT(*) FROM api_command_idempotency_keys
+         WHERE lifecycle_state = 'completed' AND aggregate_public_id = ?",
+    );
+    $completedForAggregate->execute([$applicationPublicId]);
+    $completedForAggregateCount = (int) $completedForAggregate->fetchColumn();
+    $completedForAggregate->closeCursor();
+    api_command_race_assert(
+        $completedForAggregateCount === 3,
+        'Full transition race did not retain one additional completed command row.',
+    );
+    api_command_race_assert(
+        (int) $pdo->query("SELECT COUNT(*) FROM api_command_idempotency_keys WHERE lifecycle_state = 'pending'")->fetchColumn() === 0,
+        'Full transition race left a pending idempotency row.',
     );
 
     echo 'PASS API application transition command concurrency (' . Database::driver() . ")\n";

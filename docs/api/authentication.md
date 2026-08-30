@@ -2,11 +2,12 @@
 
 Status: public API v1 authentication and control boundary
 
-The Engine exposes the deliberately small read-only API described in
+The Engine exposes the deliberately small API described in
 `docs/api/v1.md` and `contracts/openapi.v1.json`. Service-account identity,
 exact scope grants, verifier-only tokens, rate-limit buckets, and redacted
-request audit remain institution-local. There are no command/write or candidate
-API resources.
+request audit remain institution-local. Exactly one controlled application
+transition command exists; there are no candidate or other command/write API
+resources.
 
 ## Disabled by default
 
@@ -26,11 +27,14 @@ The currently reserved exact scopes are:
 
 - `opportunities.read`
 - `applications.read`
+- `applications.transition`
 
-Both fail closed unless Placement is enabled and the durable
-`placement.records.view` capability exists. They are the complete public v1
-scope declaration and grant only the exact projections documented for their
-resources, never broad `PlacementService` access.
+The two read scopes fail closed unless Placement is enabled and the durable
+`placement.records.view` capability exists. `applications.transition` maps
+only to durable `placement.application.transition`; it does not inherit any
+browser user role or administrator wildcard. These are the complete public v1
+scope declaration and grant only the exact projections/command documented for
+their resources, never broad `PlacementService` access.
 
 ## External keyring
 
@@ -46,8 +50,8 @@ exactly 32 bytes, and the active version must name one entry. Generate keys with
 an approved cryptographic random source and keep them outside Git, the database,
 backups, portable configuration, command arguments, and application logs.
 
-Engine derives separate token-verifier, cursor, and source-fingerprint
-keys with HKDF-SHA256 domain separation. A token verifier is a 32-byte HMAC bound
+Engine derives separate token-verifier, cursor, source-fingerprint, and command
+idempotency keys with HKDF-SHA256 domain separation. A token verifier is a 32-byte HMAC bound
 to the institution public ID, clear lookup ID, and key version. The database
 stores only that verifier and its version; it never stores the random token
 secret or a reversible ciphertext. Do not reuse `CPE_WEBHOOK_ENCRYPTION_KEYS`:
@@ -87,7 +91,7 @@ management:
 php placement api-status
 php placement api-service-account-create \
   --name='Institution warehouse' \
-  --scopes=opportunities.read,applications.read \
+  --scopes=opportunities.read,applications.read,applications.transition \
   --actor-user-id=USER_ID \
   --expiry-days=90
 php placement api-service-account-list --actor-user-id=USER_ID

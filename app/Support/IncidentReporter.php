@@ -48,7 +48,8 @@ final class IncidentReporter
             'integration-secret-rotate', 'integration-validate', 'integration-activate',
             'integration-disable', 'integration-revoke', 'integration-replay',
             'api-v1-root', 'api-v1-opportunities-list', 'api-v1-opportunities-item',
-            'api-v1-applications-list', 'api-v1-applications-item', 'api-v1-unknown',
+            'api-v1-applications-list', 'api-v1-applications-item',
+            'api-v1-applications-transition', 'api-v1-unknown',
         ],
         'operation' => [
             'placement.command', 'host_resolution', 'host_bootstrap', 'collection', 'probe', 'dispatch',

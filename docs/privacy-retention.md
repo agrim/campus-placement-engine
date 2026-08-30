@@ -90,10 +90,14 @@ institution-approved retention and erasure policy.
 The public API control boundary stores service-account metadata, exact
 scope grants, clear random lookup IDs, 32-byte keyed verifiers, lifecycle
 timestamps, keyed rate-limit/source fingerprints, and fixed redacted request
-audit classifications. It never stores the token secret, raw authorization
-header, raw source address, request URL/query/body, or candidate/employer
-identity. Expired rate-limit buckets and 90-day request-audit rows are removed
-in bounded batches with `php placement api-prune --actor-user-id=USER_ID`.
+audit classifications. Transition commands add only a purpose-separated keyed
+idempotency hash, canonical request hash, aggregate public ID, lifecycle, and
+the exact canonical public response/ETag for at most 48 hours. The boundary
+never stores the clear idempotency key, token secret, raw authorization header,
+raw source address, request URL/query/body, or candidate/employer identity.
+Expired command keys, rate-limit buckets, and 90-day request-audit rows are
+removed in bounded institution-local batches with
+`php placement api-prune --actor-user-id=USER_ID`.
 Service-account and token lifecycle metadata remains until institution policy
 authorizes a separately governed deletion feature; revoke instead of deleting
 operational evidence.

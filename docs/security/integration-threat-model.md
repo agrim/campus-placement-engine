@@ -1,6 +1,6 @@
 # Integration event threat model
 
-Status: Phase 2 signed delivery plus governed read-only API v1
+Status: Phase 2 signed delivery plus governed API v1
 
 ## Assets and trust boundary
 
@@ -13,10 +13,11 @@ database. The Cloud control plane is not a placement data plane and must not
 store endpoint URLs, secrets, event payloads, delivery bodies, raw diagnostics,
 aggregate IDs, or example placement records.
 
-The public surfaces are `application.status_changed` schema 1 and the five
-GET/HEAD-only API v1 paths for opportunity/application reads. Private
-`DomainEvent` payloads, internal module observer APIs, candidate resources, and
-command/write routes remain implementation details or explicit non-goals.
+The public surfaces are `application.status_changed` schema 1, five GET/HEAD
+API v1 paths for opportunity/application reads, and one application-transition
+POST. Private `DomainEvent` payloads, internal module observer APIs, candidate
+resources, and all other command/write routes remain implementation details or
+explicit non-goals.
 
 ## Threats and controls
 
@@ -44,8 +45,12 @@ command/write routes remain implementation details or explicit non-goals.
 | Unknown API token IDs become an enumeration oracle | Strict parsing uses the same generic denial, performs a dummy HMAC for unknown or malformed lookups, and never returns account state. A missing referenced key version is an aggregate readiness failure rather than credential-specific disclosure. |
 | A broad user role or wildcard silently grants API access | API principals are service accounts, never browser users. Exact stored scopes map fail closed to an enabled Placement module and a durable capability catalog row; user-role inheritance and wildcard scope syntax are not consulted. |
 | Rotation leaves an unbounded credential overlap | Expiry is mandatory (90-day default, 365-day maximum), the previous current token receives no more than 24 hours of grace, database guards allow only one current and at most two unrevoked tokens, and concurrent rotation serializes on the account. |
-| A browser session, cookie, query token, CORS preflight, or alternate method crosses into the API | API paths are detected before session startup. Authentication accepts only exact Bearer syntax; query/cookie/session credentials are ignored, CORS headers are absent, and only GET/HEAD are registered. Errors are fixed JSON with no redirect or flash. |
+| A browser session, cookie, query token, CORS preflight, or alternate method crosses into the API | API paths are detected before session startup. Authentication accepts only exact Bearer syntax; query/cookie/session credentials are ignored, CORS headers are absent, reads accept only GET/HEAD, and only the exact transition resource accepts POST. Errors are fixed JSON with no redirect or flash. |
 | An API read crosses institution or privacy boundaries | Opportunity/application queries use explicit current-institution joins and exact public allowlists. Cross-institution IDs return the same 404 as missing rows; numeric IDs, candidate/person/contact/profile fields, notes, workflow internals, and broad PlacementService projections are never selected. |
+| A service account gains browser/admin authority through a transition | `applications.transition` maps only to durable `placement.application.transition`. Transaction-local reauthorization locks and rechecks module, institution, account, exact scope, and capability. The actor is exclusively `service_account`, has no role inheritance or freeze override, and corrections are denied. |
+| A retry, stale client, or concurrent command duplicates or overwrites a transition | A required strong application ETag binds `If-Match`; the request is canonicalized with the public aggregate and exact body. A purpose-separated keyed idempotency hash is retained for 48 hours. One transaction owns authorization, reservation, aggregate CAS, shared domain effects, attribution, public outbox evidence, and the exact replay response. Completed replay returns original bytes/ETag/request ID without another mutation. |
+| Command input becomes a storage or parser amplification channel | The route forbids query parameters and transfer encoding, requires exact JSON media type, caps the body at 16 KiB, rejects duplicate/unknown/non-string/nested fields and invalid UTF-8, and bounds every accepted string. Clear retry keys, bodies, paths, tokens, and raw sources are never persisted or logged. |
+| A post-commit request-audit failure makes a committed command look uncommitted | Domain evidence and exact replay response commit together before request audit. Success/replay request audit is best effort and cannot replace the committed 200; aggregate audit health must surface the bounded telemetry gap. All pre-command denials retain fail-closed audit behavior. |
 | A cursor is forged, replayed across a route/tenant, or expands into an unbounded export | Canonical bounded cursor payloads use a purpose-separated HMAC with explicit key version and bind institution, route/resource, normalized filter, upper snapshot, and last stable tuple. Collections default to 50 and cap at 100. |
 | Oversized or malformed input consumes unbounded work | Request targets, query strings, headers, parameter count/value lengths, cursor payloads, and bodies have fixed bounds. Unknown, duplicate, array-shaped, malformed, and incompatible parameters fail before data reads. |
 | Rate-limit or API audit state becomes a secondary personal-data store | Buckets retain keyed institution/token/source dimensions only. Request audit accepts fixed route, scope, outcome, status, and detail classes with a keyed source fingerprint; raw addresses, URLs, queries, bodies, headers, tokens, and placement identities are excluded and retention is bounded. |

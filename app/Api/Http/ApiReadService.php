@@ -6,6 +6,7 @@ namespace App\Api\Http;
 
 use App\Api\Security\ApiKeyring;
 use App\Core\Institution\InstitutionRepository;
+use App\Core\Persistence\WriteTransaction;
 use DateTimeImmutable;
 use DateTimeZone;
 use PDO;
@@ -130,6 +131,54 @@ final class ApiReadService
             return is_array($row) ? $this->mapRow($resource, $row) : null;
         } catch (Throwable $failure) {
             throw new ApiStorageUnavailable('API item storage is unavailable.', $failure);
+        }
+    }
+
+    /**
+     * Lock and project one institution-bound application for a command.
+     *
+     * @return null|array{internal_id: int, current_status: string, item: array<string, mixed>, etag: string}
+     */
+    public function applicationForTransition(string $publicId): ?array
+    {
+        if (!WriteTransaction::isActive($this->pdo)) {
+            throw new \RuntimeException('API command application reads require an active write transaction.');
+        }
+        if (preg_match('/\Aapplication_[a-f0-9]{32}\z/D', $publicId) !== 1) {
+            return null;
+        }
+        try {
+            $definition = $this->definition('applications');
+            $institution = (new InstitutionRepository($this->pdo))->current();
+            $sql = $definition['select'] . ', application.id AS internal_id '
+                . $definition['from'] . ' ' . $definition['where']
+                . ' AND application.public_id = ? LIMIT 1';
+            if ((string) $this->pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'pgsql') {
+                $sql .= ' FOR UPDATE OF application';
+            }
+            $bindings = array_fill(0, $definition['institution_bind_count'], $institution->id());
+            $bindings[] = $publicId;
+            $statement = $this->pdo->prepare($sql);
+            $statement->execute($bindings);
+            $row = $statement->fetch(PDO::FETCH_ASSOC);
+            if (!is_array($row)) {
+                return null;
+            }
+            $item = $this->mapApplication($row);
+            $internalId = (int) ($row['internal_id'] ?? 0);
+            if ($internalId < 1 || !hash_equals((string) ($row['current_status'] ?? ''), $item['status'])) {
+                throw new ApiStorageUnavailable('Application command identity is unavailable.');
+            }
+            return [
+                'internal_id' => $internalId,
+                'current_status' => $item['status'],
+                'item' => $item,
+                'etag' => ApiRepresentationEtag::forRepresentation($item),
+            ];
+        } catch (ApiStorageUnavailable $failure) {
+            throw $failure;
+        } catch (Throwable $failure) {
+            throw new ApiStorageUnavailable('API command application storage is unavailable.', $failure);
         }
     }
 
