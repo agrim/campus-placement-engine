@@ -21,7 +21,8 @@ final class IncidentReporter
     ];
 
     private const SAFE_CONTEXT_VALUES = [
-        'method' => ['GET', 'POST', 'HEAD', 'UNKNOWN'],
+        'api_request_id' => [],
+        'method' => ['GET', 'POST', 'HEAD', 'OPTIONS', 'UNKNOWN'],
         'mode' => ['readiness', 'liveness', 'environment_token', 'local'],
         'phase' => [
             'error_handler', 'uncaught', 'shutdown', 'authorization_header', 'payload_json', 'rollback',
@@ -46,6 +47,8 @@ final class IncidentReporter
             'integrations', 'integration-create', 'integration-secret-generate',
             'integration-secret-rotate', 'integration-validate', 'integration-activate',
             'integration-disable', 'integration-revoke', 'integration-replay',
+            'api-v1-root', 'api-v1-opportunities-list', 'api-v1-opportunities-item',
+            'api-v1-applications-list', 'api-v1-applications-item', 'api-v1-unknown',
         ],
         'operation' => [
             'placement.command', 'host_resolution', 'host_bootstrap', 'collection', 'probe', 'dispatch',
@@ -61,6 +64,7 @@ final class IncidentReporter
             'wanted.create', 'wanted.resolve', 'configuration.import', 'portability.import', 'privacy.erasure',
             'installation', 'database_restore.cleanup',
             'internal_event.observer',
+            'api.request',
             'webhook.create', 'webhook.secret.generate', 'webhook.secret.rotate',
             'webhook.validation', 'webhook.validate', 'webhook.activate', 'webhook.disable',
             'webhook.revoke', 'webhook.replay', 'webhook.delivery',
@@ -168,6 +172,12 @@ final class IncidentReporter
         $safe = [];
         foreach ($context as $key => $value) {
             if (!is_string($key) || !isset(self::SAFE_CONTEXT_VALUES[$key])) {
+                continue;
+            }
+            if ($key === 'api_request_id'
+                && is_string($value)
+                && preg_match('/\Areq_[a-f0-9]{32}\z/D', $value) === 1) {
+                $safe[$key] = $value;
                 continue;
             }
             if (($key === 'status' && is_int($value) && $value >= 100 && $value <= 599)) {

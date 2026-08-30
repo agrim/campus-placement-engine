@@ -2,7 +2,28 @@
 
 declare(strict_types=1);
 
-require __DIR__ . '/../app/bootstrap.php';
+$cpeRequestUri = $_SERVER['REQUEST_URI'] ?? '';
+$cpeRequestPath = is_string($cpeRequestUri) ? explode('?', $cpeRequestUri, 2)[0] : '';
+$cpeApiRequest = preg_match('#\A/api(?:/|\z)#D', $cpeRequestPath) === 1;
+if ($cpeApiRequest) {
+    define('CPE_API_HTTP_REQUEST', true);
+    define('CPE_DEFER_HTTP_SESSION', true);
+}
+
+try {
+    require __DIR__ . '/../app/bootstrap.php';
+} catch (Throwable $cpeBootstrapFailure) {
+    if (!$cpeApiRequest) {
+        throw $cpeBootstrapFailure;
+    }
+    \App\Api\Http\ApiV1Kernel::bootstrapFailure($cpeBootstrapFailure, $_SERVER);
+    exit;
+}
+
+if ($cpeApiRequest) {
+    \App\Api\Http\ApiV1Kernel::handle($_SERVER);
+    exit;
+}
 
 use App\Controllers\AuthController;
 use App\Controllers\ModuleController;

@@ -1,6 +1,6 @@
 # Integration event threat model
 
-Status: Phase 2 signed delivery plus Phase 3A API identity/control foundation
+Status: Phase 2 signed delivery plus governed read-only API v1
 
 ## Assets and trust boundary
 
@@ -13,12 +13,10 @@ database. The Cloud control plane is not a placement data plane and must not
 store endpoint URLs, secrets, event payloads, delivery bodies, raw diagnostics,
 aggregate IDs, or example placement records.
 
-The only public payload in this phase is `application.status_changed` schema 1.
-There is no public Engine API or public API scope. The disabled Phase 3A
-identity foundation reserves exact scope rows but exposes no `/api/v1` route;
-private `DomainEvent` payloads and internal module observer APIs remain
-implementation details even though their durable state shares the transactional
-outbox table.
+The public surfaces are `application.status_changed` schema 1 and the five
+GET/HEAD-only API v1 paths for opportunity/application reads. Private
+`DomainEvent` payloads, internal module observer APIs, candidate resources, and
+command/write routes remain implementation details or explicit non-goals.
 
 ## Threats and controls
 
@@ -46,6 +44,10 @@ outbox table.
 | Unknown API token IDs become an enumeration oracle | Strict parsing uses the same generic denial, performs a dummy HMAC for unknown or malformed lookups, and never returns account state. A missing referenced key version is an aggregate readiness failure rather than credential-specific disclosure. |
 | A broad user role or wildcard silently grants API access | API principals are service accounts, never browser users. Exact stored scopes map fail closed to an enabled Placement module and a durable capability catalog row; user-role inheritance and wildcard scope syntax are not consulted. |
 | Rotation leaves an unbounded credential overlap | Expiry is mandatory (90-day default, 365-day maximum), the previous current token receives no more than 24 hours of grace, database guards allow only one current and at most two unrevoked tokens, and concurrent rotation serializes on the account. |
+| A browser session, cookie, query token, CORS preflight, or alternate method crosses into the API | API paths are detected before session startup. Authentication accepts only exact Bearer syntax; query/cookie/session credentials are ignored, CORS headers are absent, and only GET/HEAD are registered. Errors are fixed JSON with no redirect or flash. |
+| An API read crosses institution or privacy boundaries | Opportunity/application queries use explicit current-institution joins and exact public allowlists. Cross-institution IDs return the same 404 as missing rows; numeric IDs, candidate/person/contact/profile fields, notes, workflow internals, and broad PlacementService projections are never selected. |
+| A cursor is forged, replayed across a route/tenant, or expands into an unbounded export | Canonical bounded cursor payloads use a purpose-separated HMAC with explicit key version and bind institution, route/resource, normalized filter, upper snapshot, and last stable tuple. Collections default to 50 and cap at 100. |
+| Oversized or malformed input consumes unbounded work | Request targets, query strings, headers, parameter count/value lengths, cursor payloads, and bodies have fixed bounds. Unknown, duplicate, array-shaped, malformed, and incompatible parameters fail before data reads. |
 | Rate-limit or API audit state becomes a secondary personal-data store | Buckets retain keyed institution/token/source dimensions only. Request audit accepts fixed route, scope, outcome, status, and detail classes with a keyed source fingerprint; raw addresses, URLs, queries, bodies, headers, tokens, and placement identities are excluded and retention is bounded. |
 | Restore silently forks or rewinds the stream | Restore is documented as a continuity break. Operators stop delivery and require connector checkpoint/deduplication review plus resynchronization before resuming. |
 | Control-plane compromise exposes institution records | Cloud compatibility fixtures contain declarations only. Connector execution and payload handling remain in a tenant-isolated data-plane runtime; Cloud stores no event payloads or aggregate IDs. |
@@ -53,7 +55,10 @@ outbox table.
 
 ## Residual risks and operator duties
 
-An acknowledged side effect can repeat if acknowledgement state is lost. A
+An acknowledged side effect can repeat if acknowledgement state is lost. API
+pagination is a bounded upper-watermark traversal, not a multi-request database
+snapshot; consumers must upsert by public ID and perform overlap recovery after
+updates, restores, or cursor loss. A
 dead-lettered earlier version intentionally stops later versions for the same
 subscription and application until investigated. DNS and certificate validity
 can change after validation, so every real attempt rechecks policy. An HTTP

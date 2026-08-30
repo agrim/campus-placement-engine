@@ -1,0 +1,12 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cpe:api:v1:opportunity-item",
+  "title": "Campus Placement Engine API v1 opportunity item envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["data", "meta"],
+  "properties": {
+    "data": { "$ref": "urn:cpe:api:v1:opportunity" },
+    "meta": { "$ref": "urn:cpe:api:v1:meta" }
+  }
+}

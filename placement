@@ -251,7 +251,13 @@ function serve(
     echo "Starting Campus Placement Engine at http://{$address}/\n";
     echo "Press Ctrl+C to stop.\n";
     try {
-        passthru(escapeshellarg(PHP_BINARY) . ' -S ' . escapeshellarg($address) . ' -t ' . escapeshellarg(cpe_path('public')), $exitCode);
+        passthru(
+            escapeshellarg(PHP_BINARY)
+                . ' -S ' . escapeshellarg($address)
+                . ' -t ' . escapeshellarg(cpe_path('public'))
+                . ' ' . escapeshellarg(cpe_path('public/router.php')),
+            $exitCode,
+        );
     } finally {
         SetupHttp::scrubInternalEnvironment();
     }
@@ -1409,22 +1415,34 @@ function verify_release_package(string $path): void
         'app/Api/Operations/ApiRateLimiter.php',
         'app/Api/Operations/ApiRequestAuditService.php',
         'app/Api/Operations/ApiRetentionService.php',
+        'app/Api/Http/ApiCursorCodec.php',
+        'app/Api/Http/ApiHttpException.php',
+        'app/Api/Http/ApiHttpRequest.php',
+        'app/Api/Http/ApiHttpResponse.php',
+        'app/Api/Http/ApiReadService.php',
+        'app/Api/Http/ApiStorageUnavailable.php',
+        'app/Api/Http/ApiV1Kernel.php',
         'app/Views/api-access.php',
         'database/migrations/050_signed_webhook_integrations.sql',
         'database/migrations/051_webhook_claim_cursor.sql',
         'database/migrations/052_api_identity_foundation.sql',
+        'database/migrations/053_api_read_pagination_indexes.sql',
         'database/migrations/pgsql/014_signed_webhook_integrations.sql',
         'database/migrations/pgsql/015_webhook_claim_cursor.sql',
         'database/migrations/pgsql/016_api_identity_foundation.sql',
+        'database/migrations/pgsql/017_api_read_pagination_indexes.sql',
+        'public/router.php',
         'contracts/public-integration.v1.json',
         'contracts/schemas/public-event-envelope.v1.schema.json',
         'contracts/schemas/application.status_changed.v1.schema.json',
         'contracts/examples/application.status_changed.v1.json',
         'contracts/fixtures/application.status_changed.v1.consumer.json',
         'contracts/fixtures/application.status_changed.v1.future-optional.consumer.json',
+        'contracts/openapi.v1.json',
         'docs/integrations/events.md',
         'docs/integrations/webhooks.md',
         'docs/api/authentication.md',
+        'docs/api/v1.md',
         'docs/compatibility.md',
         'docs/security/integration-threat-model.md',
         'examples/integrations/verify-webhook.php',
@@ -1440,6 +1458,8 @@ function verify_release_package(string $path): void
         'tests/api_identity_contract.php',
         'tests/api_identity_rotation_concurrency_contract.php',
         'tests/api_identity_rotation_concurrency_worker.php',
+        'tests/api_http_contract.php',
+        'tests/validate_public_api_contracts.py',
         'tests/validate_public_event_schemas.py',
         'tests/requirements-public-event-schema.txt',
         'tests/authorization_failure_contract.php',
@@ -2440,6 +2460,7 @@ function publication_check(): void
         'database/migrations/050_signed_webhook_integrations.sql',
         'database/migrations/051_webhook_claim_cursor.sql',
         'database/migrations/052_api_identity_foundation.sql',
+        'database/migrations/053_api_read_pagination_indexes.sql',
         'database/migrations/pgsql/001_portal_baseline.sql',
         'database/migrations/pgsql/011_internal_event_deliveries.sql',
         'database/migrations/pgsql/012_module_enabled_constraint.sql',
@@ -2447,7 +2468,9 @@ function publication_check(): void
         'database/migrations/pgsql/014_signed_webhook_integrations.sql',
         'database/migrations/pgsql/015_webhook_claim_cursor.sql',
         'database/migrations/pgsql/016_api_identity_foundation.sql',
+        'database/migrations/pgsql/017_api_read_pagination_indexes.sql',
         'contracts/public-integration.v1.json',
+        'contracts/openapi.v1.json',
         'contracts/schemas/public-event-envelope.v1.schema.json',
         'contracts/schemas/application.status_changed.v1.schema.json',
         'contracts/examples/application.status_changed.v1.json',
@@ -2458,6 +2481,7 @@ function publication_check(): void
         'docs/integrations/events.md',
         'docs/integrations/webhooks.md',
         'docs/api/authentication.md',
+        'docs/api/v1.md',
         'docs/compatibility.md',
         'docs/security/integration-threat-model.md',
         'docs/release-checklist.md',
@@ -2486,6 +2510,13 @@ function publication_check(): void
         'app/Api/Operations/ApiRateLimiter.php',
         'app/Api/Operations/ApiRequestAuditService.php',
         'app/Api/Operations/ApiRetentionService.php',
+        'app/Api/Http/ApiCursorCodec.php',
+        'app/Api/Http/ApiHttpException.php',
+        'app/Api/Http/ApiHttpRequest.php',
+        'app/Api/Http/ApiHttpResponse.php',
+        'app/Api/Http/ApiReadService.php',
+        'app/Api/Http/ApiStorageUnavailable.php',
+        'app/Api/Http/ApiV1Kernel.php',
         'app/Integrations/Webhooks/CurlWebhookHttpTransport.php',
         'app/Integrations/Webhooks/WebhookDeliveryReplayService.php',
         'app/Integrations/Webhooks/WebhookDeliveryWorker.php',
@@ -2511,6 +2542,7 @@ function publication_check(): void
         'public/install.php',
         'public/health.php',
         'public/metrics.php',
+        'public/router.php',
         'tests/install_concurrency_contract.php',
         'tests/install_concurrency_worker.php',
         'tests/alpha1_release_acceptance.php',
@@ -2530,6 +2562,8 @@ function publication_check(): void
         'tests/api_identity_contract.php',
         'tests/api_identity_rotation_concurrency_contract.php',
         'tests/api_identity_rotation_concurrency_worker.php',
+        'tests/api_http_contract.php',
+        'tests/validate_public_api_contracts.py',
         'tests/validate_public_event_schemas.py',
         'tests/requirements-public-event-schema.txt',
         'tests/authorized_setup_recovery_fixture.php',
@@ -2589,7 +2623,7 @@ function publication_check(): void
     echo "OK: Private archive and runtime data patterns are ignored.\n";
     echo "OK: No forbidden publish-risk files found outside allowed paths.\n";
     echo "OK: No obvious secret or token patterns found in public files.\n";
-    echo "OK: Public integration JSON and frozen compatibility fixtures are valid.\n";
+    echo "OK: Public integration JSON and frozen event/API compatibility fixtures are valid.\n";
 }
 
 /** @return list<string> */
@@ -2597,11 +2631,31 @@ function public_integration_artifact_paths(): array
 {
     return [
         'contracts/public-integration.v1.json',
+        'contracts/openapi.v1.json',
         'contracts/schemas/public-event-envelope.v1.schema.json',
         'contracts/schemas/application.status_changed.v1.schema.json',
+        'contracts/schemas/api-v1-opportunity.schema.json',
+        'contracts/schemas/api-v1-application.schema.json',
+        'contracts/schemas/api-v1-meta.schema.json',
+        'contracts/schemas/api-v1-page.schema.json',
+        'contracts/schemas/api-v1-error.schema.json',
+        'contracts/schemas/api-v1-service.schema.json',
+        'contracts/schemas/api-v1-opportunity-item.schema.json',
+        'contracts/schemas/api-v1-application-item.schema.json',
+        'contracts/schemas/api-v1-opportunity-collection.schema.json',
+        'contracts/schemas/api-v1-application-collection.schema.json',
         'contracts/examples/application.status_changed.v1.json',
+        'contracts/examples/api-v1-service.json',
+        'contracts/examples/api-v1-opportunity-item.json',
+        'contracts/examples/api-v1-opportunity-collection.json',
+        'contracts/examples/api-v1-application-item.json',
+        'contracts/examples/api-v1-application-collection.json',
+        'contracts/examples/api-v1-error.json',
         'contracts/fixtures/application.status_changed.v1.consumer.json',
         'contracts/fixtures/application.status_changed.v1.future-optional.consumer.json',
+        'contracts/fixtures/api-v1-opportunity.consumer.json',
+        'contracts/fixtures/api-v1-application.consumer.json',
+        'contracts/fixtures/api-v1-opportunity.future-field.consumer.json',
     ];
 }
 
@@ -2638,11 +2692,11 @@ function public_integration_artifact_failures(array $documents): array
     $expectedContract = [
         'schema' => 1,
         'event_schemas' => ['application.status_changed' => [1]],
-        'api_scopes' => [],
-        'engine_api' => [],
+        'api_scopes' => ['opportunities.read', 'applications.read'],
+        'engine_api' => ['v1'],
     ];
     if ($decoded[$contractPath] !== $expectedContract) {
-        $failures[] = 'public-integration.v1.json differs from the frozen event-only declaration';
+        $failures[] = 'public-integration.v1.json differs from the frozen event and read-API declaration';
     }
 
     $requiredEnvelope = [
@@ -2696,6 +2750,136 @@ function public_integration_artifact_failures(array $documents): array
     }
     if (public_event_consumer_view($frozen) !== public_event_consumer_view($future)) {
         $failures[] = 'future-optional fixture changes the frozen v1 consumer view';
+    }
+
+    $apiSchemaPaths = [
+        'contracts/schemas/api-v1-opportunity.schema.json' => 'urn:cpe:api:v1:opportunity',
+        'contracts/schemas/api-v1-application.schema.json' => 'urn:cpe:api:v1:application',
+        'contracts/schemas/api-v1-meta.schema.json' => 'urn:cpe:api:v1:meta',
+        'contracts/schemas/api-v1-page.schema.json' => 'urn:cpe:api:v1:page',
+        'contracts/schemas/api-v1-error.schema.json' => 'urn:cpe:api:v1:error',
+        'contracts/schemas/api-v1-service.schema.json' => 'urn:cpe:api:v1:service',
+        'contracts/schemas/api-v1-opportunity-item.schema.json' => 'urn:cpe:api:v1:opportunity-item',
+        'contracts/schemas/api-v1-application-item.schema.json' => 'urn:cpe:api:v1:application-item',
+        'contracts/schemas/api-v1-opportunity-collection.schema.json' => 'urn:cpe:api:v1:opportunity-collection',
+        'contracts/schemas/api-v1-application-collection.schema.json' => 'urn:cpe:api:v1:application-collection',
+    ];
+    foreach ($apiSchemaPaths as $path => $schemaId) {
+        $schema = $decoded[$path];
+        if (($schema['$schema'] ?? null) !== 'https://json-schema.org/draft/2020-12/schema'
+            || ($schema['$id'] ?? null) !== $schemaId
+            || ($schema['type'] ?? null) !== 'object'
+            || ($schema['additionalProperties'] ?? null) !== false) {
+            $failures[] = 'strict API v1 schema root differs in ' . $path;
+        }
+    }
+    $opportunityFields = [
+        'id', 'cycle_id', 'organization_id', 'organization_code', 'organization_name',
+        'opportunity_key', 'title', 'status', 'created_at', 'updated_at',
+    ];
+    $applicationFields = [
+        'id', 'participant_id', 'opportunity_id', 'status', 'aggregate_version',
+        'created_at', 'updated_at',
+    ];
+    if (($decoded['contracts/schemas/api-v1-opportunity.schema.json']['required'] ?? null) !== $opportunityFields
+        || array_keys($decoded['contracts/schemas/api-v1-opportunity.schema.json']['properties'] ?? []) !== $opportunityFields) {
+        $failures[] = 'opportunity API producer allowlist differs';
+    }
+    if (($decoded['contracts/schemas/api-v1-application.schema.json']['required'] ?? null) !== $applicationFields
+        || array_keys($decoded['contracts/schemas/api-v1-application.schema.json']['properties'] ?? []) !== $applicationFields) {
+        $failures[] = 'application API producer allowlist differs';
+    }
+
+    $openapi = $decoded['contracts/openapi.v1.json'];
+    $expectedApiPaths = [
+        '/api/v1',
+        '/api/v1/opportunities',
+        '/api/v1/opportunities/{public_id}',
+        '/api/v1/applications',
+        '/api/v1/applications/{public_id}',
+    ];
+    $actualApiPaths = is_array($openapi['paths'] ?? null) ? array_keys($openapi['paths']) : [];
+    sort($expectedApiPaths);
+    sort($actualApiPaths);
+    if (($openapi['openapi'] ?? null) !== '3.1.0'
+        || ($openapi['jsonSchemaDialect'] ?? null) !== 'https://json-schema.org/draft/2020-12/schema'
+        || ($openapi['security'] ?? null) !== [['bearerAuth' => []]]
+        || $actualApiPaths !== $expectedApiPaths
+        || (($openapi['components']['securitySchemes']['bearerAuth'] ?? null) !== [
+            'type' => 'http',
+            'scheme' => 'bearer',
+            'bearerFormat' => 'CPE API token',
+        ])) {
+        $failures[] = 'OpenAPI v1 root, path, or Bearer security contract differs';
+    }
+    $httpMethods = ['get', 'put', 'post', 'delete', 'options', 'head', 'patch', 'trace'];
+    foreach (($openapi['paths'] ?? []) as $path => $pathItem) {
+        if (!is_array($pathItem)) {
+            $failures[] = 'OpenAPI path item is invalid: ' . $path;
+            continue;
+        }
+        $methods = array_values(array_intersect(array_keys($pathItem), $httpMethods));
+        sort($methods);
+        if ($methods !== ['get', 'head']) {
+            $failures[] = 'OpenAPI path is not GET/HEAD-only: ' . $path;
+        }
+        foreach ($methods as $method) {
+            $operation = $pathItem[$method] ?? null;
+            if (!is_array($operation)
+                || array_key_exists('requestBody', $operation)
+                || !is_string($operation['operationId'] ?? null)
+                || !is_array($operation['responses'] ?? null)
+                || !array_key_exists('200', $operation['responses'])) {
+                $failures[] = 'OpenAPI operation is incomplete: ' . strtoupper($method) . ' ' . $path;
+            }
+        }
+    }
+    $expectedExamples = [
+        'service' => 'examples/api-v1-service.json',
+        'opportunity_item' => 'examples/api-v1-opportunity-item.json',
+        'opportunity_collection' => 'examples/api-v1-opportunity-collection.json',
+        'application_item' => 'examples/api-v1-application-item.json',
+        'application_collection' => 'examples/api-v1-application-collection.json',
+        'error' => 'examples/api-v1-error.json',
+    ];
+    if (($openapi['x-cpe-contract-examples'] ?? null) !== $expectedExamples) {
+        $failures[] = 'OpenAPI contract example declaration differs';
+    }
+    foreach ($expectedExamples as $relative) {
+        if (!isset($decoded['contracts/' . $relative])) {
+            $failures[] = 'OpenAPI contract example is unresolved: ' . $relative;
+        }
+    }
+
+    foreach ([
+        'contracts/examples/api-v1-opportunity-item.json',
+        'contracts/fixtures/api-v1-opportunity.consumer.json',
+    ] as $path) {
+        if (array_keys($decoded[$path]) !== ['data', 'meta']
+            || array_keys($decoded[$path]['data'] ?? []) !== $opportunityFields
+            || array_keys($decoded[$path]['meta'] ?? []) !== ['request_id']) {
+            $failures[] = 'opportunity API item shape differs in ' . $path;
+        }
+    }
+    foreach ([
+        'contracts/examples/api-v1-application-item.json',
+        'contracts/fixtures/api-v1-application.consumer.json',
+    ] as $path) {
+        if (array_keys($decoded[$path]) !== ['data', 'meta']
+            || array_keys($decoded[$path]['data'] ?? []) !== $applicationFields
+            || array_keys($decoded[$path]['meta'] ?? []) !== ['request_id']) {
+            $failures[] = 'application API item shape differs in ' . $path;
+        }
+    }
+    $futureApi = $decoded['contracts/fixtures/api-v1-opportunity.future-field.consumer.json'];
+    $futureData = is_array($futureApi['data'] ?? null) ? $futureApi['data'] : [];
+    if (($futureData['future_optional'] ?? null) === null) {
+        $failures[] = 'future-field API fixture does not prove strict producer rejection';
+    }
+    unset($futureData['future_optional']);
+    $futureApi['data'] = $futureData;
+    if ($futureApi !== $decoded['contracts/fixtures/api-v1-opportunity.consumer.json']) {
+        $failures[] = 'future-field API fixture changes the frozen v1 consumer view';
     }
 
     return $failures;
@@ -3190,7 +3374,7 @@ function serve_help(): void
     echo "  php placement serve localhost:8000\n";
     echo "\n";
     echo "This is a small wrapper around:\n";
-    echo "  php -S 127.0.0.1:8000 -t public\n";
+    echo "  php -S 127.0.0.1:8000 -t public public/router.php\n";
     echo "\n";
     echo "Environment fallback:\n";
     echo "  CPE_SERVE_ADDRESS=127.0.0.1:8000\n";
@@ -3199,7 +3383,7 @@ function serve_help(): void
 function smoke_http_help(): void
 {
     echo "Run a dependency-free HTTP smoke test against a running PHP server:\n";
-    echo "  php -S 127.0.0.1:8000 -t public\n";
+    echo "  php -S 127.0.0.1:8000 -t public public/router.php\n";
     echo "  php placement smoke-http --base-url=http://127.0.0.1:8000 --email=admin@example.test --password=password123 --restricted-email=atlas@example.test --restricted-password=password123\n";
     echo "\n";
     echo "Environment fallbacks:\n";

@@ -87,7 +87,15 @@ Use this before a public alpha tag or downloadable archive.
   and defaults to `0`, only verifier material is stored, exact scope and key
   readiness fail closed, lifecycle/audit changes are atomic, two concurrent
   rotations retain one current plus one grace token, aggregate diagnostics are
-  redacted, and the public integration declaration remains event-only.
+  redacted, and the public integration declaration exposes only v1 and the two
+  exact read scopes.
+- Run `php tests/api_http_contract.php` against SQLite and a separate fresh
+  PostgreSQL 17 database with the pinned schema validator. Confirm clean-path
+  routing, static assets, no sessions/cookies/CORS/redirects, exact auth and
+  scopes, institution filtering, privacy allowlists, GET/HEAD/ETag/304, cursor
+  tamper/filter/route/institution/snapshot binding, bounded request rejection,
+  rate/audit enforcement, and fixed errors. Repeat it from extracted ZIP and
+  tar packages.
 - Run `php tests/managed_hosting_contract.php` and confirm the external resolver
   seam, tenant database identity, module entitlements, and session binding fail
   closed as documented.
@@ -106,7 +114,8 @@ Use this before a public alpha tag or downloadable archive.
   `tests/webhook_capture_revoke_concurrency_contract.php`, and
   `tests/webhook_receiver_example_contract.php`,
   `tests/api_identity_contract.php`, and
-  `tests/api_identity_rotation_concurrency_contract.php` without relying on repository
+  `tests/api_identity_rotation_concurrency_contract.php`, and
+  `tests/api_http_contract.php` without relying on repository
   metadata.
 - Run CLI first-run install against a throwaway database with
   `CPE_ADMIN_PASSWORD=... php placement install ...`.
@@ -145,7 +154,8 @@ Use this before a public alpha tag or downloadable archive.
   manual dense-board QA.
 - Run `php placement browser-qa-plan --format=markdown` and use the output as
   the cross-browser/manual visual QA checklist for the release candidate.
-- Run a browser smoke against `php -S localhost:8000 -t public`.
+- Run a browser/API smoke against
+  `php -S localhost:8000 -t public public/router.php`.
 - Run `php placement smoke-http --base-url=http://localhost:8000` and confirm
   it checks hardened session cookies plus browser security headers. On demo or
   staffed test installs, include `--restricted-email=atlas@example.test` or an
@@ -228,11 +238,12 @@ Use this before a public alpha tag or downloadable archive.
 - Implementation status lists known gaps honestly.
 - Managed-hosting contract, disaster recovery, security operations, module
   development, and testing runbooks are current.
-- Public event, signed webhook, compatibility, and integration threat-model
-  documents match the frozen contract, strict producer schemas, consumer
-  fixtures, exact signing bytes, lifecycle, replay, and network policy. Run the
-  pinned Draft 2020-12 validator with both schema URNs registered; do not treat
-  the dependency-light PHP artifact checks as standards-resolution proof.
+- Public event, read API, signed webhook, compatibility, and integration
+  threat-model documents match the frozen contracts, strict producer schemas,
+  consumer fixtures, exact signing bytes, lifecycle, pagination/recovery,
+  replay, and network policy. Run the pinned Draft 2020-12/OpenAPI contract
+  validators with every schema URN registered; do not treat dependency-light
+  PHP artifact checks as standards-resolution proof.
 
 ## Operational Smoke
 

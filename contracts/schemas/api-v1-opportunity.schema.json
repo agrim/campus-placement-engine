@@ -1,0 +1,31 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cpe:api:v1:opportunity",
+  "title": "Campus Placement Engine API v1 opportunity",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "id",
+    "cycle_id",
+    "organization_id",
+    "organization_code",
+    "organization_name",
+    "opportunity_key",
+    "title",
+    "status",
+    "created_at",
+    "updated_at"
+  ],
+  "properties": {
+    "id": { "type": "string", "pattern": "^opportunity_[a-f0-9]{32}$" },
+    "cycle_id": { "type": "string", "pattern": "^cycle_[a-f0-9]{32}$" },
+    "organization_id": { "type": "string", "pattern": "^organization_[a-f0-9]{32}$" },
+    "organization_code": { "type": "string" },
+    "organization_name": { "type": "string" },
+    "opportunity_key": { "type": "string" },
+    "title": { "type": "string" },
+    "status": { "type": "string" },
+    "created_at": { "$ref": "urn:cpe:api:v1:meta#/$defs/timestamp" },
+    "updated_at": { "$ref": "urn:cpe:api:v1:meta#/$defs/timestamp" }
+  }
+}

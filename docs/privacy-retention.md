@@ -87,7 +87,7 @@ from portability exports. A downstream Connector is a separate data controller:
 its event-ID deduplication records, bodies, logs, and side effects require an
 institution-approved retention and erasure policy.
 
-The disabled API identity foundation stores service-account metadata, exact
+The public API control boundary stores service-account metadata, exact
 scope grants, clear random lookup IDs, 32-byte keyed verifiers, lifecycle
 timestamps, keyed rate-limit/source fingerprints, and fixed redacted request
 audit classifications. It never stores the token secret, raw authorization
@@ -97,6 +97,16 @@ in bounded batches with `php placement api-prune --actor-user-id=USER_ID`.
 Service-account and token lifecycle metadata remains until institution policy
 authorizes a separately governed deletion feature; revoke instead of deleting
 operational evidence.
+
+API opportunity responses are institution-owned placement operations data.
+Application IDs, participant IDs, opportunity links, status, versions, and
+timestamps are pseudonymous placement records and remain restricted
+institutional data even though direct identity fields are excluded. API v1
+never emits candidate/person/student-profile names, external IDs, contact,
+program, tags, accommodation, custom fields, notes, waitlist/offer details,
+workflow internals, legacy identifiers, or numeric database keys. Downstream
+consumers are separate retention and access-control domains and must cover API
+responses, checkpoints, caches, backups, and logs in institution policy.
 
 ## Recommended Cycle-End Flow
 

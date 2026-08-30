@@ -1,0 +1,7 @@
+{
+  "error": {
+    "code": "invalid_credentials",
+    "message": "Valid API credentials are required.",
+    "request_id": "req_66666666666666666666666666666666"
+  }
+}

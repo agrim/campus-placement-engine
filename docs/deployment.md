@@ -86,7 +86,7 @@ instead of rerunning the installer over an existing live database.
 The ordinary `php placement serve` command is only a convenience wrapper around:
 
 ```bash
-php -S 127.0.0.1:8000 -t public
+php -S 127.0.0.1:8000 -t public public/router.php
 ```
 
 Use `php placement serve localhost:8000` or `CPE_SERVE_ADDRESS=localhost:8000`

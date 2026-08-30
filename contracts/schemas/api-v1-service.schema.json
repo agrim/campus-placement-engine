@@ -1,0 +1,30 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cpe:api:v1:service",
+  "title": "Campus Placement Engine API v1 service envelope",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["data", "meta"],
+  "properties": {
+    "data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "version", "resources"],
+      "properties": {
+        "name": { "const": "Campus Placement Engine API" },
+        "version": { "const": "v1" },
+        "resources": {
+          "type": "array",
+          "prefixItems": [
+            { "const": "opportunities" },
+            { "const": "applications" }
+          ],
+          "items": false,
+          "minItems": 2,
+          "maxItems": 2
+        }
+      }
+    },
+    "meta": { "$ref": "urn:cpe:api:v1:meta" }
+  }
+}

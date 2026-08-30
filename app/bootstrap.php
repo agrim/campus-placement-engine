@@ -399,6 +399,9 @@ if (!defined('CPE_SKIP_HTTP_BOOTSTRAP')) {
     try {
         cpe_resolve_hosted_http_request();
     } catch (\App\Hosted\Tenant\HostedResolutionException $e) {
+        if (defined('CPE_API_HTTP_REQUEST')) {
+            throw $e;
+        }
         cpe_report_incident(
             $e,
             'CPE_HOSTED_RESOLUTION_FAILED',
@@ -420,6 +423,9 @@ if (!defined('CPE_SKIP_HTTP_BOOTSTRAP')) {
         echo $e->httpStatus() === 404 ? "Hosted site not found.\n" : "Hosted site temporarily unavailable.\n";
         exit;
     } catch (Throwable $e) {
+        if (defined('CPE_API_HTTP_REQUEST')) {
+            throw $e;
+        }
         cpe_report_incident(
             $e,
             'CPE_HOSTED_BOOTSTRAP_FAILED',

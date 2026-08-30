@@ -4,7 +4,7 @@ declare(strict_types=1);
 
 namespace App\Api\Security;
 
-/** @internal Phase 3A principal; no public resource route consumes it yet. */
+/** Authenticated institution-local public API principal. */
 final class ApiPrincipal
 {
     /** @param list<string> $scopes */

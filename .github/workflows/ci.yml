@@ -49,6 +49,7 @@ jobs:
           python3 -m venv "$RUNNER_TEMP/cpe-public-schema-validator"
           "$RUNNER_TEMP/cpe-public-schema-validator/bin/python" -m pip install --disable-pip-version-check --requirement tests/requirements-public-event-schema.txt
           "$RUNNER_TEMP/cpe-public-schema-validator/bin/python" tests/validate_public_event_schemas.py
+          "$RUNNER_TEMP/cpe-public-schema-validator/bin/python" tests/validate_public_api_contracts.py
           echo "CPE_TEST_SCHEMA_PYTHON=$RUNNER_TEMP/cpe-public-schema-validator/bin/python" >> "$GITHUB_ENV"
           echo "$RUNNER_TEMP/cpe-public-schema-validator/bin" >> "$GITHUB_PATH"
 
@@ -117,6 +118,7 @@ jobs:
           php tests/webhook_receiver_example_contract.php
           php tests/api_identity_contract.php
           php tests/api_identity_rotation_concurrency_contract.php
+          php tests/api_http_contract.php
           php tests/postgres_connection_policy_contract.php
           php tests/postgres_tls_contract.php
           php tests/database_contract.php
@@ -203,6 +205,15 @@ jobs:
         run: |
           psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_api_identity_contract'
           php tests/api_identity_contract.php
+
+      - name: Run PostgreSQL public API HTTP contract
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_api_http_contract?sslmode=disable
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_api_http_contract'
+          php tests/api_http_contract.php
 
       - name: Run PostgreSQL API rotation concurrency contract
         env:

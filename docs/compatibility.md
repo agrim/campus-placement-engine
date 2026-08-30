@@ -9,17 +9,21 @@ The machine-readable compatibility declaration is
   "event_schemas": {
     "application.status_changed": [1]
   },
-  "api_scopes": [],
-  "engine_api": []
+  "api_scopes": [
+    "opportunities.read",
+    "applications.read"
+  ],
+  "engine_api": [
+    "v1"
+  ]
 }
 ```
 
-This is an event-only contract. It grants no Engine API surface and no public
-API scope. The disabled institution-local identity foundation reserves exact
-scope rows internally, but those rows are not a connector compatibility promise
-and no `/api/v1` resource is registered. Internal PHP module APIs,
-`DomainEvent` payloads, database schemas, and observer subscriptions are outside
-this compatibility promise.
+This declares the governed event schema plus the read-only Engine API v1 and
+its two exact scopes. The API surface is limited to the five paths in
+`contracts/openapi.v1.json`; it declares no candidate or command/write API.
+Internal PHP module APIs, `DomainEvent` payloads, database schemas, and observer
+subscriptions remain outside this compatibility promise.
 
 ## Version rules
 
@@ -35,6 +39,12 @@ this compatibility promise.
 - The Engine v1 producer emits no undeclared envelope, aggregate, data, or trace
   fields. A new incompatible shape requires a new event schema version and a
   catalog update.
+- API v1 uses the strict schemas in `contracts/schemas/api-v1-*.schema.json`.
+  The OpenAPI document, producer examples, frozen consumer fixtures, exact
+  path/method set, privacy allowlists, and cursor behavior are validated by the
+  pinned contract gate. Removing or changing a v1 field, method, status,
+  authentication rule, or pagination meaning incompatibly requires a new API
+  path version and catalog update.
 - Consumers should read only the required v1 fields and ignore unknown optional
   fields. The frozen and future-optional fixtures under `contracts/fixtures/`
   prove that defensive consumer behavior; the optional fixture is not an Engine
@@ -43,10 +53,10 @@ this compatibility promise.
   A connector must check the compatibility artifact in the pinned, verified
   Engine release rather than infer support from a release number.
 
-The default runtime and downloadable package have no JSON Schema library
-dependency. The portable PHP contract invokes the pinned test-only validator
-and fails closed when it is absent, so a lightweight artifact check is never
-reported as proof of standards-compliant reference resolution.
+The default runtime and downloadable package have no JSON Schema or OpenAPI
+library dependency. Portable PHP contracts invoke the pinned test-only
+validator and fail closed when it is absent, so lightweight artifact checks are
+never reported as proof of standards-compliant reference resolution.
 
 Compatibility is a schema and behavior promise, not an uninterrupted stream
 promise. Signed webhook delivery is at least once and ordered only within one
@@ -56,4 +66,5 @@ secret-overlap, retry, and network behavior is documented in
 `docs/integrations/webhooks.md`; changing it incompatibly requires an explicit
 delivery-contract review even when the JSON schema is unchanged. Restores break
 stream continuity and require Connector resynchronization as described in
-`docs/integrations/events.md`.
+`docs/integrations/events.md`. API cursor recovery and synchronization limits
+are documented separately in `docs/api/v1.md`.

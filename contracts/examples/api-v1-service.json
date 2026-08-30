@@ -1,0 +1,13 @@
+{
+  "data": {
+    "name": "Campus Placement Engine API",
+    "version": "v1",
+    "resources": [
+      "opportunities",
+      "applications"
+    ]
+  },
+  "meta": {
+    "request_id": "req_11111111111111111111111111111111"
+  }
+}

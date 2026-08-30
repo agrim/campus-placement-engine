@@ -123,6 +123,7 @@ php tests/webhook_capture_revoke_concurrency_contract.php
 php tests/webhook_receiver_example_contract.php
 php tests/api_identity_contract.php
 php tests/api_identity_rotation_concurrency_contract.php
+php tests/api_http_contract.php
 php tests/install_concurrency_contract.php
 php tests/setup_authorization_contract.php
 ```
@@ -245,17 +246,19 @@ restore procedures, see [docs/disaster-recovery.md](docs/disaster-recovery.md).
 For module boundaries and extension rules, see
 [docs/architecture/extensions.md](docs/architecture/extensions.md) and the
 Engine-contributor-only [docs/module-development.md](docs/module-development.md).
-For the event-only public integration contract, delivery semantics, and schema
+For the public integration contract, event delivery semantics, and schema
 compatibility rules, see [docs/integrations/events.md](docs/integrations/events.md)
 and [docs/compatibility.md](docs/compatibility.md). For the administrator
 workflow, one-time secrets, exact signing headers, Connector verification,
 retry/replay, SSRF policy, and worker operations, see
 [docs/integrations/webhooks.md](docs/integrations/webhooks.md). `DomainEvent`
 and bundled module PHP interfaces remain private Engine implementation details.
-The disabled-by-default institution-local service-account/token foundation is
-documented in [docs/api/authentication.md](docs/api/authentication.md). It does
-not expose `/api/v1` or change the event-only public integration declaration;
-the first public API resource remains a separate compatibility gate.
+The disabled-by-default institution-local service-account/token boundary is
+documented in [docs/api/authentication.md](docs/api/authentication.md). The
+GET/HEAD-only opportunity and application API, privacy allowlists, cursor
+recovery, errors, rate limits, OpenAPI, and self-host/managed parity are in
+[docs/api/v1.md](docs/api/v1.md). There are no candidate or command/write API
+endpoints, and Cloud does not proxy ordinary institution API traffic.
 For health, metrics,
 SSO, sessions, logs, and outbox operations, see
 [docs/security-operations.md](docs/security-operations.md).

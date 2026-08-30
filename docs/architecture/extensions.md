@@ -41,21 +41,20 @@ External integrations may not:
 
 ## Public extension surfaces
 
-The governed public surfaces are introduced in dependency order. Phase 1 is
-implemented as the event-only contract in `contracts/public-integration.v1.json`:
+The governed public surfaces are introduced in dependency order. The current
+contract in `contracts/public-integration.v1.json` provides:
 
 1. `application.status_changed` schema 1, delivered at least once through the
    existing outbox sinks;
-2. a future institution-local, scoped, versioned REST API, if approved;
+2. institution-local read-only API v1 for opportunities and applications;
 3. broader out-of-process connector capabilities only after their public
    contracts are governed.
 
-The Phase 1 declaration has empty `api_scopes` and `engine_api` arrays. Phase 3A
-adds a disabled-by-default institution-local service-account, exact-scope,
-verifier-only token, rate-limit, and redacted-audit control foundation. It does
-not register `/api/v1`, publish an OpenAPI contract, or change those empty
-declarations. The first public resource and compatibility declaration remain a
-separate Phase 3B gate. See `docs/api/authentication.md`.
+API v1 uses the Phase 3A disabled-by-default service-account, exact-scope,
+verifier-only token, rate-limit, and redacted-audit controls. Its five GET/HEAD
+paths, exact projections, schemas, and compatibility rules are documented in
+`docs/api/v1.md` and `docs/api/authentication.md`. Candidate resources and
+command/write APIs remain outside the public surface.
 
 Internal PHP class names, database tables, templates, and module subscriber
 interfaces are not public contracts. The public compatibility policy is

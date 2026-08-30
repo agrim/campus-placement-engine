@@ -9,12 +9,20 @@ use App\Api\Security\ApiPrincipal;
 use App\Core\Institution\InstitutionRepository;
 use App\Core\Persistence\WriteTransaction;
 use App\Support\Database;
+use Closure;
 use PDO;
 use RuntimeException;
 
 /** Transactional institution/token/source rate-limit buckets for future API routes. */
 final class ApiRateLimiter
 {
+    public const PRE_AUTH_ROUTE_CLASS = 'api.v1.preauth';
+
+    public const PRE_AUTH_LIMITS = [
+        'institution' => 1200,
+        'source' => 300,
+    ];
+
     private const DEFAULT_LIMITS = [
         'institution' => 1200,
         'token' => 600,
@@ -29,7 +37,7 @@ final class ApiRateLimiter
 
     /**
      * @param array{institution?: int, token?: int, source?: int} $limits
-     * @return array{allowed: bool, limited_dimension: string, window_started_at: string, retry_after_seconds: int}
+     * @return array{allowed: bool, limited_dimension: string, window_started_at: string, retry_after_seconds: int, audit_threshold_crossing: bool}
      */
     public function consume(
         ApiPrincipal $principal,
@@ -38,23 +46,9 @@ final class ApiRateLimiter
         int $windowSeconds = 60,
         array $limits = [],
     ): array {
-        if (preg_match('/^[a-z0-9_.-]{1,80}$/D', $routeClass) !== 1) {
-            throw new RuntimeException('API rate-limit route class is invalid.');
-        }
-        if ($windowSeconds < 1 || $windowSeconds > 86400) {
-            throw new RuntimeException('API rate-limit window is invalid.');
-        }
-        $source = trim($source);
-        if ($source === '' || strlen($source) > 512) {
-            $source = 'unknown';
-        }
-        $normalizedLimits = self::DEFAULT_LIMITS;
-        foreach ($limits as $dimension => $limit) {
-            if (!array_key_exists($dimension, $normalizedLimits) || $limit < 1 || $limit > 1000000) {
-                throw new RuntimeException('API rate-limit threshold is invalid.');
-            }
-            $normalizedLimits[$dimension] = $limit;
-        }
+        self::assertBoundary($routeClass, $windowSeconds);
+        $source = self::normalizeSource($source);
+        $normalizedLimits = self::normalizeLimits(self::DEFAULT_LIMITS, $limits);
         $pdo = $this->connection ?? Database::connection();
         $institution = (new InstitutionRepository($pdo))->current();
         if ($principal->institutionId() !== $institution->id()
@@ -62,11 +56,6 @@ final class ApiRateLimiter
             throw new RuntimeException('API rate-limit principal belongs to a different institution.');
         }
         $keyring = $this->configuredKeyring ?? ApiKeyring::fromEnvironment();
-        $epoch = time();
-        $windowEpoch = intdiv($epoch, $windowSeconds) * $windowSeconds;
-        $windowStartedAt = gmdate('Y-m-d H:i:s', $windowEpoch);
-        $expiresAt = gmdate('Y-m-d H:i:s', $windowEpoch + ($windowSeconds * 2));
-        $now = cpe_now();
         $dimensions = [
             'institution' => [
                 'token_id' => null,
@@ -81,13 +70,99 @@ final class ApiRateLimiter
                 'key' => $keyring->sourceFingerprint('source|' . $source, $principal->institutionPublicId()),
             ],
         ];
-        return WriteTransaction::run($pdo, function () use (
+        return $this->consumeDimensions(
             $pdo,
-            $principal,
+            $principal->institutionId(),
             $routeClass,
             $windowSeconds,
             $normalizedLimits,
             $dimensions,
+            null,
+        );
+    }
+
+    /**
+     * Institution-wide and keyed direct-peer gate applied before API authentication.
+     * The first over-limit request writes one aggregate audit and marks the
+     * sentinel in the same transaction; later requests are suppressed.
+     *
+     * @param array{institution?: int, source?: int} $limits
+     * @return array{allowed: bool, limited_dimension: string, window_started_at: string, retry_after_seconds: int, audit_threshold_crossing: bool}
+     */
+    public function consumePreAuth(
+        string $source,
+        string $requestId,
+        int $windowSeconds = 60,
+        array $limits = [],
+    ): array {
+        self::assertBoundary(self::PRE_AUTH_ROUTE_CLASS, $windowSeconds);
+        if (preg_match('/^req_[a-f0-9]{32}$/D', $requestId) !== 1) {
+            throw new RuntimeException('API pre-authentication request ID is invalid.');
+        }
+        $source = self::normalizeSource($source);
+        $normalizedLimits = self::normalizeLimits(self::PRE_AUTH_LIMITS, $limits);
+        $pdo = $this->connection ?? Database::connection();
+        $institution = (new InstitutionRepository($pdo))->current();
+        $keyring = $this->configuredKeyring ?? ApiKeyring::fromEnvironment();
+        $dimensions = [
+            'institution' => [
+                'token_id' => null,
+                'key' => $keyring->sourceFingerprint('preauth|institution', $institution->publicId()),
+            ],
+            'source' => [
+                'token_id' => null,
+                'key' => $keyring->sourceFingerprint('preauth|source|' . $source, $institution->publicId()),
+            ],
+        ];
+        return $this->consumeDimensions(
+            $pdo,
+            $institution->id(),
+            self::PRE_AUTH_ROUTE_CLASS,
+            $windowSeconds,
+            $normalizedLimits,
+            $dimensions,
+            static function (string $dimension) use ($pdo, $keyring, $source, $requestId): void {
+                (new ApiRequestAuditService($pdo, $keyring))->record(
+                    null,
+                    self::PRE_AUTH_ROUTE_CLASS,
+                    '',
+                    'rate_limited',
+                    429,
+                    'PREAUTH_RATE_LIMITED_' . strtoupper($dimension),
+                    $source,
+                    $requestId,
+                );
+            },
+        );
+    }
+
+    /**
+     * @param array<string, int> $limits
+     * @param array<string, array{token_id: ?int, key: string}> $dimensions
+     * @return array{allowed: bool, limited_dimension: string, window_started_at: string, retry_after_seconds: int, audit_threshold_crossing: bool}
+     */
+    private function consumeDimensions(
+        PDO $pdo,
+        int $institutionId,
+        string $routeClass,
+        int $windowSeconds,
+        array $limits,
+        array $dimensions,
+        ?Closure $thresholdAudit,
+    ): array {
+        $epoch = time();
+        $windowEpoch = intdiv($epoch, $windowSeconds) * $windowSeconds;
+        $windowStartedAt = gmdate('Y-m-d H:i:s', $windowEpoch);
+        $expiresAt = gmdate('Y-m-d H:i:s', $windowEpoch + ($windowSeconds * 2));
+        $now = cpe_now();
+        return WriteTransaction::run($pdo, function () use (
+            $pdo,
+            $institutionId,
+            $routeClass,
+            $windowSeconds,
+            $limits,
+            $dimensions,
+            $thresholdAudit,
             $windowStartedAt,
             $expiresAt,
             $now,
@@ -105,7 +180,7 @@ final class ApiRateLimiter
                      DO NOTHING',
                 );
                 $insert->execute([
-                    $principal->institutionId(),
+                    $institutionId,
                     $metadata['token_id'],
                     $dimension,
                     $metadata['key'],
@@ -124,7 +199,7 @@ final class ApiRateLimiter
                        AND route_class = ? AND window_started_at = ? AND window_seconds = ?' . $suffix,
                 );
                 $select->execute([
-                    $principal->institutionId(),
+                    $institutionId,
                     $dimension,
                     $metadata['key'],
                     $routeClass,
@@ -135,16 +210,24 @@ final class ApiRateLimiter
                 if (!is_array($row)) {
                     throw new RuntimeException('API rate-limit bucket could not be read after creation.');
                 }
-                $rows[$dimension] = ['id' => (int) $row['id'], 'count' => (int) $row['request_count'], 'created' => $created];
-            }
-            foreach (array_keys($dimensions) as $dimension) {
-                $row = $rows[$dimension];
-                if (!$row['created'] && $row['count'] >= $normalizedLimits[$dimension]) {
+                $row = ['id' => (int) $row['id'], 'count' => (int) $row['request_count'], 'created' => $created];
+                $rows[$dimension] = $row;
+                if (!$row['created'] && $row['count'] >= $limits[$dimension]) {
+                    $thresholdCrossing = $thresholdAudit !== null && $row['count'] === $limits[$dimension];
+                    if ($thresholdCrossing) {
+                        $thresholdAudit($dimension);
+                        $mark = $pdo->prepare(
+                            'UPDATE api_rate_limit_buckets
+                             SET request_count = request_count + 1, updated_at = ? WHERE id = ?',
+                        );
+                        $mark->execute([$now, $row['id']]);
+                    }
                     return [
                         'allowed' => false,
                         'limited_dimension' => $dimension,
                         'window_started_at' => $windowStartedAt,
                         'retry_after_seconds' => max(1, ($windowEpoch + $windowSeconds) - $epoch),
+                        'audit_threshold_crossing' => $thresholdCrossing,
                     ];
                 }
             }
@@ -162,7 +245,43 @@ final class ApiRateLimiter
                 'limited_dimension' => '',
                 'window_started_at' => $windowStartedAt,
                 'retry_after_seconds' => 0,
+                'audit_threshold_crossing' => false,
             ];
         });
+    }
+
+    private static function assertBoundary(string $routeClass, int $windowSeconds): void
+    {
+        if (preg_match('/^[a-z0-9_.-]{1,80}$/D', $routeClass) !== 1) {
+            throw new RuntimeException('API rate-limit route class is invalid.');
+        }
+        if ($windowSeconds < 1 || $windowSeconds > 86400) {
+            throw new RuntimeException('API rate-limit window is invalid.');
+        }
+    }
+
+    private static function normalizeSource(string $source): string
+    {
+        $source = trim($source);
+        return $source === '' || strlen($source) > 512 ? 'unknown' : $source;
+    }
+
+    /**
+     * @param array<string, int> $defaults
+     * @param array<string, int> $overrides
+     * @return array<string, int>
+     */
+    private static function normalizeLimits(array $defaults, array $overrides): array
+    {
+        foreach ($overrides as $dimension => $limit) {
+            if (!array_key_exists($dimension, $defaults)
+                || !is_int($limit)
+                || $limit < 1
+                || $limit > 1000000) {
+                throw new RuntimeException('API rate-limit threshold is invalid.');
+            }
+            $defaults[$dimension] = $limit;
+        }
+        return $defaults;
     }
 }

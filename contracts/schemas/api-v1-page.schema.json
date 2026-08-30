@@ -1,0 +1,22 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "urn:cpe:api:v1:page",
+  "title": "Campus Placement Engine API v1 cursor page",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["next_cursor", "has_more"],
+  "properties": {
+    "next_cursor": {
+      "oneOf": [
+        { "type": "null" },
+        {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 2048,
+          "pattern": "^cpe_cursor_v1\\.[A-Za-z0-9_-]+\\.[A-Za-z0-9_-]{43}$"
+        }
+      ]
+    },
+    "has_more": { "type": "boolean" }
+  }
+}

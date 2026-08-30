@@ -31,10 +31,17 @@ Date: 2026-07-18
 > Phase 3A API identity update, 2026-08-30: the Engine now contains a
 > disabled-by-default institution-local service-account and verifier-only token
 > foundation with exact scopes, bounded rotation, aggregate readiness,
-> rate-limit state, and redacted request audit. No `/api/v1` resource or public
-> API scope is exposed; `contracts/public-integration.v1.json` remains
-> event-only. PostgreSQL execution and production TLS remain release-environment
+> rate-limit state, and redacted request audit. At that completed foundation
+> gate no `/api/v1` resource or public API scope was exposed. PostgreSQL
+> execution and production TLS remain release-environment
 > proof gates rather than claims made by this working tree.
+
+> Phase 3B API update, 2026-08-30: the Engine now exposes five sessionless,
+> GET/HEAD-only `/api/v1` routes for exact opportunity and application read
+> projections. Authentication, scopes, rate limits, redacted audit, institution
+> joins, signed cursor pagination, ETags, fixed JSON errors, OpenAPI 3.1, and
+> strict Draft 2020-12 contracts are governed together. Candidate and
+> command/write APIs remain absent; Cloud does not proxy institution API data.
 
 ## Implemented
 
@@ -80,18 +87,26 @@ Date: 2026-07-18
   post-commit declaration expansion and isolated callbacks, token-fenced retry,
   dead-letter and audited replay state, plus the existing JSONL or signed HTTPS
   delivery with stable event IDs.
-- Governed event-only public integration contract v1 with
+- Governed public integration contract v1 with
   `application.status_changed` schema 1, strict privacy-minimized envelopes,
   immutable explicit outbox projections, per-application aggregate versions and
-  ordering, exact audited dead-letter recovery, and no public Engine API or API
-  scope. Internal `DomainEvent` payloads and module PHP APIs remain private.
+  ordering, exact audited dead-letter recovery, plus the read-only Engine API v1
+  and its two exact scopes. Internal `DomainEvent` payloads and module PHP APIs
+  remain private.
 - Institution-local API identity/control foundation with a nonportable disabled
   default, administrator capability plus CSRF management, exact
   `opportunities.read` and `applications.read` grants, external bounded
   versioned keyring, verifier-only one-time tokens, mandatory expiry, 24-hour
   rotation grace, revoke/disable controls, transactional keyed rate limits,
   redacted 90-day request audit, bounded pruning, and aggregate-only
-  health/metrics/doctor output. It exposes no public HTTP API in this phase.
+  health/metrics/doctor output.
+- Sessionless GET/HEAD-only API routes for the service descriptor,
+  opportunities, and applications; exact privacy allowlists and
+  current-institution joins; default-50/max-100 signed cursor pagination bound
+  to institution/route/filter/snapshot/tuple; item ETags and `304`; fixed
+  no-store JSON failures; direct-peer atomic throttling; OpenAPI 3.1, strict
+  Draft 2020-12 schemas, examples, and consumer fixtures. No candidate or
+  command/write endpoint exists.
 - Institution-facing signed webhook Integrations workflow with one-time secret
   reveal, AES-256-GCM storage under an external versioned keyring, bounded
   two-secret rotation overlap, explicit validation before activation, health,

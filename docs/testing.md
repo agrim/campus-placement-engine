@@ -21,6 +21,7 @@ php tests/webhook_capture_revoke_concurrency_contract.php
 php tests/webhook_receiver_example_contract.php
 php tests/api_identity_contract.php
 php tests/api_identity_rotation_concurrency_contract.php
+php tests/api_http_contract.php
 php tests/postgres_connection_policy_contract.php
 php tests/postgres_tls_contract.php
 php tests/database_contract.php
@@ -97,12 +98,22 @@ PostgreSQL database. It proves paired migration/default parity, external-key
 grammar and HKDF binding, verifier-only one-time token storage, exact
 scope/capability checks, expiry/rotation/revoke/disable lifecycle, missing-key
 readiness, transactional rollback, keyed rate limiting, redacted audit and
-retention, aggregate diagnostics, and the absence of a public API declaration.
+retention, aggregate diagnostics, and exact public API scope declarations.
 `tests/api_identity_rotation_concurrency_contract.php` releases two independent
 rotators against one account and proves serialized lifecycle state: three total
 historical rows, exactly two unrevoked tokens, one current token, one grace
 token, and an unusable original. CI and release run both contracts against
 separate fresh PostgreSQL databases as well as SQLite.
+`tests/api_http_contract.php` is the real loopback producer/consumer gate. It
+runs with PHP's clean-path router against SQLite and a fresh PostgreSQL 17
+database and proves sessionless/no-cookie/no-CORS routing, exact Bearer and
+scope states, institution joins, privacy allowlists, collections/items,
+GET/HEAD/ETag/304, cursor snapshot and tamper bindings, bounded input, fixed
+errors, atomic rate limiting, direct-peer/redacted audit, audit-failure denial,
+and missing-key readiness. It invokes
+`tests/validate_public_api_contracts.py` with the same pinned Draft 2020-12
+dependencies to validate OpenAPI 3.1 structure, schema reference resolution,
+examples, frozen consumers, and strict producer rejection of undeclared fields.
 `tests/postgres_connection_policy_contract.php` is a no-network parser and
 policy gate. It freezes the Cloud-compatible constructor and raw `fromUrl()`
 signatures while proving strict runtime TLS, pool-mode, timeout, redaction,

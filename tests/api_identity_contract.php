@@ -206,8 +206,12 @@ try {
     $configurationJson = (string) file_get_contents($configPath);
     api_contract_assert(!str_contains($configurationJson, 'api_enabled'), 'Local API enabled state entered portable configuration.');
     $publicContract = json_decode((string) file_get_contents($projectRoot . '/contracts/public-integration.v1.json'), true, 32, JSON_THROW_ON_ERROR);
-    api_contract_same([], $publicContract['api_scopes'] ?? null, 'Phase 3A advertised public API scopes.');
-    api_contract_same([], $publicContract['engine_api'] ?? null, 'Phase 3A advertised a public Engine API.');
+    api_contract_same(
+        ['opportunities.read', 'applications.read'],
+        $publicContract['api_scopes'] ?? null,
+        'Public API scope declaration differs.',
+    );
+    api_contract_same(['v1'], $publicContract['engine_api'] ?? null, 'Public Engine API declaration differs.');
 
     $service = new ApiServiceAccountService($pdo, $keyring);
     $beforeCreate = time();

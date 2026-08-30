@@ -1,21 +1,20 @@
-# Institution-local API identity foundation
+# Institution-local API authentication
 
-Status: Phase 3A control foundation; no public API resource exists yet
+Status: public API v1 authentication and control boundary
 
-This release prepares service-account identity, exact scope grants,
-verifier-only tokens, rate-limit buckets, and redacted request audit for a
-future versioned Engine API. It does **not** register `/api/v1` routes, publish
-an OpenAPI document, or add API scopes to
-`contracts/public-integration.v1.json`. The public integration contract remains
-event-only until a later release governs and implements the first resource
-endpoint.
+The Engine exposes the deliberately small read-only API described in
+`docs/api/v1.md` and `contracts/openapi.v1.json`. Service-account identity,
+exact scope grants, verifier-only tokens, rate-limit buckets, and redacted
+request audit remain institution-local. There are no command/write or candidate
+API resources.
 
 ## Disabled by default
 
 `api_enabled` is an institution-local setting created as `0`. It is deliberately
 excluded from portable configuration, so an import, clone, or restore cannot
-enable API access by configuration transfer. Enabling the foundation only makes
-credential authentication state ready; it does not create a public HTTP API.
+enable API access by configuration transfer. When disabled, every otherwise
+valid API token receives the same `401 invalid_credentials` response as an
+invalid credential.
 
 The administrator **API Access** page and CLI management commands require an
 active local user with `portal.integrations.manage`. Browser mutations also
@@ -29,8 +28,9 @@ The currently reserved exact scopes are:
 - `applications.read`
 
 Both fail closed unless Placement is enabled and the durable
-`placement.records.view` capability exists. This internal reservation is not a
-public compatibility declaration and grants no broad PlacementService read.
+`placement.records.view` capability exists. They are the complete public v1
+scope declaration and grant only the exact projections documented for their
+resources, never broad `PlacementService` access.
 
 ## External keyring
 
@@ -46,7 +46,7 @@ exactly 32 bytes, and the active version must name one entry. Generate keys with
 an approved cryptographic random source and keep them outside Git, the database,
 backups, portable configuration, command arguments, and application logs.
 
-Engine derives separate token-verifier, future-cursor, and source-fingerprint
+Engine derives separate token-verifier, cursor, and source-fingerprint
 keys with HKDF-SHA256 domain separation. A token verifier is a 32-byte HMAC bound
 to the institution public ID, clear lookup ID, and key version. The database
 stores only that verifier and its version; it never stores the random token
@@ -109,12 +109,19 @@ or verifier.
 
 ## Rate limit and audit storage
 
-The future request boundary can consume transactional per-institution,
-per-token, and keyed-source buckets. Raw source addresses and tokens are not
-stored. Request audit accepts only reviewed route classes, exact scope names,
-fixed outcome/detail codes, numeric status, and a keyed source fingerprint; it
-stores no request body, raw URL, query string, authorization header, token,
-candidate/employer identity, or raw source address.
+Before credential verification, the request boundary atomically consumes one
+fixed API-wide per-institution and keyed direct-peer gate. Its 60-second
+ceilings are 1,200 per institution and 300 per direct peer. The threshold
+crossing receives one aggregate audit row in the same transaction as its
+sentinel. Audit failure rolls back both, so requests continue to fail with `503`
+until the aggregate row and sentinel commit together; subsequent over-limit
+traffic in that bucket is suppressed from per-request audit. Authenticated
+traffic also consumes transactional per-institution, per-token, and keyed-source
+route buckets. Raw source addresses and tokens are not stored. Request audit accepts
+only reviewed route classes, exact scope names, fixed outcome/detail codes,
+numeric status, and a keyed source fingerprint; it stores no request body, raw
+URL, query string, authorization header, token, candidate/employer identity, or
+raw source address.
 
 Expired rate-limit buckets and request-audit rows are pruned in bounded batches
 with `api-prune`. Request-audit retention defaults to 90 days. Institution policy

@@ -2093,6 +2093,7 @@ test_case('open-source release governance files and ignore protections exist', f
         'docs/environment.md',
         'docs/integrations/webhooks.md',
         'docs/api/authentication.md',
+        'docs/api/v1.md',
         'docs/configuration-architecture.md',
         'docs/indian-college-template-notes.md',
         'docs/migration-from-legacy.md',
@@ -2132,6 +2133,10 @@ test_case('open-source release governance files and ignore protections exist', f
         'tests/api_identity_contract.php',
         'tests/api_identity_rotation_concurrency_contract.php',
         'tests/api_identity_rotation_concurrency_worker.php',
+        'tests/api_http_contract.php',
+        'tests/validate_public_api_contracts.py',
+        'contracts/openapi.v1.json',
+        'public/router.php',
         '.github/workflows/ci.yml',
         '.github/workflows/release.yml',
         '.github/ISSUE_TEMPLATE/bug_report.md',
@@ -2140,7 +2145,7 @@ test_case('open-source release governance files and ignore protections exist', f
         assert_true(is_file($root . '/' . $path), "Missing release governance file: {$path}");
     }
     $ci = (string) file_get_contents($root . '/.github/workflows/ci.yml');
-    foreach (['php tests/run.php', 'php tests/alpha1_release_acceptance.php', 'php tests/backup_restore_contract.php', 'php tests/database_connection_cleanup_contract.php', 'php tests/incident_boundary_contract.php', 'php tests/legacy_backup_compatibility_contract.php', 'php tests/worker_delivery_contract.php', 'php tests/public_event_contract.php', 'php tests/webhook_delivery_contract.php', 'php tests/webhook_delivery_concurrency_contract.php', 'php tests/webhook_revoke_completion_concurrency_contract.php', 'php tests/webhook_receiver_example_contract.php', 'php tests/api_identity_contract.php', 'php tests/api_identity_rotation_concurrency_contract.php', 'php tests/database_ownership_contract.php', 'php tests/migration_lock_contract.php', 'php tests/database_lock_release_contract.php', 'php tests/install_concurrency_contract.php', 'php tests/hosted_install_atomicity_contract.php', 'php tests/hosted_install_preflight_contract.php', 'php tests/setup_authorization_contract.php', 'php tests/hosted_install_contract.php', 'php tests/managed_hosting_contract.php', 'php placement publication-check', 'php placement package', 'php placement verify-package', 'php placement install', 'php placement upgrade', 'php placement setup --check', 'php placement serve --help', 'php placement install-demo', 'php placement seed-large-demo', 'php placement browser-qa-plan', 'php placement smoke-http', 'php placement readiness', 'php placement metrics', 'php placement placement-report', 'php placement privacy-report', 'php placement export', 'php placement rollback-import', 'php placement config-export', 'php placement config-validate', 'php placement config-import', 'php placement deliver-notifications', 'php placement work-integrations', 'php placement certify-notifications', 'php placement optimize-slots', 'php placement assign-optimized-slots', 'php -l placement'] as $command) {
+    foreach (['php tests/run.php', 'php tests/alpha1_release_acceptance.php', 'php tests/backup_restore_contract.php', 'php tests/database_connection_cleanup_contract.php', 'php tests/incident_boundary_contract.php', 'php tests/legacy_backup_compatibility_contract.php', 'php tests/worker_delivery_contract.php', 'php tests/public_event_contract.php', 'php tests/webhook_delivery_contract.php', 'php tests/webhook_delivery_concurrency_contract.php', 'php tests/webhook_revoke_completion_concurrency_contract.php', 'php tests/webhook_receiver_example_contract.php', 'php tests/api_identity_contract.php', 'php tests/api_identity_rotation_concurrency_contract.php', 'php tests/api_http_contract.php', 'php tests/database_ownership_contract.php', 'php tests/migration_lock_contract.php', 'php tests/database_lock_release_contract.php', 'php tests/install_concurrency_contract.php', 'php tests/hosted_install_atomicity_contract.php', 'php tests/hosted_install_preflight_contract.php', 'php tests/setup_authorization_contract.php', 'php tests/hosted_install_contract.php', 'php tests/managed_hosting_contract.php', 'php placement publication-check', 'php placement package', 'php placement verify-package', 'php placement install', 'php placement upgrade', 'php placement setup --check', 'php placement serve --help', 'php placement install-demo', 'php placement seed-large-demo', 'php placement browser-qa-plan', 'php placement smoke-http', 'php placement readiness', 'php placement metrics', 'php placement placement-report', 'php placement privacy-report', 'php placement export', 'php placement rollback-import', 'php placement config-export', 'php placement config-validate', 'php placement config-import', 'php placement deliver-notifications', 'php placement work-integrations', 'php placement certify-notifications', 'php placement optimize-slots', 'php placement assign-optimized-slots', 'php -l placement'] as $command) {
         assert_true(str_contains($ci, $command), "Missing CI command: {$command}");
     }
     $releaseWorkflow = (string) file_get_contents($root . '/.github/workflows/release.yml');
@@ -2175,7 +2180,7 @@ YAML;
             str_contains(
                 $workflow,
                 'echo "CPE_TEST_SCHEMA_PYTHON=$RUNNER_TEMP/cpe-public-schema-validator/bin/python" >> "$GITHUB_ENV"',
-            ),
+            ) && str_contains($workflow, 'tests/validate_public_api_contracts.py'),
             'CI and release must persist the exact pinned schema-validator interpreter for extracted-package subprocesses.',
         );
         assert_true(
@@ -2234,6 +2239,11 @@ YAML;
             str_contains($workflow, 'cpe_api_identity_contract')
                 && str_contains($workflow, 'php tests/api_identity_contract.php'),
             'CI and release must run API identity lifecycle parity against a fresh PostgreSQL database.',
+        );
+        assert_true(
+            str_contains($workflow, 'cpe_api_http_contract')
+                && str_contains($workflow, 'php tests/api_http_contract.php'),
+            'CI and release must run the public API HTTP contract against a fresh PostgreSQL database.',
         );
         assert_true(
             str_contains($workflow, 'cpe_api_rotation_concurrency_contract')
@@ -2511,6 +2521,46 @@ test_case('release package includes public source and excludes private runtime d
         assert_true(str_contains($joined, '/tests/api_identity_contract.php'), 'Package should include the API identity lifecycle contract');
         assert_true(str_contains($joined, '/tests/api_identity_rotation_concurrency_contract.php'), 'Package should include the API rotation concurrency contract');
         assert_true(str_contains($joined, '/tests/api_identity_rotation_concurrency_worker.php'), 'Package should include the API rotation concurrency worker');
+        foreach ([
+            'app/Api/Http/ApiCursorCodec.php',
+            'app/Api/Http/ApiHttpException.php',
+            'app/Api/Http/ApiHttpRequest.php',
+            'app/Api/Http/ApiHttpResponse.php',
+            'app/Api/Http/ApiReadService.php',
+            'app/Api/Http/ApiStorageUnavailable.php',
+            'app/Api/Http/ApiV1Kernel.php',
+            'public/router.php',
+            'database/migrations/053_api_read_pagination_indexes.sql',
+            'database/migrations/pgsql/017_api_read_pagination_indexes.sql',
+            'contracts/openapi.v1.json',
+            'contracts/schemas/api-v1-opportunity.schema.json',
+            'contracts/schemas/api-v1-application.schema.json',
+            'contracts/schemas/api-v1-meta.schema.json',
+            'contracts/schemas/api-v1-page.schema.json',
+            'contracts/schemas/api-v1-error.schema.json',
+            'contracts/schemas/api-v1-service.schema.json',
+            'contracts/schemas/api-v1-opportunity-item.schema.json',
+            'contracts/schemas/api-v1-application-item.schema.json',
+            'contracts/schemas/api-v1-opportunity-collection.schema.json',
+            'contracts/schemas/api-v1-application-collection.schema.json',
+            'contracts/examples/api-v1-service.json',
+            'contracts/examples/api-v1-opportunity-item.json',
+            'contracts/examples/api-v1-opportunity-collection.json',
+            'contracts/examples/api-v1-application-item.json',
+            'contracts/examples/api-v1-application-collection.json',
+            'contracts/examples/api-v1-error.json',
+            'contracts/fixtures/api-v1-opportunity.consumer.json',
+            'contracts/fixtures/api-v1-application.consumer.json',
+            'contracts/fixtures/api-v1-opportunity.future-field.consumer.json',
+            'docs/api/v1.md',
+            'tests/api_http_contract.php',
+            'tests/validate_public_api_contracts.py',
+        ] as $apiPackagePath) {
+            assert_true(
+                str_contains($joined, '/' . $apiPackagePath),
+                'Package should include public API v1 file: ' . $apiPackagePath,
+            );
+        }
         assert_true(str_contains($joined, '/tests/validate_public_event_schemas.py'), 'Package should include the independent Draft 2020-12 validator');
         assert_true(str_contains($joined, '/tests/requirements-public-event-schema.txt'), 'Package should include pinned schema-validator test dependencies');
         assert_true(str_contains($joined, '/tests/authorized_setup_recovery_fixture.php'), 'Package should include the authorized setup recovery test fixture');
@@ -2538,6 +2588,7 @@ test_case('release package includes public source and excludes private runtime d
         assert_true(str_contains($joined, '/database/migrations/050_signed_webhook_integrations.sql'), 'Package should include SQLite signed webhook migration');
         assert_true(str_contains($joined, '/database/migrations/051_webhook_claim_cursor.sql'), 'Package should include SQLite webhook fairness cursor migration');
         assert_true(str_contains($joined, '/database/migrations/052_api_identity_foundation.sql'), 'Package should include SQLite API identity migration');
+        assert_true(str_contains($joined, '/database/migrations/053_api_read_pagination_indexes.sql'), 'Package should include SQLite API pagination indexes');
         assert_true(str_contains($joined, '/database/migrations/pgsql/001_portal_baseline.sql'), 'Package should include PostgreSQL migrations');
         assert_true(str_contains($joined, '/database/migrations/pgsql/011_internal_event_deliveries.sql'), 'Package should include PostgreSQL internal observer delivery migration');
         assert_true(str_contains($joined, '/database/migrations/pgsql/012_module_enabled_constraint.sql'), 'Package should include PostgreSQL module enabled constraint migration');
@@ -2545,6 +2596,7 @@ test_case('release package includes public source and excludes private runtime d
         assert_true(str_contains($joined, '/database/migrations/pgsql/014_signed_webhook_integrations.sql'), 'Package should include PostgreSQL signed webhook migration');
         assert_true(str_contains($joined, '/database/migrations/pgsql/015_webhook_claim_cursor.sql'), 'Package should include PostgreSQL webhook fairness cursor migration');
         assert_true(str_contains($joined, '/database/migrations/pgsql/016_api_identity_foundation.sql'), 'Package should include PostgreSQL API identity migration');
+        assert_true(str_contains($joined, '/database/migrations/pgsql/017_api_read_pagination_indexes.sql'), 'Package should include PostgreSQL API pagination indexes');
         assert_true(str_contains($joined, '/data/.gitkeep'), 'Package should keep an empty data directory marker');
         assert_true(!str_contains($joined, '.legacy-private'), 'Package should exclude private archive material');
         assert_true(!str_contains($joined, 'data/app.sqlite'), 'Package should exclude runtime SQLite data');
@@ -2637,6 +2689,15 @@ test_case('release package includes public source and excludes private runtime d
         ]);
         assert_same(0, $tarApiConcurrencyCode, 'Git-free extracted tarball API rotation concurrency contract should pass: ' . $tarApiConcurrencyErr);
         assert_true(str_contains($tarApiConcurrencyOut, 'PASS API token rotation concurrency (sqlite'), 'Extracted tarball should run API rotation concurrency');
+        $tarApiHttpTmp = $tarExtractDir . '/api-http-tmp';
+        assert_true(mkdir($tarApiHttpTmp, 0700, true), 'Could not create extracted tarball API HTTP temp directory');
+        [$tarApiHttpCode, $tarApiHttpOut, $tarApiHttpErr] = run_php_from($tarPackageRoot, 'tests/api_http_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $tarApiHttpTmp,
+        ]);
+        assert_same(0, $tarApiHttpCode, 'Git-free extracted tarball API HTTP contract should pass: ' . $tarApiHttpErr);
+        assert_true(str_contains($tarApiHttpOut, 'PASS public API HTTP contract (sqlite'), 'Extracted tarball should run the public API HTTP contract');
 
         $zipArchive = new PharData($zipPath);
         $zipArchive->extractTo($extractDir);
@@ -2717,6 +2778,15 @@ test_case('release package includes public source and excludes private runtime d
         ]);
         assert_same(0, $packageApiConcurrencyCode, 'Git-free extracted ZIP API rotation concurrency contract should pass: ' . $packageApiConcurrencyErr);
         assert_true(str_contains($packageApiConcurrencyOut, 'PASS API token rotation concurrency (sqlite'), 'Extracted ZIP should run API rotation concurrency');
+        $zipApiHttpTmp = $extractDir . '/api-http-tmp';
+        assert_true(mkdir($zipApiHttpTmp, 0700, true), 'Could not create extracted ZIP API HTTP temp directory');
+        [$packageApiHttpCode, $packageApiHttpOut, $packageApiHttpErr] = run_php_from($packageRoot, 'tests/api_http_contract.php', [
+            'CPE_DB_DRIVER' => '',
+            'CPE_DATABASE_URL' => '',
+            'TMPDIR' => $zipApiHttpTmp,
+        ]);
+        assert_same(0, $packageApiHttpCode, 'Git-free extracted ZIP API HTTP contract should pass: ' . $packageApiHttpErr);
+        assert_true(str_contains($packageApiHttpOut, 'PASS public API HTTP contract (sqlite'), 'Extracted ZIP should run the public API HTTP contract');
 
         $packageRuntimeFixture = $packageRoot . '/data/restore-staging/package-contract.sqlite';
         try {
@@ -3079,7 +3149,7 @@ test_case('serve command documents the local PHP server wrapper', function (): v
     [$helpCode, $helpOut, $helpErr] = run_cli(['serve', '--help']);
     assert_same(0, $helpCode, 'Serve help should exit cleanly: ' . $helpErr);
     assert_true(str_contains($helpOut, 'php placement serve'), 'Serve help should show wrapper command');
-    assert_true(str_contains($helpOut, 'php -S 127.0.0.1:8000 -t public'), 'Serve help should disclose built-in server equivalent');
+    assert_true(str_contains($helpOut, 'php -S 127.0.0.1:8000 -t public public/router.php'), 'Serve help should disclose the clean-path development-router equivalent');
 
     [$badCode, $badOut, $badErr] = run_cli(['serve', 'not-a-port']);
     assert_same(1, $badCode, 'Invalid serve address should fail');
