@@ -88,3 +88,13 @@ pull request, current required CI, code-owner review for security/persistence/
 release boundaries, stale-review dismissal, resolved conversations, no force
 push, no branch deletion, and restricted administrator bypass. `CODEOWNERS` and
 pull-request templates document this policy but do not enforce it by themselves.
+
+## Implementation backlog
+
+The dependency-ordered implementation and evidence plan is maintained in
+[Engine production epic #22](https://github.com/agrim/campus-placement-engine/issues/22).
+That epic links repository protection, supported-environment qualification,
+browser/accessibility, static and security analysis, capacity, compatibility,
+privacy/incident evidence, and characterization-first maintainability work. An
+item is complete only when its issue acceptance criteria and cited evidence are
+satisfied; closing the issue is not itself proof.
