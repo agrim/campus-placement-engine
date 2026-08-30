@@ -2,15 +2,16 @@
 
 Date: 2026-07-18
 
-> Release update, 2026-08-28: public Engine `v0.1.0-alpha.2` is published from
+> Release update, 2026-08-30: public Engine `v0.1.0-alpha.4` is published from
 > the exact tagged commit with verified ZIP, tar.gz, and checksum assets. The
 > private Cloud control plane consumes that immutable artifact and its versioned
-> managed-hosting contract. Cloud CI now covers package verification,
-> control-plane isolation, and a full PostgreSQL hosted lifecycle with two
-> separately credentialed institution databases. This is repository evidence,
-> not a production-SaaS claim: real infrastructure, secrets, DNS/TLS, offsite
-> retention and restore drills, monitoring, billing, and support/SLO operations
-> remain deployment gates.
+> managed-hosting and public-integration contracts. Cloud CI covers immutable
+> package verification, control-plane isolation, connector lifecycle and rollout,
+> and a full PostgreSQL hosted lifecycle with two separately credentialed
+> institution databases. This is repository evidence, not a production-SaaS
+> claim: real infrastructure, secrets, DNS/TLS, offsite retention and restore
+> drills, monitoring, billing, connector-runtime canaries, institutional pilots,
+> and support/SLO operations remain deployment gates.
 
 > Repository-boundary update, 2026-08-26: hosted control-plane, tenant
 > provisioning, fleet-operation, and support-management implementation now lives
@@ -25,8 +26,8 @@ Date: 2026-07-18
 > `application.status_changed` v1 events. Subscription URLs, encrypted signing
 > material, event and aggregate identifiers, payloads, delivery state, and raw
 > diagnostics remain in each institution data plane. Cloud remains optional and
-> receives none of that data. Local PostgreSQL and live TLS endpoints remain
-> release-environment proof gates rather than claims made by this working tree.
+> receives none of that data. Ephemeral PostgreSQL execution passes release CI;
+> a live production-shaped TLS endpoint remains a separate deployment proof gate.
 
 > Phase 3A API identity update, 2026-08-30: the Engine now contains a
 > disabled-by-default institution-local service-account and verifier-only token
