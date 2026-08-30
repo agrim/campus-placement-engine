@@ -1,0 +1,37 @@
+name: Apply staged production-readiness README link
+
+on:
+  push:
+    branches:
+      - pro/production-readiness-hardening-2026-08-30
+    paths:
+      - .github/pro-readme.patch.b64
+      - .github/workflows/apply-pro-readme.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check out branch
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+
+      - name: Apply README patch and remove bootstrap files
+        shell: bash
+        run: |
+          set -euo pipefail
+          base64 --decode .github/pro-readme.patch.b64 > "$RUNNER_TEMP/readme.patch"
+          git apply --check "$RUNNER_TEMP/readme.patch"
+          git apply "$RUNNER_TEMP/readme.patch"
+          git rm .github/pro-readme.patch.b64 .github/workflows/apply-pro-readme.yml
+          git add README.md
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'Link production readiness from README'
+          git push origin "HEAD:${GITHUB_REF_NAME}"
