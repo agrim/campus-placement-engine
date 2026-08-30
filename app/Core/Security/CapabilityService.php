@@ -9,6 +9,11 @@ use PDO;
 
 final class CapabilityService
 {
+    /**
+     * Direct construction without a ModuleRegistry is reserved for isolated
+     * bootstrap or contract-test contexts. Installed runtime construction must
+     * use fromDatabase(), which requires the current durable module registry.
+     */
     public function __construct(
         private readonly array $roleCapabilities,
         private readonly ?ModuleRegistry $modules = null,
@@ -34,7 +39,7 @@ final class CapabilityService
         return array_values(array_unique($this->roleCapabilities[$role] ?? []));
     }
 
-    public static function fromDatabase(PDO $pdo, ?ModuleRegistry $modules = null): self
+    public static function fromDatabase(PDO $pdo, ModuleRegistry $modules): self
     {
         try {
             $roleCapabilities = [];
