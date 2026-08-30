@@ -344,8 +344,8 @@ and runs readiness plus HTTP smoke. See `disaster-recovery.md`.
 
 ```bash
 php placement package --target=dist --force
-php placement verify-package dist/campus-placement-engine-0.1.0-alpha.3.tar.gz
-php placement verify-package dist/campus-placement-engine-0.1.0-alpha.3.zip
+php placement verify-package dist/campus-placement-engine-0.1.0-alpha.4.tar.gz
+php placement verify-package dist/campus-placement-engine-0.1.0-alpha.4.zip
 ```
 
 Extract the package into a clean directory, run `php placement

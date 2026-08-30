@@ -3,7 +3,7 @@
 return [
     'app' => [
         'name' => 'Campus Placement Engine',
-        'version' => '0.1.0-alpha.3',
+        'version' => '0.1.0-alpha.4',
     ],
     'database' => [
         'path' => __DIR__ . '/../data/app.sqlite',

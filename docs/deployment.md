@@ -462,7 +462,7 @@ moving the release package between machines.
 Verify the package before publishing or installing it elsewhere:
 
 ```bash
-php placement verify-package dist/campus-placement-engine-0.1.0-alpha.3.zip
+php placement verify-package dist/campus-placement-engine-0.1.0-alpha.4.zip
 ```
 
 Before publishing a package, extract it into a clean temp directory and run:

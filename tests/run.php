@@ -2074,7 +2074,7 @@ test_case('starter configuration templates validate for every workflow', functio
 
 test_case('open-source release governance files and ignore protections exist', function (): void {
     $root = dirname(__DIR__);
-    assert_same('0.1.0-alpha.3', cpe_config('app.version'), 'Release package version');
+    assert_same('0.1.0-alpha.4', cpe_config('app.version'), 'Release package version');
     foreach ([
         'README.md',
         'LICENSE',
@@ -2106,6 +2106,7 @@ test_case('open-source release governance files and ignore protections exist', f
         'docs/releases/v0.1.0-alpha.1.md',
         'docs/releases/v0.1.0-alpha.2.md',
         'docs/releases/v0.1.0-alpha.3.md',
+        'docs/releases/v0.1.0-alpha.4.md',
         'INSTALL.md',
         'examples/csv-templates/README.md',
         'examples/csv-templates/candidate_unavailability_windows.csv',
@@ -2644,7 +2645,7 @@ test_case('release package includes public source and excludes private runtime d
         assert_true(str_contains($joined, '/contracts/schemas/application.status_changed.v1.schema.json'), 'Package should include the strict event schema');
         assert_true(str_contains($joined, '/contracts/examples/application.status_changed.v1.json'), 'Package should include the public event example');
         assert_true(str_contains($joined, '/contracts/fixtures/application.status_changed.v1.consumer.json'), 'Package should include the frozen consumer fixture');
-        assert_true(str_contains($joined, '/docs/releases/v0.1.0-alpha.3.md'), 'Package should include current release notes');
+        assert_true(str_contains($joined, '/docs/releases/v0.1.0-alpha.4.md'), 'Package should include current release notes');
         assert_true(str_contains($joined, '/examples/env/local.env.example'), 'Package should include synthetic env template');
         assert_true(str_contains($joined, '/examples/integrations/verify-webhook.php'), 'Package should include the dependency-light consumer verification example');
         assert_true(str_contains($joined, '/examples/deployment/apache-vhost.conf'), 'Package should include Apache deployment example');
