@@ -1,0 +1,18 @@
+# Default ownership. GitHub must also require Code Owner review on protected main.
+* @agrim
+
+# Security, identity, persistence, release, and compatibility boundaries.
+/.github/workflows/ @agrim
+/SECURITY.md @agrim
+/app/Core/Backup/ @agrim
+/app/Core/Events/ @agrim
+/app/Core/Persistence/ @agrim
+/app/Core/Security/ @agrim
+/app/Hosted/ @agrim
+/app/Security/ @agrim
+/contracts/ @agrim
+/database/ @agrim
+/docs/compatibility.md @agrim
+/docs/managed-hosting-contract.md @agrim
+/docs/release-checklist.md @agrim
+/placement @agrim
