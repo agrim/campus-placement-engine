@@ -263,18 +263,34 @@ final class Auth
         ?int $subjectId,
         string $detail = '',
         ?PDO $pdo = null,
+        ?int $actorServiceAccountId = null,
     ): void
     {
+        if ($actorId !== null && $actorServiceAccountId !== null) {
+            throw new \RuntimeException('Audit actor attribution must be exclusive.');
+        }
         $safeAction = isset(self::AUDIT_DETAILS[$action]) ? $action : 'audit.unclassified';
         $safeDetail = self::AUDIT_DETAILS[$action] ?? 'Unclassified audit event recorded.';
         $safeSubjectType = self::AUDIT_SUBJECT_ALIASES[$subjectType] ?? $subjectType;
         $safeSubjectType = in_array($safeSubjectType, self::AUDIT_SUBJECT_TYPES, true) ? $safeSubjectType : 'unknown';
         [$ipAddress, $userAgent] = self::requestMetadata();
         $stmt = ($pdo ?? Database::connection())->prepare(
-            'INSERT INTO audit_logs (actor_user_id, action, subject_type, subject_id, detail, ip_address, user_agent, created_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?)'
+            'INSERT INTO audit_logs
+             (actor_user_id, actor_service_account_id, action, subject_type, subject_id,
+              detail, ip_address, user_agent, created_at)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)'
         );
-        $stmt->execute([$actorId, $safeAction, $safeSubjectType, $subjectId, $safeDetail, $ipAddress, $userAgent, cpe_now()]);
+        $stmt->execute([
+            $actorId,
+            $actorServiceAccountId,
+            $safeAction,
+            $safeSubjectType,
+            $subjectId,
+            $safeDetail,
+            $ipAddress,
+            $userAgent,
+            cpe_now(),
+        ]);
     }
 
     private static function requestMetadata(): array

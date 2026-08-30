@@ -39,6 +39,7 @@ final class ApplicationStatusWriter
         string $note,
         string $occurredAt,
         array $privateContext = [],
+        ?int $actorServiceAccountId = null,
     ): array {
         return WriteTransaction::run($this->pdo, function () use (
             $applicationId,
@@ -50,6 +51,7 @@ final class ApplicationStatusWriter
             $note,
             $occurredAt,
             $privateContext,
+            $actorServiceAccountId,
         ): array {
             self::assertStatus($expectedStatus);
             self::assertStatus($toStatus);
@@ -58,6 +60,9 @@ final class ApplicationStatusWriter
             }
             if ($applicationId < 1 || $expectedVersion < 1) {
                 throw new RuntimeException('Application status aggregate identity is invalid.');
+            }
+            if ($actorId !== null && $actorServiceAccountId !== null) {
+                throw new RuntimeException('Application transition actor attribution must be exclusive.');
             }
             if (preg_match('/^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$/D', $occurredAt) !== 1) {
                 throw new RuntimeException('Application status occurrence time is invalid.');
@@ -95,8 +100,8 @@ final class ApplicationStatusWriter
             $movement = $this->pdo->prepare(
                 'INSERT INTO events
                  (application_id, candidate_id, company_id, from_status, to_status,
-                  actor_user_id, actor_role, note, created_at)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                  actor_user_id, actor_service_account_id, actor_role, note, created_at)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
             );
             $movement->execute([
                 $applicationId,
@@ -105,6 +110,7 @@ final class ApplicationStatusWriter
                 $expectedStatus,
                 $toStatus,
                 $actorId,
+                $actorServiceAccountId,
                 $actorRole,
                 $note,
                 $occurredAt,

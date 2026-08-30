@@ -17,13 +17,16 @@ use PDO;
  *
  * The established placement implementation remains the single owner of
  * workflow policy and private placement effects. This boundary adds a fresh
- * durable browser-user authorization decision in the same outer transaction.
+ * durable actor authorization decision in the same outer transaction.
  */
 final class ApplicationTransitionService
 {
     public const CAPABILITY = 'placement.application.transition';
+    public const SERVICE_SCOPE = 'applications.transition';
     public const DENIED_CODE = 'BOARD_TRANSITION_FORBIDDEN';
     public const DENIED_MESSAGE = 'Auditors cannot change candidate status.';
+    public const SERVICE_DENIED_CODE = 'API_APPLICATION_TRANSITION_FORBIDDEN';
+    public const SERVICE_DENIED_MESSAGE = 'The service account cannot transition this application.';
 
     private readonly PDO $pdo;
 
@@ -36,6 +39,9 @@ final class ApplicationTransitionService
         ApplicationTransitionCommand $command,
         ApplicationTransitionActor $actor,
     ): ApplicationTransitionResult {
+        if (!$actor->isBrowserUser()) {
+            $this->deny();
+        }
         return WriteTransaction::run($this->pdo, function () use ($command, $actor): ApplicationTransitionResult {
             // Canonical PostgreSQL transition order uses PortalKernelSynchronizer's
             // module-first gate: module_installations, users, role_capabilities.
@@ -52,6 +58,31 @@ final class ApplicationTransitionService
                 $command->expectedFromStatus(),
                 $command->idempotencyKey(),
                 $currentUser,
+            );
+            return ApplicationTransitionResult::fromLegacyResult($result);
+        });
+    }
+
+    public function executeForServiceAccount(
+        ApplicationTransitionCommand $command,
+        ApplicationTransitionActor $actor,
+    ): ApplicationTransitionResult {
+        if (!$actor->isServiceAccount()) {
+            $this->denyServiceAccount();
+        }
+        return WriteTransaction::run($this->pdo, function () use ($command, $actor): ApplicationTransitionResult {
+            // Canonical PostgreSQL service-command lock order is module,
+            // institution, service account, exact scope, capability catalog.
+            $this->lockServicePlacementModule();
+            $this->revalidateServiceAccount($actor);
+            $implementation = new LegacyPlacementService($this->pdo);
+            $result = $implementation->applyServiceAccountMove(
+                $command->applicationId(),
+                $actor->serviceAccountId(),
+                $command->toStatus(),
+                $command->transitionKey(),
+                $command->note(),
+                $command->expectedFromStatus(),
             );
             return ApplicationTransitionResult::fromLegacyResult($result);
         });
@@ -97,6 +128,75 @@ final class ApplicationTransitionService
         $module->fetch(PDO::FETCH_ASSOC);
     }
 
+    private function lockServicePlacementModule(): void
+    {
+        $module = $this->pdo->prepare(
+            'SELECT module_key, enabled FROM module_installations
+             WHERE module_key = ?' . ($this->isPostgres() ? ' FOR UPDATE' : ''),
+        );
+        $module->execute(['placement']);
+        $row = $module->fetch(PDO::FETCH_ASSOC);
+        if (!is_array($row)
+            || (string) ($row['module_key'] ?? '') !== 'placement'
+            || !in_array($row['enabled'] ?? null, [1, '1'], true)) {
+            $this->denyServiceAccount();
+        }
+    }
+
+    private function revalidateServiceAccount(ApplicationTransitionActor $actor): void
+    {
+        $lock = $this->isPostgres() ? ' FOR UPDATE' : '';
+        $institution = $this->pdo->prepare(
+            "SELECT id, public_id FROM institutions WHERE slug = 'default'" . $lock,
+        );
+        $institution->execute();
+        $institutionRow = $institution->fetch(PDO::FETCH_ASSOC);
+        if (!is_array($institutionRow)
+            || (int) ($institutionRow['id'] ?? 0) !== $actor->institutionId()
+            || !hash_equals((string) ($institutionRow['public_id'] ?? ''), $actor->institutionPublicId())) {
+            $this->denyServiceAccount();
+        }
+
+        $account = $this->pdo->prepare(
+            'SELECT id, public_id, institution_id, status, disabled_at, revoked_at
+             FROM api_service_accounts WHERE id = ?' . $lock,
+        );
+        $account->execute([$actor->serviceAccountId()]);
+        $accountRow = $account->fetch(PDO::FETCH_ASSOC);
+        if (!is_array($accountRow)
+            || (int) ($accountRow['institution_id'] ?? 0) !== $actor->institutionId()
+            || !hash_equals((string) ($accountRow['public_id'] ?? ''), $actor->serviceAccountPublicId())
+            || (string) ($accountRow['status'] ?? '') !== 'enabled'
+            || ($accountRow['disabled_at'] ?? null) !== null
+            || ($accountRow['revoked_at'] ?? null) !== null) {
+            $this->denyServiceAccount();
+        }
+
+        $scope = $this->pdo->prepare(
+            'SELECT service_account_id, scope FROM api_service_account_scopes
+             WHERE service_account_id = ? AND scope = ?' . $lock,
+        );
+        $scope->execute([$actor->serviceAccountId(), self::SERVICE_SCOPE]);
+        $scopeRows = $scope->fetchAll(PDO::FETCH_ASSOC);
+        if (count($scopeRows) !== 1) {
+            $this->denyServiceAccount();
+        }
+
+        $capabilities = $this->pdo->prepare(
+            'SELECT role_key, capability FROM role_capabilities
+             WHERE capability = ? ORDER BY role_key' . $lock,
+        );
+        $capabilities->execute([self::CAPABILITY]);
+        if ($capabilities->fetchAll(PDO::FETCH_ASSOC) === []) {
+            $this->denyServiceAccount();
+        }
+
+        $modules = new ModuleRegistry(cpe_config('modules', []), $this->pdo);
+        if (!$modules->isEnabled('placement')) {
+            $this->denyServiceAccount();
+        }
+    }
+
     private function lockRoleCapabilities(string $role): void
     {
         if (!$this->isPostgres()) {
@@ -121,5 +221,10 @@ final class ApplicationTransitionService
     private function deny(): never
     {
         throw new UserVisibleException(self::DENIED_CODE, self::DENIED_MESSAGE);
+    }
+
+    private function denyServiceAccount(): never
+    {
+        throw new UserVisibleException(self::SERVICE_DENIED_CODE, self::SERVICE_DENIED_MESSAGE);
     }
 }

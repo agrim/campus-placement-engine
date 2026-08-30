@@ -148,6 +148,94 @@ function transition_boundary_command(int $applicationId, string $key, string $no
     );
 }
 
+function transition_boundary_named_command(
+    int $applicationId,
+    string $toStatus,
+    string $transitionKey,
+    string $expectedStatus,
+    string $idempotencyKey,
+    string $note,
+): ApplicationTransitionCommand {
+    return new ApplicationTransitionCommand(
+        $applicationId,
+        $toStatus,
+        $transitionKey,
+        $note,
+        $expectedStatus,
+        $idempotencyKey,
+    );
+}
+
+/** @return array<string, mixed> */
+function transition_boundary_transition(
+    PDO $pdo,
+    int $applicationId,
+    string $fromStatus,
+    string $toStatus,
+    bool $correction,
+): array {
+    $query = $pdo->prepare(
+        'SELECT transition.id, transition.transition_key, transition.guards_json
+         FROM applications application
+         JOIN workflow_transitions transition
+           ON transition.workflow_version_id = application.workflow_version_id
+         WHERE application.id = ? AND transition.from_state_key = ?
+           AND transition.to_state_key = ? AND transition.is_correction = ?',
+    );
+    $query->execute([$applicationId, $fromStatus, $toStatus, $correction ? 1 : 0]);
+    $row = $query->fetch(PDO::FETCH_ASSOC);
+    if (!is_array($row)) {
+        throw new RuntimeException('Transition boundary fixture has no matching named transition.');
+    }
+    return $row;
+}
+
+/** @param array<string, int|string> $baseline */
+function transition_boundary_expect_service_denied(
+    ApplicationTransitionService $service,
+    ApplicationTransitionCommand $command,
+    ApplicationTransitionActor $actor,
+    PDO $pdo,
+    array $baseline,
+    string $expectedCode,
+): void {
+    try {
+        $service->executeForServiceAccount($command, $actor);
+    } catch (UserVisibleException $exception) {
+        transition_boundary_same(
+            $expectedCode,
+            $exception->publicCode(),
+            'Service-account transition denial returned the wrong public code.',
+        );
+        transition_boundary_same(
+            $baseline,
+            transition_boundary_evidence($pdo, $command->applicationId()),
+            'Service-account transition denial retained transition evidence.',
+        );
+        $keyCount = $pdo->prepare('SELECT COUNT(*) FROM idempotency_keys WHERE key = ?');
+        $keyCount->execute([$command->idempotencyKey()]);
+        transition_boundary_same(
+            0,
+            (int) $keyCount->fetchColumn(),
+            'Service-account transition touched browser form idempotency.',
+        );
+        return;
+    }
+    throw new RuntimeException('Service-account transition drift did not fail closed.');
+}
+
+function transition_boundary_in_rollback(PDO $pdo, callable $operation): void
+{
+    $pdo->beginTransaction();
+    try {
+        $operation();
+    } finally {
+        if ($pdo->inTransaction()) {
+            $pdo->rollBack();
+        }
+    }
+}
+
 function transition_boundary_expect_denied(
     ApplicationTransitionService $service,
     ApplicationTransitionCommand $command,
@@ -265,7 +353,7 @@ try {
         'name' => 'Boundary Contract Company',
     ], (int) $admin['id']);
     $applicationIds = [];
-    for ($index = 1; $index <= 4; $index++) {
+    for ($index = 1; $index <= 6; $index++) {
         $candidateId = $fixtures->saveCandidate([
             'external_id' => 'BND' . str_pad((string) $index, 3, '0', STR_PAD_LEFT),
             'name' => 'Boundary Candidate ' . $index,
@@ -453,6 +541,448 @@ try {
         0,
         (int) $rollbackKeyCount->fetchColumn(),
         'Nested transition failure retained its idempotency reservation.',
+    );
+
+    $institution = $pdo->query(
+        "SELECT id, public_id FROM institutions WHERE slug = 'default'",
+    )->fetch(PDO::FETCH_ASSOC);
+    transition_boundary_assert(is_array($institution), 'Service transition fixture institution is missing.');
+    $serviceAccountPublicId = 'apisa_' . str_repeat('6', 32);
+    $now = cpe_now();
+    $pdo->prepare(
+        'INSERT INTO api_service_accounts
+         (public_id, institution_id, name, status, disabled_at, revoked_at,
+          created_by_user_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, NULL, NULL, ?, ?, ?)',
+    )->execute([
+        $serviceAccountPublicId,
+        (int) $institution['id'],
+        'Transition boundary service account',
+        'enabled',
+        (int) $admin['id'],
+        $now,
+        $now,
+    ]);
+    $serviceAccountId = Database::lastInsertId($pdo);
+    $pdo->prepare(
+        'INSERT INTO api_service_account_scopes
+         (service_account_id, scope, created_by_user_id, created_at) VALUES (?, ?, ?, ?)',
+    )->execute([
+        $serviceAccountId,
+        ApplicationTransitionService::SERVICE_SCOPE,
+        (int) $admin['id'],
+        $now,
+    ]);
+    $serviceActor = ApplicationTransitionActor::fromServiceAccount(
+        $serviceAccountId,
+        $serviceAccountPublicId,
+        (int) $institution['id'],
+        (string) $institution['public_id'],
+    );
+    $serviceApplicationId = $applicationIds[4];
+    $serviceTransition = transition_boundary_transition(
+        $pdo,
+        $serviceApplicationId,
+        'idle',
+        'scheduled',
+        false,
+    );
+    $serviceBrowserKey = str_repeat('5', 32);
+    $serviceResult = $boundary->executeForServiceAccount(
+        transition_boundary_named_command(
+            $serviceApplicationId,
+            'scheduled',
+            (string) $serviceTransition['transition_key'],
+            'idle',
+            $serviceBrowserKey,
+            'service transition',
+        ),
+        $serviceActor,
+    )->toArray();
+    transition_boundary_same(
+        ['duplicate' => false, 'status' => 'scheduled'],
+        $serviceResult,
+        'Service-account transition returned the wrong shared result.',
+    );
+    transition_boundary_same(
+        [
+            'status' => 'scheduled',
+            'aggregate_version' => 2,
+            'events' => 1,
+            'workflow_events' => 1,
+            'outbox' => 1,
+            'audit' => 1,
+        ],
+        transition_boundary_evidence($pdo, $serviceApplicationId),
+        'Service-account transition changed the shared domain evidence contract.',
+    );
+    $movementActor = $pdo->prepare(
+        'SELECT actor_user_id, actor_service_account_id, actor_role
+         FROM events WHERE application_id = ?',
+    );
+    $movementActor->execute([$serviceApplicationId]);
+    transition_boundary_same(
+        [
+            'actor_user_id' => null,
+            'actor_service_account_id' => $serviceAccountId,
+            'actor_role' => ApplicationTransitionActor::SERVICE_ACCOUNT_ROLE,
+        ],
+        $movementActor->fetch(PDO::FETCH_ASSOC),
+        'Movement event did not retain exclusive service-account attribution.',
+    );
+    $workflowActor = $pdo->prepare(
+        'SELECT actor_user_id, actor_service_account_id, actor_role
+         FROM workflow_transition_events WHERE application_id = ?',
+    );
+    $workflowActor->execute([$serviceApplicationId]);
+    transition_boundary_same(
+        [
+            'actor_user_id' => null,
+            'actor_service_account_id' => $serviceAccountId,
+            'actor_role' => ApplicationTransitionActor::SERVICE_ACCOUNT_ROLE,
+        ],
+        $workflowActor->fetch(PDO::FETCH_ASSOC),
+        'Workflow event did not retain exclusive service-account attribution.',
+    );
+    $auditActor = $pdo->prepare(
+        "SELECT actor_user_id, actor_service_account_id
+         FROM audit_logs
+         WHERE action = 'transition' AND subject_type = 'application' AND subject_id = ?",
+    );
+    $auditActor->execute([$serviceApplicationId]);
+    transition_boundary_same(
+        ['actor_user_id' => null, 'actor_service_account_id' => $serviceAccountId],
+        $auditActor->fetch(PDO::FETCH_ASSOC),
+        'Transition audit did not retain exclusive service-account attribution.',
+    );
+    $serviceOutbox = $pdo->prepare(
+        "SELECT payload_json FROM domain_event_outbox event
+         JOIN applications application ON application.public_id = event.aggregate_public_id
+         WHERE application.id = ? AND event.event_name = 'placement.application.transitioned'",
+    );
+    $serviceOutbox->execute([$serviceApplicationId]);
+    $servicePayload = json_decode((string) $serviceOutbox->fetchColumn(), true, 16, JSON_THROW_ON_ERROR);
+    transition_boundary_same(
+        ApplicationTransitionActor::SERVICE_ACCOUNT_ROLE,
+        $servicePayload['actor_role'] ?? null,
+        'Service-account transition outbox used a browser role.',
+    );
+    $serviceBrowserKeyCount = $pdo->prepare('SELECT COUNT(*) FROM idempotency_keys WHERE key = ?');
+    $serviceBrowserKeyCount->execute([$serviceBrowserKey]);
+    transition_boundary_same(
+        0,
+        (int) $serviceBrowserKeyCount->fetchColumn(),
+        'Service-account transition wrote browser form idempotency state.',
+    );
+
+    $correction = transition_boundary_transition(
+        $pdo,
+        $serviceApplicationId,
+        'scheduled',
+        'idle',
+        true,
+    );
+    $serviceCommittedEvidence = transition_boundary_evidence($pdo, $serviceApplicationId);
+    transition_boundary_expect_service_denied(
+        $boundary,
+        transition_boundary_named_command(
+            $serviceApplicationId,
+            'idle',
+            (string) $correction['transition_key'],
+            'scheduled',
+            str_repeat('6', 32),
+            'service correction denied',
+        ),
+        $serviceActor,
+        $pdo,
+        $serviceCommittedEvidence,
+        'WORKFLOW_TRANSITION_UNAVAILABLE',
+    );
+
+    $driftApplicationId = $applicationIds[5];
+    $driftTransition = transition_boundary_transition($pdo, $driftApplicationId, 'idle', 'scheduled', false);
+    $driftCommand = static fn (string $key): ApplicationTransitionCommand => transition_boundary_named_command(
+        $driftApplicationId,
+        'scheduled',
+        (string) $driftTransition['transition_key'],
+        'idle',
+        $key,
+        'service authorization drift',
+    );
+    $emptyEvidence = transition_boundary_evidence($pdo, $driftApplicationId);
+
+    transition_boundary_in_rollback($pdo, static function () use (
+        $pdo, $boundary, $driftCommand, $serviceActor, $emptyEvidence, $serviceAccountId,
+    ): void {
+        $now = cpe_now();
+        $pdo->prepare(
+            "UPDATE api_service_accounts
+             SET status = 'disabled', disabled_at = ?, updated_at = ? WHERE id = ?",
+        )->execute([$now, $now, $serviceAccountId]);
+        transition_boundary_expect_service_denied(
+            $boundary,
+            $driftCommand(str_repeat('7', 32)),
+            $serviceActor,
+            $pdo,
+            $emptyEvidence,
+            ApplicationTransitionService::SERVICE_DENIED_CODE,
+        );
+    });
+    transition_boundary_in_rollback($pdo, static function () use (
+        $pdo, $boundary, $driftCommand, $serviceActor, $emptyEvidence, $serviceAccountId,
+    ): void {
+        $now = cpe_now();
+        $pdo->prepare(
+            "UPDATE api_service_accounts
+             SET status = 'revoked', revoked_at = ?, updated_at = ? WHERE id = ?",
+        )->execute([$now, $now, $serviceAccountId]);
+        transition_boundary_expect_service_denied(
+            $boundary,
+            $driftCommand(str_repeat('8', 32)),
+            $serviceActor,
+            $pdo,
+            $emptyEvidence,
+            ApplicationTransitionService::SERVICE_DENIED_CODE,
+        );
+    });
+    $wrongAccountActor = ApplicationTransitionActor::fromServiceAccount(
+        $serviceAccountId,
+        'apisa_' . str_repeat('f', 32),
+        (int) $institution['id'],
+        (string) $institution['public_id'],
+    );
+    transition_boundary_expect_service_denied(
+        $boundary,
+        $driftCommand(str_repeat('9', 32)),
+        $wrongAccountActor,
+        $pdo,
+        $emptyEvidence,
+        ApplicationTransitionService::SERVICE_DENIED_CODE,
+    );
+    transition_boundary_in_rollback($pdo, static function () use (
+        $pdo, $boundary, $driftCommand, $serviceActor, $emptyEvidence, $serviceAccountId,
+    ): void {
+        $pdo->prepare(
+            'DELETE FROM api_service_account_scopes WHERE service_account_id = ? AND scope = ?',
+        )->execute([$serviceAccountId, ApplicationTransitionService::SERVICE_SCOPE]);
+        transition_boundary_expect_service_denied(
+            $boundary,
+            $driftCommand(str_repeat('a', 32)),
+            $serviceActor,
+            $pdo,
+            $emptyEvidence,
+            ApplicationTransitionService::SERVICE_DENIED_CODE,
+        );
+    });
+    $wrongInstitutionActor = ApplicationTransitionActor::fromServiceAccount(
+        $serviceAccountId,
+        $serviceAccountPublicId,
+        (int) $institution['id'] + 1000,
+        'inst_' . str_repeat('f', 32),
+    );
+    transition_boundary_expect_service_denied(
+        $boundary,
+        $driftCommand(str_repeat('b', 32)),
+        $wrongInstitutionActor,
+        $pdo,
+        $emptyEvidence,
+        ApplicationTransitionService::SERVICE_DENIED_CODE,
+    );
+    transition_boundary_in_rollback($pdo, static function () use (
+        $pdo, $boundary, $driftCommand, $serviceActor, $emptyEvidence,
+    ): void {
+        $pdo->prepare('UPDATE module_installations SET enabled = 0 WHERE module_key = ?')
+            ->execute(['placement']);
+        transition_boundary_expect_service_denied(
+            $boundary,
+            $driftCommand(str_repeat('c', 32)),
+            $serviceActor,
+            $pdo,
+            $emptyEvidence,
+            ApplicationTransitionService::SERVICE_DENIED_CODE,
+        );
+    });
+    transition_boundary_in_rollback($pdo, static function () use (
+        $pdo, $boundary, $driftCommand, $serviceActor, $emptyEvidence,
+    ): void {
+        $pdo->prepare('DELETE FROM role_capabilities WHERE capability = ?')
+            ->execute([ApplicationTransitionService::CAPABILITY]);
+        transition_boundary_expect_service_denied(
+            $boundary,
+            $driftCommand(str_repeat('d', 32)),
+            $serviceActor,
+            $pdo,
+            $emptyEvidence,
+            ApplicationTransitionService::SERVICE_DENIED_CODE,
+        );
+    });
+
+    $guardUpdate = $pdo->prepare('UPDATE workflow_transitions SET guards_json = ? WHERE id = ?');
+    $guardUpdate->execute([
+        json_encode(['placement.not_frozen_or_admin'], JSON_THROW_ON_ERROR),
+        (int) $driftTransition['id'],
+    ]);
+    $pdo->prepare(
+        "INSERT INTO settings (key, value) VALUES ('placement_freeze', '1')
+         ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+    )->execute();
+    transition_boundary_expect_service_denied(
+        $boundary,
+        $driftCommand(str_repeat('e', 32)),
+        $serviceActor,
+        $pdo,
+        $emptyEvidence,
+        'WORKFLOW_PLACEMENT_FROZEN',
+    );
+    $guardUpdate->execute([(string) $driftTransition['guards_json'], (int) $driftTransition['id']]);
+    $pdo->prepare("UPDATE settings SET value = '0' WHERE key = 'placement_freeze'")->execute();
+
+    $automaticCompanyId = $fixtures->saveCompany([
+        'code' => 'BNDAUTO',
+        'name' => 'Boundary Automatic Effects Company',
+    ], (int) $admin['id']);
+    $cleanupCandidateId = $fixtures->saveCandidate([
+        'external_id' => 'BNDAUTO001',
+        'name' => 'Boundary Automatic Cleanup Candidate',
+    ], (int) $admin['id']);
+    $fixtures->saveApplication($cleanupCandidateId, $companyId, 'sent', null, (int) $admin['id']);
+    $fixtures->saveApplication($cleanupCandidateId, $automaticCompanyId, 'scheduled', null, (int) $admin['id']);
+    $applicationLookup = $pdo->prepare(
+        'SELECT id FROM applications WHERE candidate_id = ? AND company_id = ?',
+    );
+    $applicationLookup->execute([$cleanupCandidateId, $companyId]);
+    $placedApplicationId = (int) $applicationLookup->fetchColumn();
+    $applicationLookup->execute([$cleanupCandidateId, $automaticCompanyId]);
+    $competingApplicationId = (int) $applicationLookup->fetchColumn();
+    $placedTransition = transition_boundary_transition(
+        $pdo,
+        $placedApplicationId,
+        'sent',
+        'placed',
+        false,
+    );
+    $automaticCleanupKey = str_repeat('1', 32);
+    $boundary->executeForServiceAccount(
+        transition_boundary_named_command(
+            $placedApplicationId,
+            'placed',
+            (string) $placedTransition['transition_key'],
+            'sent',
+            $automaticCleanupKey,
+            'service placement cleanup',
+        ),
+        $serviceActor,
+    );
+    transition_boundary_same(
+        'idle',
+        (string) $pdo->query(
+            "SELECT current_status FROM applications WHERE id = {$competingApplicationId}",
+        )->fetchColumn(),
+        'Service-account placement did not apply the existing competing-application effect.',
+    );
+    foreach (['events', 'workflow_transition_events'] as $table) {
+        $automaticActors = $pdo->prepare(
+            "SELECT COUNT(*) FROM {$table}
+             WHERE application_id IN (?, ?) AND actor_user_id IS NULL
+               AND actor_service_account_id = ? AND actor_role = ?",
+        );
+        $automaticActors->execute([
+            $placedApplicationId,
+            $competingApplicationId,
+            $serviceAccountId,
+            ApplicationTransitionActor::SERVICE_ACCOUNT_ROLE,
+        ]);
+        transition_boundary_same(
+            2,
+            (int) $automaticActors->fetchColumn(),
+            'Automatic placement effects lost service-account attribution in ' . $table . '.',
+        );
+    }
+    $automaticAudits = $pdo->prepare(
+        "SELECT COUNT(*) FROM audit_logs
+         WHERE action = 'transition' AND subject_type = 'application'
+           AND subject_id IN (?, ?) AND actor_user_id IS NULL
+           AND actor_service_account_id = ?",
+    );
+    $automaticAudits->execute([$placedApplicationId, $competingApplicationId, $serviceAccountId]);
+    transition_boundary_same(
+        2,
+        (int) $automaticAudits->fetchColumn(),
+        'Automatic competing-application audit lost service-account attribution.',
+    );
+    $automaticCleanupKeyCount = $pdo->prepare('SELECT COUNT(*) FROM idempotency_keys WHERE key = ?');
+    $automaticCleanupKeyCount->execute([$automaticCleanupKey]);
+    transition_boundary_same(
+        0,
+        (int) $automaticCleanupKeyCount->fetchColumn(),
+        'Automatic service transition wrote browser form idempotency state.',
+    );
+
+    $handoffCandidateId = $fixtures->saveCandidate([
+        'external_id' => 'BNDAUTO002',
+        'name' => 'Boundary Automatic Handoff Candidate',
+    ], (int) $admin['id']);
+    $fixtures->saveApplication($handoffCandidateId, $companyId, 'sendaway', null, (int) $admin['id']);
+    $fixtures->saveApplication($handoffCandidateId, $automaticCompanyId, 'scheduled', null, (int) $admin['id']);
+    $applicationLookup->execute([$handoffCandidateId, $companyId]);
+    $sentApplicationId = (int) $applicationLookup->fetchColumn();
+    $applicationLookup->execute([$handoffCandidateId, $automaticCompanyId]);
+    $handoffApplicationId = (int) $applicationLookup->fetchColumn();
+    $sentTransition = transition_boundary_transition(
+        $pdo,
+        $sentApplicationId,
+        'sendaway',
+        'sent',
+        false,
+    );
+    $automaticHandoffKey = str_repeat('2', 32);
+    $boundary->executeForServiceAccount(
+        transition_boundary_named_command(
+            $sentApplicationId,
+            'sent',
+            (string) $sentTransition['transition_key'],
+            'sendaway',
+            $automaticHandoffKey,
+            'service automatic handoff',
+        ),
+        $serviceActor,
+    );
+    transition_boundary_same(
+        'intransit',
+        (string) $pdo->query(
+            "SELECT current_status FROM applications WHERE id = {$handoffApplicationId}",
+        )->fetchColumn(),
+        'Service-account send transition did not apply the existing automatic handoff effect.',
+    );
+    foreach (['events', 'workflow_transition_events'] as $table) {
+        $automaticActors = $pdo->prepare(
+            "SELECT COUNT(*) FROM {$table}
+             WHERE application_id IN (?, ?) AND actor_user_id IS NULL
+               AND actor_service_account_id = ? AND actor_role = ?",
+        );
+        $automaticActors->execute([
+            $sentApplicationId,
+            $handoffApplicationId,
+            $serviceAccountId,
+            ApplicationTransitionActor::SERVICE_ACCOUNT_ROLE,
+        ]);
+        transition_boundary_same(
+            2,
+            (int) $automaticActors->fetchColumn(),
+            'Automatic handoff lost service-account attribution in ' . $table . '.',
+        );
+    }
+    $automaticAudits->execute([$sentApplicationId, $handoffApplicationId, $serviceAccountId]);
+    transition_boundary_same(
+        2,
+        (int) $automaticAudits->fetchColumn(),
+        'Automatic handoff audit lost service-account attribution.',
+    );
+    $automaticCleanupKeyCount->execute([$automaticHandoffKey]);
+    transition_boundary_same(
+        0,
+        (int) $automaticCleanupKeyCount->fetchColumn(),
+        'Automatic handoff wrote browser form idempotency state.',
     );
 
     echo 'PASS application transition boundary contract (' . Database::driver() . " shared transaction)\n";

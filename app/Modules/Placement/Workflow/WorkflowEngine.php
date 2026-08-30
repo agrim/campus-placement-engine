@@ -77,6 +77,30 @@ final class WorkflowEngine
         throw new UserVisibleException('WORKFLOW_TRANSITION_UNAVAILABLE', 'Workflow transition is unavailable.');
     }
 
+    /**
+     * Resolve one exact ordinary transition by durable capability, without
+     * treating a service account as any browser role or administrator.
+     */
+    public function resolveServiceAccountKey(
+        int $applicationId,
+        string $transitionKey,
+        string $requiredCapability,
+    ): array {
+        $from = $this->currentState($applicationId);
+        foreach ($this->repository->transitionsForApplication($applicationId, $from, true) as $transition) {
+            if ((string) $transition['key'] !== $transitionKey) {
+                continue;
+            }
+            if (!empty($transition['is_correction'])
+                || !hash_equals((string) ($transition['required_capability'] ?? ''), $requiredCapability)) {
+                break;
+            }
+            $this->guards->assertAllowed($transition, $applicationId, 'service_account');
+            return $transition;
+        }
+        throw new UserVisibleException('WORKFLOW_TRANSITION_UNAVAILABLE', 'Workflow transition is unavailable.');
+    }
+
     public function transitionForEffect(int $applicationId, string $fromState, string $toState, bool $correction = false): array
     {
         foreach ($this->repository->transitionsForApplication($applicationId, $fromState, $correction) as $transition) {
@@ -110,7 +134,8 @@ final class WorkflowEngine
         string $actorRole,
         string $reason,
         string $note,
-        array $context = []
+        array $context = [],
+        ?int $actorServiceAccountId = null,
     ): void {
         $this->repository->recordTransition(
             $applicationId,
@@ -119,7 +144,8 @@ final class WorkflowEngine
             $actorRole,
             $reason,
             $note,
-            $context
+            $context,
+            $actorServiceAccountId,
         );
     }
 

@@ -19,6 +19,9 @@ use RuntimeException;
 
 final class PlacementService
 {
+    private const SERVICE_ACCOUNT_ROLE = 'service_account';
+    private const APPLICATION_TRANSITION_CAPABILITY = 'placement.application.transition';
+
     private ?WorkflowEngine $workflowEngine = null;
     private ApplicationStatusWriter $statusWriter;
     private const DEFAULT_EXACT_SLOT_OPTIMIZER_LIMIT = 10;
@@ -393,6 +396,43 @@ final class PlacementService
                 return ['status' => $status];
             }
         );
+    }
+
+    /**
+     * Transaction-local API actor path. Public API idempotency is owned by the
+     * keyed command store, so this deliberately bypasses browser form keys.
+     *
+     * @return array{duplicate: bool, status: string}
+     */
+    public function applyServiceAccountMove(
+        int $applicationId,
+        int $actorServiceAccountId,
+        string $toStatus,
+        string $transitionKey,
+        string $note,
+        string $expectedFromStatus,
+    ): array {
+        if ($actorServiceAccountId < 1) {
+            throw new RuntimeException('Service-account transition identity is invalid.');
+        }
+        if (trim($transitionKey) === '') {
+            throw new UserVisibleException(
+                'WORKFLOW_TRANSITION_UNAVAILABLE',
+                'Workflow transition is unavailable.',
+            );
+        }
+        $status = $this->moveTo(
+            $applicationId,
+            $toStatus,
+            $transitionKey,
+            null,
+            self::SERVICE_ACCOUNT_ROLE,
+            $note,
+            $expectedFromStatus,
+            $actorServiceAccountId,
+            true,
+        );
+        return ['duplicate' => false, 'status' => $status];
     }
 
     /**
@@ -786,9 +826,34 @@ final class PlacementService
         return '';
     }
 
-    public function transition(int $applicationId, string $toStatus, ?int $actorId, string $actorRole, string $note = '', string $expectedFromStatus = '', string $transitionKey = ''): void
+    public function transition(
+        int $applicationId,
+        string $toStatus,
+        ?int $actorId,
+        string $actorRole,
+        string $note = '',
+        string $expectedFromStatus = '',
+        string $transitionKey = '',
+        ?int $actorServiceAccountId = null,
+        bool $serviceCapability = false,
+    ): void
     {
-        $this->transactional(function () use ($applicationId, $toStatus, $actorId, $actorRole, $note, $expectedFromStatus, $transitionKey): void {
+        $this->transactional(function () use (
+            $applicationId,
+            $toStatus,
+            $actorId,
+            $actorRole,
+            $note,
+            $expectedFromStatus,
+            $transitionKey,
+            $actorServiceAccountId,
+            $serviceCapability,
+        ): void {
+        if (($actorId !== null && $actorServiceAccountId !== null)
+            || ($serviceCapability && ($actorServiceAccountId === null || $actorRole !== self::SERVICE_ACCOUNT_ROLE))
+            || (!$serviceCapability && $actorServiceAccountId !== null)) {
+            throw new RuntimeException('Application transition actor attribution is invalid.');
+        }
         $stmt = $this->pdo->prepare(
             'SELECT a.*, c.external_id, c.opted_out, c.placed_company_id, c.current_location, co.code AS company_code
              FROM applications a
@@ -808,15 +873,26 @@ final class PlacementService
         }
         $versionedTransition = null;
         if ($this->workflowEngine !== null) {
-            $versionedTransition = $transitionKey !== ''
-                ? $this->workflowEngine->resolveKey($applicationId, $transitionKey, $actorRole)
-                : $this->workflowEngine->resolveTarget($applicationId, (string) $fromStatus, $toStatus, $actorRole);
+            if ($serviceCapability) {
+                $versionedTransition = $this->workflowEngine->resolveServiceAccountKey(
+                    $applicationId,
+                    $transitionKey,
+                    self::APPLICATION_TRANSITION_CAPABILITY,
+                );
+            } else {
+                $versionedTransition = $transitionKey !== ''
+                    ? $this->workflowEngine->resolveKey($applicationId, $transitionKey, $actorRole)
+                    : $this->workflowEngine->resolveTarget($applicationId, (string) $fromStatus, $toStatus, $actorRole);
+            }
             if ((string) $versionedTransition['from'] !== (string) $fromStatus
                 || (string) $versionedTransition['to'] !== $toStatus
                 || !empty($versionedTransition['is_correction'])) {
                 throw new UserVisibleException('PLACEMENT_TRANSITION_INVALID', 'Named workflow transition does not match the submitted application state.');
             }
         } else {
+            if ($serviceCapability) {
+                throw new UserVisibleException('WORKFLOW_TRANSITION_UNAVAILABLE', 'Workflow transition is unavailable.');
+            }
             if ((int) ($app['opted_out'] ?? 0) === 1 && $toStatus !== 'idle') {
                 throw new UserVisibleException('PLACEMENT_CANDIDATE_OPTED_OUT', 'Candidate has opted out of placement movement.');
             }
@@ -855,20 +931,34 @@ final class PlacementService
                 $note,
                 $now,
                 ['transition_key' => (string) ($versionedTransition['key'] ?? '')],
+                $actorServiceAccountId,
             );
 
             if ($acceptOffer) {
                 $this->acceptCandidateOffer($app, $now);
                 if (($versionedTransition === null || in_array('placement.clear_competing_applications', $effects, true))
                     && $this->setting('allow_offer_upgrade', '0') !== '1') {
-                    $this->clearCompetingActiveApplications($app, $actorId, $actorRole, $now);
+                    $this->clearCompetingActiveApplications(
+                        $app,
+                        $actorId,
+                        $actorRole,
+                        $now,
+                        $actorServiceAccountId,
+                    );
                 }
             } elseif ($moveToOpportunity) {
                 $this->updateCandidateLocation($app, (string) $app['company_code'], $now);
             } elseif ($returnToControl) {
                 $this->updateCandidateLocation($app, 'CP', $now);
                 if ($versionedTransition === null || in_array('placement.start_next_scheduled', $effects, true)) {
-                    $this->handoffToNextScheduledApplication($app, $applicationId, $actorId, $actorRole, $now);
+                    $this->handoffToNextScheduledApplication(
+                        $app,
+                        $applicationId,
+                        $actorId,
+                        $actorRole,
+                        $now,
+                        $actorServiceAccountId,
+                    );
                 }
             }
 
@@ -880,7 +970,8 @@ final class PlacementService
                     $actorRole,
                     '',
                     $note,
-                    ['source' => 'placement.transition']
+                    ['source' => 'placement.transition'],
+                    $actorServiceAccountId,
                 );
             }
             if ($acceptOffer) {
@@ -897,7 +988,15 @@ final class PlacementService
                     $now
                 ));
             }
-            Auth::audit($actorId, 'transition', 'application', $applicationId, "{$fromStatus} -> {$toStatus}");
+            Auth::audit(
+                $actorId,
+                'transition',
+                'application',
+                $applicationId,
+                "{$fromStatus} -> {$toStatus}",
+                $this->pdo,
+                $actorServiceAccountId,
+            );
             $this->synchronizeDurableDomain();
         });
     }
@@ -930,12 +1029,24 @@ final class PlacementService
         ?int $actorId,
         string $actorRole,
         string $note = '',
-        string $expectedFromStatus = ''
+        string $expectedFromStatus = '',
+        ?int $actorServiceAccountId = null,
+        bool $serviceCapability = false,
     ): string {
         if ($toStatus === '') {
             throw new UserVisibleException('PLACEMENT_TRANSITION_REQUIRED', 'Workflow transition target is required.');
         }
-        $this->transition($applicationId, $toStatus, $actorId, $actorRole, $note, $expectedFromStatus, $transitionKey);
+        $this->transition(
+            $applicationId,
+            $toStatus,
+            $actorId,
+            $actorRole,
+            $note,
+            $expectedFromStatus,
+            $transitionKey,
+            $actorServiceAccountId,
+            $serviceCapability,
+        );
         return $toStatus;
     }
 
@@ -4039,7 +4150,13 @@ final class PlacementService
         }
     }
 
-    private function clearCompetingActiveApplications(array $placedApp, ?int $actorId, string $actorRole, string $now): void
+    private function clearCompetingActiveApplications(
+        array $placedApp,
+        ?int $actorId,
+        string $actorRole,
+        string $now,
+        ?int $actorServiceAccountId = null,
+    ): void
     {
         $activeStatuses = $this->activeStatuses();
         if ($activeStatuses === []) {
@@ -4078,6 +4195,7 @@ final class PlacementService
                 $note,
                 $now,
                 ['source' => 'placement.clear_competing_applications'],
+                $actorServiceAccountId,
             );
             if ($correctionTransition !== null) {
                 $this->workflowEngine?->recordAppliedTransition(
@@ -4087,14 +4205,35 @@ final class PlacementService
                     $actorRole,
                     'placement_cleanup',
                     $note,
-                    ['source' => 'placement.clear_competing_applications']
+                    ['source' => 'placement.clear_competing_applications'],
+                    $actorServiceAccountId,
+                );
+            }
+            if ($actorServiceAccountId !== null) {
+                Auth::audit(
+                    null,
+                    'transition',
+                    'application',
+                    (int) $row['id'],
+                    '',
+                    $this->pdo,
+                    $actorServiceAccountId,
                 );
             }
         }
-        Auth::audit($actorId, 'placement.cleanup_competing_applications', 'candidate', (int) $placedApp['candidate_id'], 'Cleared ' . count($rows) . ' competing active application(s).');
+        if ($actorServiceAccountId === null) {
+            Auth::audit($actorId, 'placement.cleanup_competing_applications', 'candidate', (int) $placedApp['candidate_id'], 'Cleared ' . count($rows) . ' competing active application(s).');
+        }
     }
 
-    private function handoffToNextScheduledApplication(array $sentApp, int $applicationId, ?int $actorId, string $actorRole, string $now): void
+    private function handoffToNextScheduledApplication(
+        array $sentApp,
+        int $applicationId,
+        ?int $actorId,
+        string $actorRole,
+        string $now,
+        ?int $actorServiceAccountId = null,
+    ): void
     {
         $stmt = $this->pdo->prepare(
             "SELECT a.id, a.candidate_id, a.company_id, a.current_status, a.aggregate_version,
@@ -4137,6 +4276,7 @@ final class PlacementService
             $handoffNote,
             $now,
             ['source' => 'placement.start_next_scheduled'],
+            $actorServiceAccountId,
         );
         $update = $this->pdo->prepare(
             "UPDATE applications SET previous_company_id = ?
@@ -4159,10 +4299,23 @@ final class PlacementService
                 $actorRole,
                 '',
                 $handoffNote,
-                ['source' => 'placement.start_next_scheduled']
+                ['source' => 'placement.start_next_scheduled'],
+                $actorServiceAccountId,
             );
         }
-        Auth::audit($actorId, 'application.auto_handoff', 'application', (int) $next['id'], 'Sent from ' . (string) $sentApp['company_code'] . ' to ' . (string) $next['company_code']);
+        if ($actorServiceAccountId !== null) {
+            Auth::audit(
+                null,
+                'transition',
+                'application',
+                (int) $next['id'],
+                '',
+                $this->pdo,
+                $actorServiceAccountId,
+            );
+        } else {
+            Auth::audit($actorId, 'application.auto_handoff', 'application', (int) $next['id'], 'Sent from ' . (string) $sentApp['company_code'] . ' to ' . (string) $next['company_code']);
+        }
     }
 
     private function activeStatuses(): array
