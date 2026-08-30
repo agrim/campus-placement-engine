@@ -24,6 +24,12 @@ management plane can run the same Engine release as a hosted service without
 forking placement behaviour. The accepted architecture and staged implementation gates are documented in
 [docs/career-services-portal-architecture.md](docs/career-services-portal-architecture.md).
 
+The current release is an evaluation alpha rather than an unqualified production
+claim. Required source, CI, deployment, accessibility, capacity, backup, security,
+privacy, and institutional evidence is tracked in
+[the production-readiness boundary](docs/production-readiness.md) and
+[the production epic](https://github.com/agrim/campus-placement-engine/issues/22).
+
 This modernization is intentionally dependency-light:
 
 - Plain PHP.
