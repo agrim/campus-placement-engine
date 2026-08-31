@@ -220,6 +220,24 @@ one-line-checksum backup, and pass those artifacts to the current acceptance
 test. The manual form remains available for validating a downloaded release
 package independently of GitHub Actions.
 
+## Exact N-minus-one release package upgrade
+
+CI and release also download the exact public alpha.4 tarball, bind it to its
+reviewed SHA-256, verify its package policy, install synthetic data with that
+release's own CLI, and run the current release's backup-first upgrade. The gate
+proves institution/user/candidate/company/application rows are unchanged, the
+pre-upgrade backup retains the same rows and identity sidecars, migration
+history converges exactly, and current doctor/readiness checks pass.
+
+To repeat that gate with a locally downloaded archive:
+
+```bash
+CPE_N_MINUS_ONE_ARCHIVE=/path/to/campus-placement-engine-0.1.0-alpha.4.tar.gz \
+CPE_N_MINUS_ONE_EXPECTED_VERSION=0.1.0-alpha.4 \
+CPE_N_MINUS_ONE_EXPECTED_SHA256=53839321f5cd7333ea87d7364d631bb2d6f0dcc3096a851007e90db9ded9b410 \
+php tests/n_minus_one_release_upgrade.php
+```
+
 ## PostgreSQL Contract
 
 Point an empty disposable database at the contract:
@@ -326,9 +344,11 @@ curl -fsS \
 regression checks, including concealed unauthorized responses that must not
 load the platform adapter.
 
-Use `php placement browser-qa-plan --format=markdown` for desktop, phone-width,
-and cross-browser manual coverage. Browser automation is a development tool, not
-a runtime dependency.
+Use `php placement browser-qa-plan --format=markdown` for the manual matrix and
+the pinned CI-only harness in `qa/browser/` for Chromium on pull requests plus
+Chromium, Firefox, and WebKit before release. Browser automation remains a
+development/release tool, not a runtime dependency. The linked release evidence
+must also record a manual Safari/VoiceOver and Firefox screen-reader pass.
 
 ## Recovery Gate
 
@@ -344,8 +364,8 @@ and runs readiness plus HTTP smoke. See `disaster-recovery.md`.
 
 ```bash
 php placement package --target=dist --force
-php placement verify-package dist/campus-placement-engine-0.1.0-alpha.4.tar.gz
-php placement verify-package dist/campus-placement-engine-0.1.0-alpha.4.zip
+php placement verify-package dist/campus-placement-engine-0.1.0-alpha.5.tar.gz
+php placement verify-package dist/campus-placement-engine-0.1.0-alpha.5.zip
 ```
 
 Extract the package into a clean directory, run `php placement

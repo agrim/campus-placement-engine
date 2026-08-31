@@ -4,7 +4,7 @@ export function Trust() {
   return (
     <section className="trust-section" id="trust" aria-labelledby="trust-title">
       <div className="trust-lead">
-        <span className="section-number" aria-hidden="true">03</span>
+        <span className="section-number" aria-hidden="true">04</span>
         <p>Student privacy</p>
         <h2 id="trust-title">Help candidates succeed. Keep their data <em>private.</em></h2>
         <p>Your university stays in control. Each person only sees what they need.</p>

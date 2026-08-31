@@ -375,10 +375,12 @@ the college's approved disk, archive, or backup tooling before moving them off
 the operator machine. Keep the archive, `.metadata.json`, and `.sha256`
 sidecars together so restore can validate integrity and target identity.
 
-The live board refreshes with a plain HTML meta refresh on board pages only.
-The default interval is 45 seconds. Administrators can tune
-`board_refresh_seconds` from Admin or through portable configuration snapshots;
-set it to `0` to disable automatic refresh.
+The live board uses a small local countdown on board pages only. The default
+interval is 45 seconds, and every operator can pause and resume it without
+losing the current page. The countdown also pauses while the page is hidden.
+Administrators can tune `board_refresh_seconds` from Admin or through portable
+configuration snapshots; set it to `0` to disable automatic refresh. The Engine
+does not use forced HTML meta refresh.
 
 Before a live placement day, administrators can enable `configuration_freeze`
 from Admin. While enabled, settings, workflow override edits, and
@@ -462,7 +464,7 @@ moving the release package between machines.
 Verify the package before publishing or installing it elsewhere:
 
 ```bash
-php placement verify-package dist/campus-placement-engine-0.1.0-alpha.4.zip
+php placement verify-package dist/campus-placement-engine-0.1.0-alpha.5.zip
 ```
 
 Before publishing a package, extract it into a clean temp directory and run:

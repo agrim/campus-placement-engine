@@ -155,8 +155,8 @@ counters without a spreadsheet round trip:
 - Stale-board guard before movement.
 - Idempotency keys on live-board movement forms to avoid duplicate moves from
   double-clicks or browser retries.
-- Configurable lightweight board refresh using HTML refresh metadata, without
-  JavaScript polling.
+- Configurable lightweight board refresh using a pausable local countdown,
+  without server polling or forced HTML meta refresh.
 - SQLite migrations.
 - Backup/restore CLI.
 - Browser and CLI first-run preflight checks.

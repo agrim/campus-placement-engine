@@ -12,6 +12,7 @@ export function Header() {
         <a href="#demo">Demo</a>
         <a href="#trust">Privacy</a>
         <a href="#technical">For IT</a>
+        <a href="#pilot">Pilot</a>
       </nav>
       <a className="header-cta" href="#demo">Start the demo <Icon name="arrow" size={17} /></a>
     </header>

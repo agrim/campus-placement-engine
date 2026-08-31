@@ -44,6 +44,13 @@ jobs:
           extensions: mbstring, pdo_sqlite, sqlite3, pdo_pgsql, curl
           coverage: none
 
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.13.0
+          cache: npm
+          cache-dependency-path: qa/browser/package-lock.json
+
       - name: Validate public schemas with pinned Draft 2020-12 tooling
         shell: bash
         run: |
@@ -151,6 +158,58 @@ jobs:
           mapfile -t CPE_ALPHA1_ARCHIVES < <(find "$CPE_ALPHA1_BACKUPS" -maxdepth 1 -type f -name '*.sqlite' -print)
           test "${#CPE_ALPHA1_ARCHIVES[@]}" -eq 1
           CPE_ALPHA1_DATABASE_FIXTURE="$CPE_ALPHA1_DATABASE" CPE_ALPHA1_BACKUP_FIXTURE="${CPE_ALPHA1_ARCHIVES[0]}" php tests/alpha1_release_acceptance.php
+
+      - name: Test exact N-minus-one release package upgrade
+        shell: bash
+        run: |
+          CPE_N1_ARCHIVE="$RUNNER_TEMP/campus-placement-engine-0.1.0-alpha.4.tar.gz"
+          curl --proto '=https' --tlsv1.2 --fail --location --retry 3 \
+            --output "$CPE_N1_ARCHIVE" \
+            'https://github.com/agrim/campus-placement-engine/releases/download/v0.1.0-alpha.4/campus-placement-engine-0.1.0-alpha.4.tar.gz'
+          printf '%s  %s\n' \
+            '53839321f5cd7333ea87d7364d631bb2d6f0dcc3096a851007e90db9ded9b410' \
+            "$CPE_N1_ARCHIVE" | sha256sum --check --strict
+          CPE_N_MINUS_ONE_ARCHIVE="$CPE_N1_ARCHIVE" \
+          CPE_N_MINUS_ONE_EXPECTED_VERSION='0.1.0-alpha.4' \
+          CPE_N_MINUS_ONE_EXPECTED_SHA256='53839321f5cd7333ea87d7364d631bb2d6f0dcc3096a851007e90db9ded9b410' \
+            php tests/n_minus_one_release_upgrade.php
+
+      - name: Run Chromium, Firefox, and WebKit release qualification
+        shell: bash
+        env:
+          CPE_DB_DRIVER: sqlite
+          CPE_DB_PATH: ${{ runner.temp }}/cpe-release-browser.sqlite
+          CPE_BROWSER_BASE_URL: http://127.0.0.1:8010
+        run: |
+          npm ci --prefix qa/browser --ignore-scripts --no-audit --no-fund
+          ./qa/browser/node_modules/.bin/playwright install --with-deps chromium firefox webkit
+          php placement install-demo
+          php placement seed-large-demo 40 6
+          php -S 127.0.0.1:8010 -t public > "$RUNNER_TEMP/cpe-release-browser-server.log" 2>&1 &
+          CPE_BROWSER_SERVER_PID=$!
+          trap 'kill "$CPE_BROWSER_SERVER_PID" 2>/dev/null || true' EXIT
+          for attempt in {1..20}; do
+            if curl --fail --silent --show-error http://127.0.0.1:8010/health.php >/dev/null; then
+              break
+            fi
+            if [[ "$attempt" -eq 20 ]]; then
+              cat "$RUNNER_TEMP/cpe-release-browser-server.log" >&2
+              exit 1
+            fi
+            sleep 1
+          done
+          npm run test:matrix --prefix qa/browser
+
+      - name: Upload synthetic browser failure evidence
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: engine-release-browser-failure-${{ github.run_id }}
+          path: |
+            output/playwright/
+            ${{ runner.temp }}/cpe-release-browser-server.log
+          if-no-files-found: ignore
+          retention-days: 7
 
       - name: Test PostgreSQL data plane
         env:

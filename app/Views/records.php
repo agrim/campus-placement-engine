@@ -376,26 +376,26 @@ ob_start();
   <h2>Shortlist / Application</h2>
   <form method="post" action="<?= h(url('records-application')) ?>">
     <?= Csrf::input() ?>
-    <label><?= h($candidateLabel) ?></label>
-    <select name="candidate_id" required>
+    <label for="new_application_candidate_id"><?= h($candidateLabel) ?></label>
+    <select id="new_application_candidate_id" name="candidate_id" required>
       <?php foreach ($candidates as $candidate): ?>
         <option value="<?= h($candidate['id']) ?>"><?= h($candidate['external_id']) ?> - <?= h($candidate['name']) ?></option>
       <?php endforeach; ?>
     </select>
-    <label><?= h($companyLabel) ?></label>
-    <select name="company_id" required>
+    <label for="new_application_company_id"><?= h($companyLabel) ?></label>
+    <select id="new_application_company_id" name="company_id" required>
       <?php foreach ($companies as $company): ?>
         <option value="<?= h($company['id']) ?>"><?= h($company['code']) ?> - <?= h($company['name']) ?></option>
       <?php endforeach; ?>
     </select>
-    <label>Status</label>
-    <select name="status">
+    <label for="new_application_status">Status</label>
+    <select id="new_application_status" name="status">
       <?php foreach ($workflow->statuses() as $key => $status): ?>
         <option value="<?= h($key) ?>"><?= h($workflow->statusLabel($key)) ?></option>
       <?php endforeach; ?>
     </select>
-    <label>Waitlist rank</label>
-    <input name="waitlist_rank" inputmode="numeric" placeholder="Optional">
+    <label for="new_application_waitlist_rank">Waitlist rank</label>
+    <input id="new_application_waitlist_rank" name="waitlist_rank" inputmode="numeric" placeholder="Optional">
     <p><button class="primary" type="submit">Save shortlist/application</button></p>
   </form>
 </section>

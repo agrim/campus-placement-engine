@@ -1,0 +1,15 @@
+{
+  "name": "campus-placement-engine-browser-qualification",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "capture": "node capture-promotion.js",
+    "test": "playwright test --project=chromium",
+    "test:matrix": "playwright test"
+  },
+  "devDependencies": {
+    "@axe-core/playwright": "4.13.0",
+    "@playwright/test": "1.62.1"
+  }
+}

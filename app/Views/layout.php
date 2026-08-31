@@ -40,9 +40,6 @@ if ($user && Database::isInstalled()) {
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <?php if ($metaRefreshSeconds > 0): ?>
-    <meta http-equiv="refresh" content="<?= h($metaRefreshSeconds) ?>">
-  <?php endif; ?>
   <title><?= h($title) ?></title>
   <link rel="stylesheet" href="/assets/app.css">
 </head>
@@ -76,6 +73,15 @@ if ($user && Database::isInstalled()) {
     <?php endif; ?>
   </header>
   <main class="shell">
+    <?php if ($metaRefreshSeconds > 0): ?>
+      <div class="board-refresh-control" data-board-refresh-seconds="<?= h($metaRefreshSeconds) ?>">
+        <button type="button" data-board-refresh-toggle aria-pressed="false">Pause automatic refresh</button>
+        <span data-board-refresh-countdown>
+          Next board refresh in <?= h($metaRefreshSeconds) ?> seconds.
+        </span>
+        <span class="visually-hidden" data-board-refresh-announcement role="status" aria-live="polite" aria-atomic="true"></span>
+      </div>
+    <?php endif; ?>
     <?php foreach (Flash::pull() as $flash): ?>
       <div class="flash <?= h($flash['type']) ?>"><?= h($flash['message']) ?></div>
     <?php endforeach; ?>

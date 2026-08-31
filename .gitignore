@@ -45,6 +45,7 @@
 # Local browser QA scratch artifacts.
 /.playwright-cli/
 /output/playwright/
+/qa/browser/node_modules/
 
 # Public website dependencies and generated QA/build output. Website source is
 # tracked, but the self-hosted PHP release remains dependency-light.

@@ -16,20 +16,20 @@ ob_start();
   <h2>Create request</h2>
   <form method="post" action="<?= h(url('preferences')) ?>">
     <?= Csrf::input() ?>
-    <label>Candidate</label>
-    <select name="candidate_id" required>
+    <label for="preference_candidate_id">Candidate</label>
+    <select id="preference_candidate_id" name="candidate_id" required>
       <?php foreach ($candidates as $candidate): ?>
         <option value="<?= h($candidate['id']) ?>"><?= h($candidate['external_id']) ?> - <?= h($candidate['name']) ?></option>
       <?php endforeach; ?>
     </select>
-    <label>Company options</label>
-    <select name="company_ids[]" multiple required size="5">
+    <label for="preference_company_ids">Company options</label>
+    <select id="preference_company_ids" name="company_ids[]" multiple required size="5">
       <?php foreach ($companies as $company): ?>
         <option value="<?= h($company['id']) ?>"><?= h($company['code']) ?> - <?= h($company['name']) ?></option>
       <?php endforeach; ?>
     </select>
-    <label>Note</label>
-    <input name="note" placeholder="Why is this decision needed?">
+    <label for="preference_note">Note</label>
+    <input id="preference_note" name="note" placeholder="Why is this decision needed?">
     <p><button class="primary" type="submit">Create preference request</button></p>
   </form>
 </section>

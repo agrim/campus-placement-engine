@@ -165,6 +165,12 @@ Use this before a public alpha tag or downloadable archive.
   manual dense-board QA.
 - Run `php placement browser-qa-plan --format=markdown` and use the output as
   the cross-browser/manual visual QA checklist for the release candidate.
+- Run the pinned `qa/browser/` Chromium, Firefox, and WebKit matrix against the
+  release candidate and confirm no serious/critical axe violation or browser
+  console error.
+- Link a dated manual Safari/VoiceOver and Firefox screen-reader record covering
+  navigation, board refresh pause/resume, forms, errors, tables, 200%/400% zoom,
+  a narrow viewport, and keyboard-only consequential actions.
 - Run a browser/API smoke against
   `php -S localhost:8000 -t public public/router.php`.
 - Run `php placement smoke-http --base-url=http://localhost:8000` and confirm

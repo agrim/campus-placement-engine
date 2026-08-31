@@ -42,7 +42,8 @@
   }
 
   img,
-  svg {
+  svg,
+  video {
     display: block;
   }
 }
@@ -591,8 +592,10 @@
   }
 
   .benefits-section,
+  .product-tour,
   .trust-section,
-  .technical-section {
+  .technical-section,
+  .pilot-section {
     width: var(--page);
     margin: 0 auto;
     padding: 122px 0;
@@ -625,6 +628,84 @@
     font-weight: 400;
     letter-spacing: -0.045em;
     line-height: 0.98;
+  }
+
+  .product-tour {
+    width: var(--page);
+    margin: 0 auto;
+    padding: 122px 0;
+    border-top: 1px solid var(--ink);
+  }
+
+  .product-tour .section-heading h2 {
+    max-width: 1100px;
+    font-size: clamp(2.5rem, 4.2vw, 4.7rem);
+  }
+
+  .product-tour-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 1.45fr) minmax(280px, 0.55fr);
+    gap: 34px;
+    margin-top: 58px;
+  }
+
+  .product-tour video {
+    width: 100%;
+    border: 1px solid var(--ink);
+    background: #202831;
+  }
+
+  .product-tour-copy {
+    display: grid;
+    align-content: start;
+    gap: 24px;
+  }
+
+  .product-tour-copy > p {
+    font-family: var(--serif);
+    font-size: 1.45rem;
+    line-height: 1.25;
+  }
+
+  .product-tour-copy ul {
+    display: grid;
+    gap: 12px;
+    border-top: 1px solid var(--line-strong);
+    padding-top: 18px;
+  }
+
+  .product-tour-copy li {
+    padding-left: 18px;
+    position: relative;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+
+  .product-tour-copy li::before {
+    position: absolute;
+    left: 0;
+    content: "•";
+    color: var(--forest);
+  }
+
+  .product-tour-copy figure {
+    margin: 0;
+    border: 1px solid var(--line-strong);
+    background: var(--paper);
+  }
+
+  .product-tour-copy img {
+    width: 100%;
+    max-height: 360px;
+    object-fit: cover;
+    object-position: top;
+  }
+
+  .product-tour-copy figcaption {
+    padding: 12px;
+    color: var(--muted);
+    font-size: 0.76rem;
+    line-height: 1.45;
   }
 
   .benefit-rail {
@@ -850,6 +931,68 @@
     border-bottom: 1px solid var(--line);
     font-size: 0.75rem;
     font-weight: 800;
+  }
+
+  .pilot-section {
+    display: grid;
+    grid-template-columns: minmax(0, 0.9fr) minmax(420px, 1.1fr);
+    gap: 100px;
+    border-top: 1px solid var(--ink);
+  }
+
+  .pilot-heading .section-number {
+    margin-bottom: 36px;
+  }
+
+  .pilot-heading > p {
+    margin-bottom: 14px;
+    color: var(--forest);
+    font-size: 0.72rem;
+    font-weight: 900;
+    letter-spacing: 0.14em;
+    text-transform: uppercase;
+  }
+
+  .pilot-heading h2 {
+    max-width: 720px;
+    font-family: var(--serif);
+    font-size: clamp(2.8rem, 5vw, 5.3rem);
+    font-weight: 400;
+    letter-spacing: -0.045em;
+    line-height: 0.98;
+  }
+
+  .pilot-heading h2 em {
+    color: var(--forest);
+    font-weight: 400;
+  }
+
+  .pilot-copy {
+    align-self: end;
+    border-left: 1px solid var(--line-strong);
+    padding-left: 46px;
+  }
+
+  .pilot-copy > p:first-child {
+    max-width: 700px;
+    font-size: 1.1rem;
+    line-height: 1.62;
+  }
+
+  .pilot-actions {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 26px;
+    margin-top: 36px;
+  }
+
+  .pilot-note {
+    max-width: 650px;
+    margin-top: 24px;
+    color: var(--muted);
+    font-size: 0.76rem;
+    line-height: 1.5;
   }
 
   footer {
@@ -2001,6 +2144,20 @@
       gap: 55px;
     }
 
+    .product-tour-grid {
+      grid-template-columns: 1fr;
+    }
+
+    .pilot-section {
+      grid-template-columns: 1fr;
+      gap: 55px;
+    }
+
+    .pilot-copy {
+      border-left: 0;
+      padding-left: 0;
+    }
+
     footer {
       grid-template-columns: 1fr auto;
     }
@@ -2130,8 +2287,10 @@
     }
 
     .benefits-section,
+    .product-tour,
     .trust-section,
-    .technical-section {
+    .technical-section,
+    .pilot-section {
       padding: 86px 0;
     }
 
@@ -2143,8 +2302,13 @@
     .section-heading h2,
     .demo-section-heading h2,
     .trust-lead h2,
-    .technical-section h2 {
+    .technical-section h2,
+    .pilot-section h2 {
       font-size: clamp(2.6rem, 13vw, 4.3rem);
+    }
+
+    .product-tour-grid {
+      margin-top: 42px;
     }
 
     .benefit-rail {

@@ -1407,7 +1407,7 @@ function verify_release_package(string $path): void
             $integrationDocuments[$relative] = $body;
         }
     }
-    foreach (['.htaccess', 'README.md', 'INSTALL.md', 'placement', 'app/Core/Backup/BackupArtifact.php', 'app/Core/Backup/BackupMetadata.php', 'app/Core/Backup/LegacySqliteBackupConverter.php', 'app/Core/Persistence/DatabaseConnectionInvalidException.php', 'app/Core/Persistence/DatabaseLock.php', 'app/Core/Persistence/DatabaseOwnership.php', 'app/Core/Persistence/SqlMigrationRunner.php', 'app/Security/OperationalBearerAuthorization.php', 'app/Security/SetupAuthorization.php', 'app/Security/SetupAuthorizationDenied.php', 'app/Security/SetupAuthorizationStageFailure.php', 'app/Security/SetupHttp.php', 'app/Views/setup-unlock.php', 'public/.htaccess', 'public/health.php', 'public/index.php', 'public/install.php', 'public/metrics.php', 'database/.htaccess', 'database/migrations/001_initial.sql', 'database/migrations/pgsql/001_portal_baseline.sql', 'docs/environment.md', 'docs/managed-hosting-contract.md', 'docs/disaster-recovery.md', 'docs/releases/v0.1.0-alpha.4.md', 'examples/env/local.env.example', 'examples/deployment/apache-vhost.conf', 'examples/deployment/nginx-server.conf', 'tests/.htaccess', 'tests/alpha1_release_acceptance.php', 'tests/backup_restore_contract.php', 'tests/database_connection_cleanup_contract.php', 'tests/database_ownership_contract.php', 'tests/database_ownership_worker.php', 'tests/legacy_backup_compatibility_contract.php', 'tests/migration_lock_contract.php', 'tests/migration_lock_worker.php', 'tests/install_concurrency_contract.php', 'tests/install_concurrency_worker.php', 'tests/setup_authorization_contract.php', 'tests/hosted_install_contract.php', 'tests/managed_hosting_contract.php', 'data/.gitkeep', 'data/.htaccess'] as $required) {
+    foreach (['.htaccess', 'README.md', 'INSTALL.md', 'placement', 'app/Core/Backup/BackupArtifact.php', 'app/Core/Backup/BackupMetadata.php', 'app/Core/Backup/LegacySqliteBackupConverter.php', 'app/Core/Persistence/DatabaseConnectionInvalidException.php', 'app/Core/Persistence/DatabaseLock.php', 'app/Core/Persistence/DatabaseOwnership.php', 'app/Core/Persistence/SqlMigrationRunner.php', 'app/Security/OperationalBearerAuthorization.php', 'app/Security/SetupAuthorization.php', 'app/Security/SetupAuthorizationDenied.php', 'app/Security/SetupAuthorizationStageFailure.php', 'app/Security/SetupHttp.php', 'app/Views/setup-unlock.php', 'public/.htaccess', 'public/health.php', 'public/index.php', 'public/install.php', 'public/metrics.php', 'database/.htaccess', 'database/migrations/001_initial.sql', 'database/migrations/pgsql/001_portal_baseline.sql', 'docs/environment.md', 'docs/managed-hosting-contract.md', 'docs/disaster-recovery.md', 'docs/releases/v0.1.0-alpha.4.md', 'docs/releases/v0.1.0-alpha.5.md', 'examples/env/local.env.example', 'examples/deployment/apache-vhost.conf', 'examples/deployment/nginx-server.conf', 'tests/.htaccess', 'tests/alpha1_release_acceptance.php', 'tests/backup_restore_contract.php', 'tests/database_connection_cleanup_contract.php', 'tests/database_ownership_contract.php', 'tests/database_ownership_worker.php', 'tests/legacy_backup_compatibility_contract.php', 'tests/migration_lock_contract.php', 'tests/migration_lock_worker.php', 'tests/install_concurrency_contract.php', 'tests/install_concurrency_worker.php', 'tests/setup_authorization_contract.php', 'tests/hosted_install_contract.php', 'tests/managed_hosting_contract.php', 'data/.gitkeep', 'data/.htaccess'] as $required) {
         if (!isset($entries[$required])) {
             throw new RuntimeException('Release package is missing required file: ' . $required);
         }
@@ -1969,14 +1969,21 @@ function smoke_http(array $args): void
             if ($hasMovementForm && !str_contains($response['body'], 'name="idempotency_key"')) {
                 throw new RuntimeException('Board forms are missing idempotency keys.');
             }
-            if (str_contains($response['body'], 'Board refreshes every') && !str_contains($response['body'], 'http-equiv="refresh"')) {
-                throw new RuntimeException('Board reports automatic refresh but the refresh meta tag is missing.');
+            if (str_contains($response['body'], 'Automatic board refresh is on')
+                && (!str_contains($response['body'], 'data-board-refresh-seconds=')
+                    || !str_contains($response['body'], 'Pause automatic refresh'))) {
+                throw new RuntimeException('Board reports automatic refresh but the pausable refresh control is missing.');
             }
-            if (str_contains($response['body'], 'Board auto-refresh is off') && str_contains($response['body'], 'http-equiv="refresh"')) {
-                throw new RuntimeException('Board reports refresh disabled but a refresh meta tag is present.');
+            if (str_contains($response['body'], 'Board auto-refresh is off')
+                && str_contains($response['body'], 'data-board-refresh-seconds=')) {
+                throw new RuntimeException('Board reports refresh disabled but a refresh control is present.');
             }
-        } elseif (str_contains($response['body'], 'http-equiv="refresh"')) {
-            throw new RuntimeException("HTTP smoke found unexpected refresh meta tag on {$label} page.");
+            if (str_contains($response['body'], 'http-equiv="refresh"')) {
+                throw new RuntimeException('HTTP smoke found inaccessible forced refresh on the board.');
+            }
+        } elseif (str_contains($response['body'], 'data-board-refresh-seconds=')
+            || str_contains($response['body'], 'http-equiv="refresh"')) {
+            throw new RuntimeException("HTTP smoke found unexpected automatic refresh on {$label} page.");
         }
         echo "OK {$label}\n";
         $checks++;
@@ -2577,7 +2584,7 @@ function publication_check(): void
         'docs/security/integration-threat-model.md',
         'docs/release-checklist.md',
         'docs/migration-from-legacy.md',
-        'docs/releases/v0.1.0-alpha.4.md',
+        'docs/releases/v0.1.0-alpha.5.md',
         'app/Core/Backup/BackupArtifact.php',
         'app/Core/Backup/BackupMetadata.php',
         'app/Core/Backup/LegacySqliteBackupConverter.php',

@@ -16,14 +16,14 @@ ob_start();
   <h2>Create alert</h2>
   <form method="post" action="<?= h(url('wanted')) ?>">
     <?= Csrf::input() ?>
-    <label>Candidate</label>
-    <select name="candidate_id" required>
+    <label for="wanted_candidate_id">Candidate</label>
+    <select id="wanted_candidate_id" name="candidate_id" required>
       <?php foreach ($candidates as $candidate): ?>
         <option value="<?= h($candidate['id']) ?>"><?= h($candidate['external_id']) ?> - <?= h($candidate['name']) ?></option>
       <?php endforeach; ?>
     </select>
-    <label>Reason</label>
-    <input name="reason" required placeholder="Needed at panel, missing from room, urgent callback...">
+    <label for="wanted_reason">Reason</label>
+    <input id="wanted_reason" name="reason" required placeholder="Needed at panel, missing from room, urgent callback...">
     <p><button class="primary" type="submit">Create wanted alert</button></p>
   </form>
 </section>

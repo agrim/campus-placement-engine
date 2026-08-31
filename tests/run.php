@@ -2074,7 +2074,7 @@ test_case('starter configuration templates validate for every workflow', functio
 
 test_case('open-source release governance files and ignore protections exist', function (): void {
     $root = dirname(__DIR__);
-    assert_same('0.1.0-alpha.4', cpe_config('app.version'), 'Release package version');
+    assert_same('0.1.0-alpha.5', cpe_config('app.version'), 'Release package version');
     foreach ([
         'README.md',
         'LICENSE',
@@ -2102,11 +2102,15 @@ test_case('open-source release governance files and ignore protections exist', f
         'docs/indian-college-template-notes.md',
         'docs/migration-from-legacy.md',
         'docs/privacy-retention.md',
+        'docs/installation-walkthrough.md',
+        'docs/deployment-examples.md',
+        'docs/adopter-faq.md',
         'docs/release-checklist.md',
         'docs/releases/v0.1.0-alpha.1.md',
         'docs/releases/v0.1.0-alpha.2.md',
         'docs/releases/v0.1.0-alpha.3.md',
         'docs/releases/v0.1.0-alpha.4.md',
+        'docs/releases/v0.1.0-alpha.5.md',
         'INSTALL.md',
         'examples/csv-templates/README.md',
         'examples/csv-templates/candidate_unavailability_windows.csv',
@@ -2126,6 +2130,12 @@ test_case('open-source release governance files and ignore protections exist', f
         'app/Core/Backup/LegacySqliteBackupConverter.php',
         'app/Core/Persistence/DatabaseConnectionInvalidException.php',
         'tests/alpha1_release_acceptance.php',
+        'tests/n_minus_one_release_upgrade.php',
+        'qa/browser/package.json',
+        'qa/browser/package-lock.json',
+        'qa/browser/playwright.config.js',
+        'qa/browser/tests/helpers.js',
+        'qa/browser/tests/core-journey.spec.js',
         'tests/backup_restore_contract.php',
         'tests/database_connection_cleanup_contract.php',
         'tests/legacy_backup_compatibility_contract.php',
@@ -2200,6 +2210,19 @@ YAML;
                 && str_contains($workflow, 'CPE_ALPHA1_BACKUP_FIXTURE=')
                 && str_contains($workflow, 'php tests/alpha1_release_acceptance.php'),
             'CI and release must construct and test exact public alpha.1 artifacts.',
+        );
+        assert_true(
+            str_contains($workflow, 'campus-placement-engine-0.1.0-alpha.4.tar.gz')
+                && str_contains($workflow, '53839321f5cd7333ea87d7364d631bb2d6f0dcc3096a851007e90db9ded9b410')
+                && str_contains($workflow, 'php tests/n_minus_one_release_upgrade.php'),
+            'CI and release must download, digest-bind, and upgrade the exact N-minus-one package.',
+        );
+        assert_true(
+            str_contains($workflow, 'qa/browser/package-lock.json')
+                && str_contains($workflow, 'playwright install')
+                && str_contains($workflow, 'CPE_BROWSER_BASE_URL')
+                && str_contains($workflow, 'retention-days: 7'),
+            'CI and release must run the pinned synthetic browser harness with bounded failure evidence.',
         );
         assert_true(
             str_contains($workflow, 'cpe_hosted_atomicity_contract')
@@ -2645,7 +2668,7 @@ test_case('release package includes public source and excludes private runtime d
         assert_true(str_contains($joined, '/contracts/schemas/application.status_changed.v1.schema.json'), 'Package should include the strict event schema');
         assert_true(str_contains($joined, '/contracts/examples/application.status_changed.v1.json'), 'Package should include the public event example');
         assert_true(str_contains($joined, '/contracts/fixtures/application.status_changed.v1.consumer.json'), 'Package should include the frozen consumer fixture');
-        assert_true(str_contains($joined, '/docs/releases/v0.1.0-alpha.4.md'), 'Package should include current release notes');
+        assert_true(str_contains($joined, '/docs/releases/v0.1.0-alpha.5.md'), 'Package should include current release notes');
         assert_true(str_contains($joined, '/examples/env/local.env.example'), 'Package should include synthetic env template');
         assert_true(str_contains($joined, '/examples/integrations/verify-webhook.php'), 'Package should include the dependency-light consumer verification example');
         assert_true(str_contains($joined, '/examples/deployment/apache-vhost.conf'), 'Package should include Apache deployment example');
@@ -5147,7 +5170,7 @@ test_case('board card fields are configurable and normalized', function (): void
     assert_true(in_array('program', $service->boardCardFields(), true), 'Invalid board card settings should fall back to defaults');
 });
 
-test_case('board refresh setting is normalized and renders only when enabled', function (): void {
+test_case('board refresh setting is normalized and renders a pausable control only when enabled', function (): void {
     $pdo = Database::connection();
     $service = new PlacementService($pdo);
     $set = $pdo->prepare('INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT(key) DO UPDATE SET value = excluded.value');
@@ -5155,16 +5178,20 @@ test_case('board refresh setting is normalized and renders only when enabled', f
     $set->execute(['board_refresh_seconds', '5']);
     assert_same(15, $service->boardRefreshSeconds(), 'Board refresh should clamp low positive values');
     $html = render_layout_for_test(['title' => 'Board', 'content' => '<h1>Board</h1>', 'boardRefreshSeconds' => $service->boardRefreshSeconds()]);
-    assert_true(str_contains($html, 'http-equiv="refresh"'), 'Board layout should render refresh meta when enabled');
-    assert_true(str_contains($html, 'content="15"'), 'Board layout should render normalized refresh interval');
+    assert_true(!str_contains($html, 'http-equiv="refresh"'), 'Board layout must not force inaccessible meta refresh');
+    assert_true(str_contains($html, 'data-board-refresh-seconds="15"'), 'Board layout should render the normalized refresh interval');
+    assert_true(str_contains($html, 'Pause automatic refresh'), 'Board layout should let people pause timed refresh');
+    assert_true(str_contains($html, 'data-board-refresh-countdown'), 'Board refresh should expose a visible countdown outside the live region');
+    assert_true(str_contains($html, 'data-board-refresh-announcement role="status"'), 'Board refresh transitions should be announced accessibly');
+    assert_true(!str_contains($html, 'data-board-refresh-countdown role="status"'), 'Board refresh countdown must not announce every second');
 
     $set->execute(['board_refresh_seconds', '0']);
     assert_same(0, $service->boardRefreshSeconds(), 'Board refresh should allow disabled state');
     $disabledHtml = render_layout_for_test(['title' => 'Board', 'content' => '<h1>Board</h1>', 'boardRefreshSeconds' => $service->boardRefreshSeconds()]);
-    assert_true(!str_contains($disabledHtml, 'http-equiv="refresh"'), 'Board layout should omit refresh meta when disabled');
+    assert_true(!str_contains($disabledHtml, 'data-board-refresh-seconds'), 'Board layout should omit refresh control when disabled');
 
     $plainHtml = render_layout_for_test(['title' => 'Records', 'content' => '<h1>Records</h1>']);
-    assert_true(!str_contains($plainHtml, 'http-equiv="refresh"'), 'Non-board layout should not refresh without explicit interval');
+    assert_true(!str_contains($plainHtml, 'data-board-refresh-seconds'), 'Non-board layout should not refresh without explicit interval');
 
     $set->execute(['board_refresh_seconds', '45']);
 });

@@ -93,23 +93,47 @@ Check these on desktop and a phone-width viewport:
   pushing the page wider.
 - No browser console errors.
 
-## Optional Playwright Smoke
+## Automated Browser Qualification
 
-The repository does not require Playwright, but maintainers can use it locally
-through Codex or a one-off install. Do not commit Playwright packages just for
-this smoke.
+The pinned harness under `qa/browser/` is a CI and release dependency only. It
+does not add Node.js, a browser driver, or a frontend build to the packaged
+Engine. Against the dense-board server above, run:
 
-Suggested flow:
+```bash
+cd qa/browser
+npm ci --ignore-scripts --no-audit --no-fund
+npx playwright install chromium firefox webkit
+CPE_BROWSER_BASE_URL=http://127.0.0.1:8010 npm test
+CPE_BROWSER_BASE_URL=http://127.0.0.1:8010 npm run test:matrix
+```
 
-1. Start the dense-board setup above.
-2. Open the login page.
-3. Sign in as the demo admin.
-4. Capture desktop and phone-width screenshots of Board, Records, Admin,
-   System, Public, and Student pages.
-5. Check the browser console for errors.
+Every pull request runs Chromium. A tagged release runs Chromium, Firefox, and
+WebKit. The synthetic journey covers authentication failure and success,
+logout, SSO-disabled presentation, a restricted-role denial, all primary
+administrator screens, public aggregates, board filters and saved defaults,
+pausable board refresh, keyboard focus, narrow reflow, 200%/400% zoom,
+reduced-motion, forced-colors, browser errors, and serious/critical axe
+violations. Failure screenshots, video, and traces contain synthetic data only
+and are retained by CI for seven days.
 
-Artifacts from local browser QA should stay outside the public repository or in
-an ignored scratch folder such as `.playwright-cli/` or `output/playwright/`.
+Local artifacts remain in ignored `output/playwright/`.
+
+## Manual Assistive-Technology Pass
+
+Automation does not replace a release-candidate screen-reader pass. Record the
+browser, OS, assistive-technology version, release commit, viewport, operator,
+date, and result outside the repository, then link the evidence in the release
+decision. At minimum:
+
+1. With Safari and VoiceOver, sign in, traverse the primary navigation, pause
+   and resume board refresh, change a filter, open a candidate, and sign out.
+2. Confirm headings, landmarks, form labels, validation errors, flash messages,
+   tables, button purposes, and refresh status are announced in a useful order.
+3. Repeat the consequential keyboard journey at 200% and 400% zoom and on a
+   narrow portrait viewport. Confirm no keyboard trap or hidden action.
+4. Repeat a representative journey in Firefox with the platform screen reader.
+5. Treat any consequential blocker, serious/critical automated violation, or
+   unexplained browser console error as a release blocker.
 
 ## Current In-App Browser Pass
 
@@ -139,9 +163,8 @@ The interactive pass exposed two defects that semantic HTTP smoke had not:
   labels and context-rich `aria-label` values now pass the browser semantic
   audit and an automated rendering contract.
 
-This is current desktop/phone evidence for the in-app browser engine. It is not
-a substitute for independent Safari and Firefox sign-off before a public
-release.
+This historical pass is not a substitute for the current automated matrix and
+manual Safari/VoiceOver plus Firefox sign-off before a public release.
 
 ## Historical Local Smoke
 
