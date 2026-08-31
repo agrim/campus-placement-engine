@@ -97,6 +97,21 @@ jobs:
           test "${#CPE_ALPHA1_ARCHIVES[@]}" -eq 1
           CPE_ALPHA1_DATABASE_FIXTURE="$CPE_ALPHA1_DATABASE" CPE_ALPHA1_BACKUP_FIXTURE="${CPE_ALPHA1_ARCHIVES[0]}" php tests/alpha1_release_acceptance.php
 
+      - name: Run exact N-minus-one release package upgrade
+        shell: bash
+        run: |
+          CPE_N1_ARCHIVE="$RUNNER_TEMP/campus-placement-engine-0.1.0-alpha.4.tar.gz"
+          curl --proto '=https' --tlsv1.2 --fail --location --retry 3 \
+            --output "$CPE_N1_ARCHIVE" \
+            'https://github.com/agrim/campus-placement-engine/releases/download/v0.1.0-alpha.4/campus-placement-engine-0.1.0-alpha.4.tar.gz'
+          printf '%s  %s\n' \
+            '53839321f5cd7333ea87d7364d631bb2d6f0dcc3096a851007e90db9ded9b410' \
+            "$CPE_N1_ARCHIVE" | sha256sum --check --strict
+          CPE_N_MINUS_ONE_ARCHIVE="$CPE_N1_ARCHIVE" \
+          CPE_N_MINUS_ONE_EXPECTED_VERSION='0.1.0-alpha.4' \
+          CPE_N_MINUS_ONE_EXPECTED_SHA256='53839321f5cd7333ea87d7364d631bb2d6f0dcc3096a851007e90db9ded9b410' \
+            php tests/n_minus_one_release_upgrade.php
+
       - name: Run test suite
         run: |
           php tests/run.php
@@ -412,3 +427,77 @@ jobs:
           php placement optimize-slots
           php placement assign-slots
           php placement assign-optimized-slots
+
+  browser:
+    name: Browser Chromium
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      CPE_DB_DRIVER: sqlite
+      CPE_DB_PATH: ${{ runner.temp }}/cpe-browser.sqlite
+      CPE_BROWSER_BASE_URL: http://127.0.0.1:8010
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 1
+          persist-credentials: false
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
+        with:
+          php-version: "8.2"
+          extensions: mbstring, pdo_sqlite, sqlite3, curl
+          coverage: none
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22.13.0
+          cache: npm
+          cache-dependency-path: qa/browser/package-lock.json
+
+      - name: Install locked browser harness
+        working-directory: qa/browser
+        run: npm ci --ignore-scripts --no-audit --no-fund
+
+      - name: Install pinned Chromium
+        working-directory: qa/browser
+        run: npx playwright install --with-deps chromium
+
+      - name: Start synthetic Engine fixture
+        shell: bash
+        run: |
+          php placement install-demo
+          php placement seed-large-demo 40 6
+          php -S 127.0.0.1:8010 -t public > "$RUNNER_TEMP/cpe-browser-server.log" 2>&1 &
+          echo "CPE_BROWSER_SERVER_PID=$!" >> "$GITHUB_ENV"
+          for attempt in {1..20}; do
+            if curl --fail --silent --show-error http://127.0.0.1:8010/health.php >/dev/null; then
+              exit 0
+            fi
+            sleep 1
+          done
+          cat "$RUNNER_TEMP/cpe-browser-server.log" >&2
+          exit 1
+
+      - name: Run browser, responsive, keyboard, and accessibility qualification
+        working-directory: qa/browser
+        run: npm test
+
+      - name: Stop synthetic Engine fixture
+        if: always()
+        run: kill "$CPE_BROWSER_SERVER_PID" 2>/dev/null || true
+
+      - name: Upload synthetic failure evidence
+        if: failure()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: engine-browser-failure-${{ github.run_id }}
+          path: |
+            output/playwright/
+            ${{ runner.temp }}/cpe-browser-server.log
+          if-no-files-found: ignore
+          retention-days: 7

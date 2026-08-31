@@ -16,4 +16,20 @@ describe("website accessibility", () => {
 
     expect(violations).toEqual([]);
   });
+
+  it("offers a privacy-safe public pilot path", () => {
+    const { getAllByRole, getByText } = render(<App />);
+    const pilotLinks = getAllByRole("link", { name: /discuss a university pilot|discuss a pilot/i });
+    expect(pilotLinks.some((link) => link.getAttribute("href")?.includes("/discussions/new?category=general"))).toBe(true);
+    expect(getByText(/do not include candidate details/i)).toBeInTheDocument();
+  });
+
+  it("offers a captioned real-product walkthrough", () => {
+    const { getByLabelText } = render(<App />);
+    const video = getByLabelText("Campus Placement Engine product walkthrough");
+    expect(video.querySelector('source[type="video/webm"]')?.getAttribute("src"))
+      .toMatch(/\/demo\/campus-placement-engine-demo\.webm$/);
+    expect(video.querySelector('track[kind="captions"]')?.getAttribute("src"))
+      .toMatch(/\/demo\/campus-placement-engine-demo\.vtt$/);
+  });
 });

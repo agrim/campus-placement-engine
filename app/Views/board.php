@@ -9,7 +9,7 @@ $cardFieldsDefaultVisible = $boardCardFields === [];
 $showCardField = fn (string $field): bool => $cardFieldsDefaultVisible || !empty($boardCardFields[$field]);
 $newFormKey = fn (): string => bin2hex(random_bytes(16));
 $refreshText = (int) ($boardRefreshSeconds ?? 0) > 0
-    ? 'Board refreshes every ' . (int) $boardRefreshSeconds . ' seconds.'
+    ? 'Automatic board refresh is on and can be paused.'
     : 'Board auto-refresh is off.';
 ob_start();
 ?>

@@ -3,6 +3,8 @@ import { Benefits } from "./marketing/Benefits";
 import { Footer } from "./marketing/Footer";
 import { Header } from "./marketing/Header";
 import { Hero } from "./marketing/Hero";
+import { Pilot } from "./marketing/Pilot";
+import { ProductTour } from "./marketing/ProductTour";
 import { Technical } from "./marketing/Technical";
 import { Trust } from "./marketing/Trust";
 
@@ -22,8 +24,10 @@ export default function App() {
           <DemoApp />
         </section>
         <Benefits />
+        <ProductTour />
         <Trust />
         <Technical />
+        <Pilot />
       </main>
       <Footer />
     </>

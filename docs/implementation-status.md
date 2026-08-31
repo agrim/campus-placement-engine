@@ -2,6 +2,13 @@
 
 Date: 2026-07-18
 
+> Release-candidate update, 2026-08-31: the next evaluation release is
+> `v0.1.0-alpha.5`. It adds the pinned real-browser qualification harness,
+> pausable board refresh, accessibility fixes discovered by that harness, an
+> exact published alpha.4 upgrade gate, and a benefit-led website with a
+> captioned synthetic product walkthrough. Publication remains contingent on a
+> green protected-branch and release matrix.
+
 > Release update, 2026-08-30: public Engine `v0.1.0-alpha.4` is published from
 > the exact tagged commit with verified ZIP, tar.gz, and checksum assets. The
 > private Cloud control plane consumes that immutable artifact and its versioned
@@ -307,8 +314,9 @@ Date: 2026-07-18
 - Role-aware board filters for search, status, company, operational flags, and
   actionable queue items.
 - Role-aware saved board view links and compact board mode for dense queues.
-- Configurable live-board HTML refresh interval, enabled on board pages only and
-  portable through configuration snapshots.
+- Configurable live-board refresh interval with an announced pause/resume
+  control, enabled on board pages only and portable through configuration
+  snapshots.
 - Admin-configurable board card detail fields for showing or hiding candidate
   ID, program, tags, company, process, tracker, rounds, schedules, slots,
   panels, movement route, location, accommodation notes, custom fields, and
@@ -547,7 +555,7 @@ Date: 2026-07-18
   manual provider approval checklist surfacing.
 - Board filter tests cover search, company filter, wanted flag filter,
   conflict flag filter, actionable filtering, stale markers, saved view
-  presets, compact queue presets, configurable board refresh metadata,
+  presets, compact queue presets, configurable pausable board refresh,
   configurable board card fields, persisted board preferences, per-user stale
   thresholds, idempotency keys, and urgent item ordering.
 - Dry-run scenario tests cover active-company conflict surfacing on the board

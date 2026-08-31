@@ -13,6 +13,10 @@ const requiredFiles = new Set([
   "favicon.svg",
   "index.html",
   "og-outcomes.png",
+  "demo/board-desktop.png",
+  "demo/board-mobile.png",
+  "demo/campus-placement-engine-demo.vtt",
+  "demo/campus-placement-engine-demo.webm",
 ]);
 
 const allowedRootFiles = new Set([
@@ -35,6 +39,8 @@ const allowedExtensions = new Set([
   ".png",
   ".svg",
   ".txt",
+  ".vtt",
+  ".webm",
   ".webmanifest",
   ".webp",
   ".woff",
@@ -49,6 +55,7 @@ const textExtensions = new Set([
   ".json",
   ".svg",
   ".txt",
+  ".vtt",
   ".webmanifest",
   ".xml",
 ]);
@@ -130,8 +137,11 @@ function validatePath(relative) {
   }
 
   const firstSegment = relative.split("/")[0];
-  if (firstSegment !== "assets" && !allowedRootFiles.has(relative)) {
+  if (firstSegment !== "assets" && firstSegment !== "demo" && !allowedRootFiles.has(relative)) {
     fail(`unexpected file outside assets/: ${relative}`);
+  }
+  if (firstSegment === "demo" && !requiredFiles.has(relative)) {
+    fail(`unexpected demo artifact: ${relative}`);
   }
 
   if (relative.startsWith(".") && relative !== ".nojekyll") {
@@ -299,12 +309,25 @@ if (![...knownFiles].some((file) => file.startsWith("assets/") && file.endsWith(
   fail("artifact has no compiled CSS asset");
 }
 
-if (knownFiles.has("og-outcomes.png")) {
-  const png = await readFile(path.join(DIST_ROOT, "og-outcomes.png"));
+for (const pngPath of ["og-outcomes.png", "demo/board-desktop.png", "demo/board-mobile.png"]) {
+  if (!knownFiles.has(pngPath)) continue;
+  const png = await readFile(path.join(DIST_ROOT, pngPath));
   const pngSignature = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
   if (png.length < pngSignature.length || !png.subarray(0, pngSignature.length).equals(pngSignature)) {
-    fail("og-outcomes.png does not have a valid PNG signature");
+    fail(`${pngPath} does not have a valid PNG signature`);
   }
+}
+
+if (knownFiles.has("demo/campus-placement-engine-demo.webm")) {
+  const webm = await readFile(path.join(DIST_ROOT, "demo/campus-placement-engine-demo.webm"));
+  const ebmlSignature = Buffer.from([0x1a, 0x45, 0xdf, 0xa3]);
+  if (webm.length < ebmlSignature.length || !webm.subarray(0, ebmlSignature.length).equals(ebmlSignature)) {
+    fail("demo walkthrough does not have a valid WebM/EBML signature");
+  }
+}
+
+if (!(textByPath.get("demo/campus-placement-engine-demo.vtt") ?? "").startsWith("WEBVTT\n")) {
+  fail("demo walkthrough captions do not have a valid WebVTT header");
 }
 
 if (failures.length > 0) {

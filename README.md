@@ -1,11 +1,11 @@
 # Campus Placement Engine
 
-A lightweight placement-day operations engine for colleges, and the first
-flagship module of an open-source Career Services Portal.
+Help universities maximise job opportunities for candidates with a configurable,
+self-hosted system for placement operations.
 
 ## Download and install
 
-Download the newest self-hosted alpha ZIP and its checksum from
+Download the newest self-hosted release ZIP and its checksum from
 [GitHub Releases](https://github.com/agrim/campus-placement-engine/releases),
 extract it, and run:
 
@@ -43,7 +43,7 @@ This modernization is intentionally dependency-light:
 
 Requirements:
 
-- PHP 8.2 or newer.
+- PHP 8.2 through 8.4 for the current verified release window.
 - `mbstring`, `pdo_sqlite`, and `sqlite3` PHP extensions.
 - A writable `data/` directory.
 
@@ -251,6 +251,10 @@ For live operations, start with [docs/live-day-runbook.md](docs/live-day-runbook
 For Apache, Nginx, shared-hosting, and release-package deployment, see
 [docs/deployment.md](docs/deployment.md) and
 [examples/deployment](examples/deployment).
+For the shortest guided path, practical deployment shapes, and common adopter
+questions, see [the installation walkthrough](docs/installation-walkthrough.md),
+[deployment examples](docs/deployment-examples.md), and
+[the adopter FAQ](docs/adopter-faq.md).
 For supported environment variables and local secret-file boundaries, see
 [docs/environment.md](docs/environment.md) and
 [examples/env/local.env.example](examples/env/local.env.example).

@@ -29,6 +29,7 @@ a:hover { text-decoration: underline; }
   color: #fff;
 }
 .topbar a, .topbar button { color: #fff; }
+.topbar .muted { color: #dbe2ea; }
 .topbar button {
   background: transparent;
   border-color: rgba(255,255,255,.55);
@@ -37,6 +38,13 @@ a:hover { text-decoration: underline; }
 .brand { font-weight: 700; }
 .nav { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
 .shell { padding: 16px; }
+.board-refresh-control {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: flex-end;
+  margin-bottom: 10px;
+}
 .page-head {
   display: flex;
   justify-content: space-between;

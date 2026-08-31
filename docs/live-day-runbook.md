@@ -102,8 +102,9 @@ if the placement team has consciously accepted them.
   automatically returns that candidate's other active company applications to
   idle and records cleanup events. Review the candidate trace if another team
   expected the candidate to remain active elsewhere.
-- The board uses a lightweight HTML refresh interval configured in Admin. The
-  default is 45 seconds, and setting it to `0` disables automatic refresh.
+- The board uses a lightweight pausable refresh countdown configured in Admin.
+  The default is 45 seconds; each operator can pause/resume it, and setting it
+  to `0` disables automatic refresh.
 
 ## Backup Cadence
 
