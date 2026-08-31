@@ -436,7 +436,7 @@ jobs:
       contents: read
     env:
       CPE_DB_DRIVER: sqlite
-      CPE_DB_PATH: ${{ runner.temp }}/cpe-browser.sqlite
+      CPE_DB_PATH: ${{ github.workspace }}/data/cpe-browser-ci.sqlite
       CPE_BROWSER_BASE_URL: http://127.0.0.1:8010
     steps:
       - name: Check out source
