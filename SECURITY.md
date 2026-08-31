@@ -5,21 +5,42 @@ candidate, company, recruiter, account, audit, and movement data as sensitive.
 
 ## Supported Versions
 
-The project is pre-1.0 alpha. Until a tagged release exists, security fixes land
-on the main development branch.
+The project is pre-1.0 alpha. Security fixes are prepared against the current
+`main` branch and, when necessary, released as a new tagged alpha. The latest
+published alpha is the only prerelease line receiving fixes. Earlier alphas
+remain supported only as documented upgrade sources; they do not receive
+independent security patches.
+
+Do not infer a production support commitment from an alpha tag. Each release
+note states its deployment boundary, and institutions must complete their own
+security, privacy, backup, and operational review before using real data.
 
 ## Reporting A Vulnerability
 
 Do not open public issues containing sensitive data, exploit details, database
 dumps, screenshots with real names, or credentials.
 
-Until a dedicated security contact is published, report issues privately to the
-repository maintainer. Include:
+Use GitHub's private vulnerability-reporting form when it is available for this
+repository:
+
+`https://github.com/agrim/campus-placement-engine/security/advisories/new`
+
+If that form is unavailable, contact the repository maintainer privately and do
+not include real institutional data. The maintainer's response targets are an
+initial acknowledgement within three business days and a severity/coordination
+update within seven business days; complex reports may require a longer fix
+window. Include:
 
 - A short description of the issue.
 - Steps to reproduce using synthetic data.
-- Affected files, routes, commands, or roles.
-- Whether data exposure, unauthorized mutation, or denial of service is possible.
+- Affected release, files, routes, commands, or roles.
+- Whether data exposure, unauthorized mutation, tenant-boundary failure, or
+  denial of service is possible.
+- Any suggested embargo or coordinated-disclosure constraints.
+
+The project will assign an opaque tracking reference, avoid reflecting sensitive
+report contents into public logs, and publish an advisory and fixed release when
+user action is required.
 
 ## Data Handling
 

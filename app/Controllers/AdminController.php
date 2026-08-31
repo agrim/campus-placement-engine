@@ -6,6 +6,7 @@ namespace App\Controllers;
 
 use App\Core\Http\UserVisibleException;
 use App\Core\Install\PortalKernelSynchronizer;
+use App\Core\Persistence\WriteTransaction;
 use App\Core\Portal;
 use App\Domain\ConfigurationSnapshotService;
 use App\Domain\SnapshotExporter;
@@ -66,34 +67,13 @@ final class AdminController
             }
             $pdo = Database::connection();
             $placement = new PlacementService($pdo);
-            $configuration = new ConfigurationSnapshotService($pdo);
-            $wasConfigurationFrozen = $configuration->isConfigurationFrozen();
             $settings = $this->normalizedSettingsFromPost($placement, $pdo);
-            $this->assertSettingsMutableOrUnfreezeOnly($pdo, $settings);
-            foreach (['college_name', 'timezone', 'cycle_name'] as $key) {
-                if ($settings[$key] !== '') {
-                    $this->set($pdo, $key, $settings[$key]);
-                }
-            }
-            $this->set($pdo, 'cycle_type', $settings['cycle_type']);
-            $this->set($pdo, 'cycle_start_date', $settings['cycle_start_date']);
-            $this->set($pdo, 'cycle_end_date', $settings['cycle_end_date']);
-            $this->set($pdo, 'configuration_freeze', $settings['configuration_freeze']);
-            if ($wasConfigurationFrozen) {
-                Auth::audit((int) $user['id'], 'settings.configuration_unfreeze', 'system', null, 'Unfroze configuration changes');
-                Flash::add('success', 'Configuration changes are unfrozen.');
-                redirect(url('admin'));
-            }
-            foreach ($settings as $key => $value) {
-                if (in_array($key, ['college_name', 'timezone', 'cycle_name', 'cycle_type', 'cycle_start_date', 'cycle_end_date', 'configuration_freeze'], true)) {
-                    continue;
-                }
-                $this->set($pdo, $key, $value);
-            }
-            (new PortalKernelSynchronizer())->synchronize($pdo);
+            $unfrozeOnly = $this->persistSettings($pdo, $settings, (int) $user['id']);
             Portal::reset();
-            Auth::audit((int) $user['id'], 'settings.update', 'system', null, 'Updated public settings');
-            Flash::add('success', 'Settings updated.');
+            Flash::add(
+                'success',
+                $unfrozeOnly ? 'Configuration changes are unfrozen.' : 'Settings updated.',
+            );
         } catch (\Throwable $e) {
             ControllerFailure::flash($e, 'CPE_ADMIN_SETTINGS_FAILURE', 'admin.settings');
         }
@@ -184,6 +164,69 @@ final class AdminController
             ControllerFailure::flash($e, 'CPE_ADMIN_WORKFLOW_FAILURE', 'admin.workflow');
         }
         redirect(url('admin'));
+    }
+
+    /**
+     * Persist one normalized settings form, its derived kernel state, and its
+     * audit record as a single write. A late synchronizer or audit failure must
+     * not leave a partially applied configuration.
+     *
+     * @param array<string, string> $settings
+     */
+    private function persistSettings(\PDO $pdo, array $settings, int $actorId): bool
+    {
+        return WriteTransaction::run($pdo, function () use ($pdo, $settings, $actorId): bool {
+            if ((string) $pdo->getAttribute(\PDO::ATTR_DRIVER_NAME) === 'pgsql') {
+                $lock = $pdo->prepare(
+                    "SELECT value FROM settings WHERE key = 'configuration_freeze' FOR UPDATE",
+                );
+                $lock->execute();
+            }
+            $wasConfigurationFrozen = (new ConfigurationSnapshotService($pdo))->isConfigurationFrozen();
+            $this->assertSettingsMutableOrUnfreezeOnly($pdo, $settings);
+
+            foreach (['college_name', 'timezone', 'cycle_name'] as $key) {
+                if (($settings[$key] ?? '') !== '') {
+                    $this->set($pdo, $key, $settings[$key]);
+                }
+            }
+            foreach (['cycle_type', 'cycle_start_date', 'cycle_end_date', 'configuration_freeze'] as $key) {
+                if (!array_key_exists($key, $settings)) {
+                    throw new \RuntimeException('Normalized settings are missing required key: ' . $key);
+                }
+                $this->set($pdo, $key, $settings[$key]);
+            }
+
+            if ($wasConfigurationFrozen) {
+                Auth::audit(
+                    $actorId,
+                    'settings.configuration_unfreeze',
+                    'system',
+                    null,
+                    'Unfroze configuration changes',
+                    $pdo,
+                );
+                return true;
+            }
+
+            foreach ($settings as $key => $value) {
+                if (in_array($key, [
+                    'college_name',
+                    'timezone',
+                    'cycle_name',
+                    'cycle_type',
+                    'cycle_start_date',
+                    'cycle_end_date',
+                    'configuration_freeze',
+                ], true)) {
+                    continue;
+                }
+                $this->set($pdo, $key, $value);
+            }
+            (new PortalKernelSynchronizer())->synchronize($pdo);
+            Auth::audit($actorId, 'settings.update', 'system', null, 'Updated public settings', $pdo);
+            return false;
+        });
     }
 
     private function set(\PDO $pdo, string $key, string $value): void

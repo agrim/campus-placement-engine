@@ -1,0 +1,84 @@
+name: Production hardening contracts
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: production-hardening-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  php-compatibility:
+    name: PHP ${{ matrix.php }} focused compatibility
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        php: ["8.2", "8.3", "8.4"]
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
+        with:
+          php-version: ${{ matrix.php }}
+          extensions: mbstring, pdo_sqlite, sqlite3, curl
+          coverage: none
+
+      - name: Lint hardening boundaries
+        run: |
+          php -l app/Core/Security/CapabilityService.php
+          php -l app/Controllers/AdminController.php
+          php -l tests/capability_factory_contract.php
+          php -l tests/admin_settings_transaction_contract.php
+
+      - name: Run focused SQLite contracts
+        env:
+          CPE_DB_DRIVER: sqlite
+        run: |
+          php tests/capability_factory_contract.php
+          php tests/admin_settings_transaction_contract.php
+
+  postgres-transaction:
+    name: PostgreSQL admin settings transaction
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_USER: cpe
+          POSTGRES_PASSWORD: cpe-hardening-password
+          POSTGRES_DB: cpe_hardening
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U cpe -d cpe_hardening"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - name: Check out source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Set up PHP
+        uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
+        with:
+          php-version: "8.2"
+          extensions: mbstring, pdo_pgsql, curl
+          coverage: none
+
+      - name: Run PostgreSQL transaction contract
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_DATABASE_URL: postgresql://cpe:cpe-hardening-password@127.0.0.1:5432/cpe_hardening?sslmode=disable
+          CPE_POSTGRES_POOL_MODE: direct
+          CPE_POSTGRES_ALLOW_INSECURE_LOOPBACK: "1"
+        run: php tests/admin_settings_transaction_contract.php
