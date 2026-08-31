@@ -88,11 +88,15 @@ test('keyboard, responsive reflow, zoom, reduced motion, and forced colors prese
   await signIn(page);
   await page.goto('/?r=board');
   await assertNoPageOverflow(page);
+  const refreshAnnouncement = page.getByRole('status');
+  await expect(refreshAnnouncement).toHaveText('');
+  await page.waitForTimeout(1_200);
+  await expect(refreshAnnouncement).toHaveText('');
   await expect(page.getByRole('button', { name: 'Pause automatic refresh' })).toBeVisible();
   await page.getByRole('button', { name: 'Pause automatic refresh' }).click();
-  await expect(page.getByRole('status')).toHaveText('Automatic board refresh paused.');
+  await expect(refreshAnnouncement).toHaveText('Automatic board refresh paused.');
   await page.getByRole('button', { name: 'Resume automatic refresh' }).click();
-  await expect(page.getByRole('status')).toContainText('Next board refresh in');
+  await expect(refreshAnnouncement).toContainText('Next board refresh in');
 
   await page.keyboard.press('Home');
   await page.keyboard.press('Tab');

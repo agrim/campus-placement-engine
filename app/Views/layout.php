@@ -76,9 +76,10 @@ if ($user && Database::isInstalled()) {
     <?php if ($metaRefreshSeconds > 0): ?>
       <div class="board-refresh-control" data-board-refresh-seconds="<?= h($metaRefreshSeconds) ?>">
         <button type="button" data-board-refresh-toggle aria-pressed="false">Pause automatic refresh</button>
-        <span data-board-refresh-status role="status" aria-live="polite" aria-atomic="true">
+        <span data-board-refresh-countdown>
           Next board refresh in <?= h($metaRefreshSeconds) ?> seconds.
         </span>
+        <span class="visually-hidden" data-board-refresh-announcement role="status" aria-live="polite" aria-atomic="true"></span>
       </div>
     <?php endif; ?>
     <?php foreach (Flash::pull() as $flash): ?>

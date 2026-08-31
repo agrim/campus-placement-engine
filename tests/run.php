@@ -5181,7 +5181,9 @@ test_case('board refresh setting is normalized and renders a pausable control on
     assert_true(!str_contains($html, 'http-equiv="refresh"'), 'Board layout must not force inaccessible meta refresh');
     assert_true(str_contains($html, 'data-board-refresh-seconds="15"'), 'Board layout should render the normalized refresh interval');
     assert_true(str_contains($html, 'Pause automatic refresh'), 'Board layout should let people pause timed refresh');
-    assert_true(str_contains($html, 'role="status"'), 'Board refresh state should be announced accessibly');
+    assert_true(str_contains($html, 'data-board-refresh-countdown'), 'Board refresh should expose a visible countdown outside the live region');
+    assert_true(str_contains($html, 'data-board-refresh-announcement role="status"'), 'Board refresh transitions should be announced accessibly');
+    assert_true(!str_contains($html, 'data-board-refresh-countdown role="status"'), 'Board refresh countdown must not announce every second');
 
     $set->execute(['board_refresh_seconds', '0']);
     assert_same(0, $service->boardRefreshSeconds(), 'Board refresh should allow disabled state');
