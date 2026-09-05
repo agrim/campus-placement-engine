@@ -32,3 +32,26 @@ jobs:
           path: ${{ runner.temp }}/review-evidence/
           if-no-files-found: error
           retention-days: 3
+  runtime:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Obtain Debian runtime packages for isolated offline tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/review-runtime"
+          docker run --rm --volume "$RUNNER_TEMP/review-runtime:/out" debian:trixie-slim sh -ec '
+            apt-get update >/dev/null
+            cd /out
+            apt-get download php8.4-sqlite3 php8.4-mbstring php8.4-pgsql libonig5 libpq5 postgresql-17 postgresql-client-17
+            sha256sum *.deb > SHA256SUMS
+          '
+          docker image inspect debian:trixie-slim --format '{{json .RepoDigests}}' > "$RUNNER_TEMP/review-runtime/image-digest.json"
+      - name: Retain test-runtime packages briefly
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: review-runtime-${{ github.sha }}
+          path: ${{ runner.temp }}/review-runtime/
+          if-no-files-found: error
+          retention-days: 3
