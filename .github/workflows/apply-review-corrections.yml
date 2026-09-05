@@ -25,15 +25,13 @@ jobs:
           if len(encoded) > 100000:
               raise SystemExit('Unexpected review payload size')
           patch = gzip.decompress(base64.b64decode(encoded, validate=True))
-          if len(patch) != 34887 or hashlib.sha256(patch).hexdigest() != 'a878230926fa2f450e90da492ea0755da9a234a2710f4919669814d638107589':
+          if len(patch) != 16024 or hashlib.sha256(patch).hexdigest() != '1c7b76e71aed5fae8abff515ffa84e640cc2dd963b70dff816255939032fa78d':
               raise SystemExit('Review patch checksum mismatch')
           subprocess.run(['git', 'apply', '--check', '-'], input=patch, check=True)
           subprocess.run(['git', 'apply', '--index', '-'], input=patch, check=True)
           PY
-          # GITHUB_TOKEN cannot update workflow files. Those changes and cleanup
-          # are applied separately through the authorized repository connector.
           git restore --source=HEAD --staged --worktree .github/workflows
           git rm .review-corrections.b64
           git diff --cached --check
-          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix: fence placement reads, sessions, and correction authority'
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix: preserve legacy import fields and commit whole batches atomically'
           git push origin HEAD:refs/heads/review/legacy-fidelity-2026-09-05
