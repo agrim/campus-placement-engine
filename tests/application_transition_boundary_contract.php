@@ -342,7 +342,7 @@ try {
     $pdo = Database::connection();
 
     $admin = $pdo->query(
-        "SELECT id, role, scope_type, scope_value, active
+        "SELECT id, role, scope_type, scope_value, active, session_generation
          FROM users WHERE email = 'transition-admin@example.test'",
     )->fetch(PDO::FETCH_ASSOC);
     transition_boundary_assert(is_array($admin), 'Transition boundary requires its installed administrator.');

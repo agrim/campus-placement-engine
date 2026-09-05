@@ -22,6 +22,7 @@ use PDO;
 final class ApplicationTransitionService
 {
     public const CAPABILITY = 'placement.application.transition';
+    public const CORRECTION_CAPABILITY = 'placement.application.correct';
     public const SERVICE_SCOPE = 'applications.transition';
     public const DENIED_CODE = 'BOARD_TRANSITION_FORBIDDEN';
     public const DENIED_MESSAGE = 'Auditors cannot change candidate status.';
@@ -45,8 +46,7 @@ final class ApplicationTransitionService
         return WriteTransaction::run($this->pdo, function () use ($command, $actor): ApplicationTransitionResult {
             // Canonical PostgreSQL transition order uses PortalKernelSynchronizer's
             // module-first gate: module_installations, users, role_capabilities.
-            $this->lockPlacementModule();
-            $currentUser = $this->revalidateActor($actor);
+            $currentUser = $this->authorizeBrowserActorWithinTransaction($actor);
             $implementation = new LegacyPlacementService($this->pdo);
             $result = $implementation->applyBoardMove(
                 $command->applicationId(),
@@ -61,6 +61,22 @@ final class ApplicationTransitionService
             );
             return ApplicationTransitionResult::fromLegacyResult($result);
         });
+    }
+
+    /** Reusable authorization fence for ordinary moves and privileged corrections. */
+    public function authorizeBrowserActorWithinTransaction(
+        ApplicationTransitionActor $actor,
+        string $capability = self::CAPABILITY,
+    ): array {
+        if (!$actor->isBrowserUser()
+            || !in_array($capability, [self::CAPABILITY, self::CORRECTION_CAPABILITY], true)) {
+            $this->deny();
+        }
+        if (!WriteTransaction::isActive($this->pdo)) {
+            throw new \RuntimeException('Browser authorization requires an active write transaction.');
+        }
+        $this->lockPlacementModule();
+        return $this->revalidateActor($actor, $capability);
     }
 
     public function executeForServiceAccount(
@@ -104,17 +120,19 @@ final class ApplicationTransitionService
     }
 
     /** @return array<string, mixed> */
-    private function revalidateActor(ApplicationTransitionActor $actor): array
+    private function revalidateActor(ApplicationTransitionActor $actor, string $capability): array
     {
         $lock = $this->isPostgres() ? ' FOR UPDATE' : '';
         $user = $this->pdo->prepare(
-            'SELECT id, role, scope_type, scope_value, active
+            'SELECT id, role, scope_type, scope_value, active, session_generation
              FROM users WHERE id = ?' . $lock,
         );
         $user->execute([$actor->userId()]);
         $current = $user->fetch(PDO::FETCH_ASSOC);
         if (!is_array($current)
             || !$actor->active()
+            || $actor->sessionGeneration() < 1
+            || (int) ($current['session_generation'] ?? 0) !== $actor->sessionGeneration()
             || !in_array($current['active'] ?? null, [true, 1, '1'], true)
             || (int) ($current['id'] ?? 0) !== $actor->userId()
             || (string) ($current['role'] ?? '') !== $actor->role()
@@ -123,9 +141,9 @@ final class ApplicationTransitionService
             $this->deny();
         }
 
-        $this->lockRoleCapabilities((string) $current['role']);
+        $this->lockRoleCapabilities((string) $current['role'], $capability);
         $modules = new ModuleRegistry(cpe_config('modules', []), $this->pdo);
-        if (!CapabilityService::fromDatabase($this->pdo, $modules)->allows($current, self::CAPABILITY)) {
+        if (!CapabilityService::fromDatabase($this->pdo, $modules)->allows($current, $capability)) {
             $this->deny();
         }
         return $current;
@@ -212,7 +230,7 @@ final class ApplicationTransitionService
         }
     }
 
-    private function lockRoleCapabilities(string $role): void
+    private function lockRoleCapabilities(string $role, string $capability): void
     {
         if (!$this->isPostgres()) {
             return;
@@ -224,7 +242,7 @@ final class ApplicationTransitionService
              ORDER BY capability
              FOR UPDATE",
         );
-        $grants->execute([$role, self::CAPABILITY]);
+        $grants->execute([$role, $capability]);
         $grants->fetchAll(PDO::FETCH_ASSOC);
     }
 

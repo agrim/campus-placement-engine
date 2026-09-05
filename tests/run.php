@@ -1605,7 +1605,7 @@ test_case('first-run installer guides live dummy data and system cleanup clears 
 
     $pdo = Database::connection();
     $adminId = (int) $pdo->query("SELECT id FROM users WHERE email = 'admin@test.local'")->fetchColumn();
-    $_SESSION['user_id'] = $adminId;
+    Auth::loginById($adminId);
     try {
         $systemHtml = render_view_for_test('system', [
             'dbPath' => Database::path(),
@@ -3573,9 +3573,9 @@ test_case('sensitive operational pages are hidden from restricted roles', functi
     $mobileUserId = (int) $pdo->query("SELECT id FROM users WHERE role = 'mobile' AND active = 1 LIMIT 1")->fetchColumn();
     $adminUserId = (int) $pdo->query("SELECT id FROM users WHERE role = 'admin' AND active = 1 LIMIT 1")->fetchColumn();
     $advisorUserId = Auth::createUser('Route Gate Advisor', 'route-gate-advisor@example.test', 'password123', 'advisor');
-    $previousSessionUser = $_SESSION['user_id'] ?? null;
+    $previousSession = $_SESSION;
     try {
-        $_SESSION['user_id'] = $companyUserId;
+        Auth::loginById($companyUserId);
         try {
             Auth::requireRole(['admin'], 'Only administrators can open Admin.');
             throw new RuntimeException('Expected company role to be rejected from admin-only page.');
@@ -3590,13 +3590,13 @@ test_case('sensitive operational pages are hidden from restricted roles', functi
         assert_true(str_contains($companyNav, '?r=notifications'), 'Company nav should keep notifications');
         assert_true(str_contains($companyNav, '?r=public'), 'Company nav should keep public page link');
 
-        $_SESSION['user_id'] = $mobileUserId;
+        Auth::loginById($mobileUserId);
         $mobileNav = render_layout_for_test(['title' => 'Mobile Nav', 'content' => '']);
         assert_true(str_contains($mobileNav, '?r=wanted'), 'Mobile nav should expose wanted alerts');
         assert_true(!str_contains($mobileNav, '?r=admin'), 'Mobile nav should hide Admin');
         assert_true(!str_contains($mobileNav, '?r=records'), 'Mobile nav should hide Records');
 
-        $_SESSION['user_id'] = $advisorUserId;
+        Auth::loginById($advisorUserId);
         foreach ([
             fn (): mixed => (new \App\Controllers\BoardController())->index(),
             fn (): mixed => (new \App\Controllers\CandidateController())->show(),
@@ -3610,17 +3610,13 @@ test_case('sensitive operational pages are hidden from restricted roles', functi
             }
         }
 
-        $_SESSION['user_id'] = $adminUserId;
+        Auth::loginById($adminUserId);
         $adminNav = render_layout_for_test(['title' => 'Admin Nav', 'content' => '']);
         foreach (['?r=records', '?r=operations', '?r=reports', '?r=import', '?r=preferences', '?r=wanted', '?r=admin', '?r=system'] as $expectedLink) {
             assert_true(str_contains($adminNav, $expectedLink), 'Admin nav should include ' . $expectedLink);
         }
     } finally {
-        if ($previousSessionUser === null) {
-            unset($_SESSION['user_id']);
-        } else {
-            $_SESSION['user_id'] = $previousSessionUser;
-        }
+        $_SESSION = $previousSession;
     }
 });
 
@@ -6217,11 +6213,11 @@ test_case('password hashing works through auth attempt', function (): void {
 test_case('admin forms expose accessible names for dynamic controls', function (): void {
     $pdo = Database::connection();
     $adminId = (int) $pdo->query("SELECT id FROM users WHERE role = 'admin' AND active = 1 LIMIT 1")->fetchColumn();
-    $previousSessionUser = $_SESSION['user_id'] ?? null;
+    $previousSession = $_SESSION;
     $bufferLevel = ob_get_level();
     $html = '';
     try {
-        $_SESSION['user_id'] = $adminId;
+        Auth::loginById($adminId);
         ob_start();
         (new \App\Controllers\AdminController())->show();
         $html = ob_get_clean() ?: '';
@@ -6229,11 +6225,7 @@ test_case('admin forms expose accessible names for dynamic controls', function (
         while (ob_get_level() > $bufferLevel) {
             ob_end_clean();
         }
-        if ($previousSessionUser === null) {
-            unset($_SESSION['user_id']);
-        } else {
-            $_SESSION['user_id'] = $previousSessionUser;
-        }
+        $_SESSION = $previousSession;
     }
 
     foreach (['reset_user_id', 'reset_user_password', 'new_user_name', 'new_user_email', 'new_user_password', 'new_user_role', 'new_user_scope_type', 'new_user_scope_value'] as $id) {
