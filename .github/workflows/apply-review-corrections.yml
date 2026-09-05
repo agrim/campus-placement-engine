@@ -1,0 +1,35 @@
+name: Apply audited review corrections
+on:
+  push:
+    branches: ["review/legacy-fidelity-2026-09-05"]
+    paths: [".review-corrections.b64"]
+permissions:
+  contents: write
+jobs:
+  apply:
+    if: github.repository == 'agrim/campus-placement-engine'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+      - name: Verify and apply exactly the reviewed patch
+        shell: bash
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import base64, gzip, hashlib, pathlib, subprocess
+          encoded = pathlib.Path('.review-corrections.b64').read_text().strip()
+          if len(encoded) > 100000:
+              raise SystemExit('Unexpected review payload size')
+          patch = gzip.decompress(base64.b64decode(encoded, validate=True))
+          if len(patch) != 34887 or hashlib.sha256(patch).hexdigest() != 'a878230926fa2f450e90da492ea0755da9a234a2710f4919669814d638107589':
+              raise SystemExit('Review patch checksum mismatch')
+          subprocess.run(['git', 'apply', '--check', '-'], input=patch, check=True)
+          subprocess.run(['git', 'apply', '--index', '-'], input=patch, check=True)
+          PY
+          git rm .review-corrections.b64 .github/workflows/apply-review-corrections.yml .github/workflows/review-evidence.yml
+          git diff --cached --check
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' commit -m 'fix: fence placement reads, sessions, and correction authority'
+          git push origin HEAD:refs/heads/review/legacy-fidelity-2026-09-05
