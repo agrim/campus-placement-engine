@@ -7,6 +7,7 @@ namespace App\Support;
 use App\Core\Http\AuthorizationException;
 use App\Core\Http\UserVisibleException;
 use App\Core\Security\AuthorizationUnavailable;
+use App\Core\Persistence\WriteTransaction;
 use PDO;
 
 final class Auth
@@ -110,7 +111,13 @@ final class Auth
         $stmt = Database::connection()->prepare('SELECT * FROM users WHERE id = ? AND active = 1');
         $stmt->execute([(int) $id]);
         $user = $stmt->fetch(PDO::FETCH_ASSOC);
-        return $user ?: null;
+        $generation = $_SESSION['auth_generation'] ?? null;
+        if (!$user || !is_int($generation) || $generation < 1
+            || $generation !== (int) ($user['session_generation'] ?? 0)) {
+            unset($_SESSION['user_id'], $_SESSION['auth_method'], $_SESSION['auth_generation']);
+            return null;
+        }
+        return $user;
     }
 
     public static function requireUser(): array
@@ -169,33 +176,60 @@ final class Auth
 
     public static function attempt(string $email, string $password): bool
     {
-        $stmt = Database::connection()->prepare('SELECT * FROM users WHERE lower(email) = lower(?) AND active = 1');
+        $pdo = Database::connection();
+        $stmt = $pdo->prepare('SELECT * FROM users WHERE lower(email) = lower(?) AND active = 1');
         $stmt->execute([$email]);
-        $user = $stmt->fetch(PDO::FETCH_ASSOC);
-        if (!$user || !password_verify($password, $user['password_hash'])) {
+        $observed = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$observed || !password_verify($password, $observed['password_hash'])) {
             return false;
         }
-        if (session_status() === PHP_SESSION_ACTIVE) {
-            session_regenerate_id(true);
+        // Hash verification is deliberately outside the lock. Revalidate the
+        // exact credential and generation before committing authentication.
+        $user = WriteTransaction::run($pdo, static function () use ($pdo, $observed): ?array {
+            $lock = (string) $pdo->getAttribute(PDO::ATTR_DRIVER_NAME) === 'pgsql' ? ' FOR UPDATE' : '';
+            $stmt = $pdo->prepare('SELECT * FROM users WHERE id = ? AND active = 1' . $lock);
+            $stmt->execute([(int) $observed['id']]);
+            $current = $stmt->fetch(PDO::FETCH_ASSOC);
+            if (!$current
+                || (int) $current['session_generation'] !== (int) $observed['session_generation']
+                || !hash_equals((string) $current['password_hash'], (string) $observed['password_hash'])) {
+                return null;
+            }
+            self::audit((int) $current['id'], 'login', 'user', (int) $current['id'], '', $pdo);
+            return $current;
+        });
+        if ($user === null) {
+            return false;
         }
-        $_SESSION['user_id'] = (int) $user['id'];
-        $_SESSION['auth_method'] = 'password';
-        self::audit((int) $user['id'], 'login', 'user', (int) $user['id'], 'Successful login');
+        self::establishSession($user, 'password');
         return true;
     }
 
     public static function loginById(int $id, string $method = 'local'): void
     {
+        $stmt = Database::connection()->prepare('SELECT id, session_generation FROM users WHERE id = ? AND active = 1');
+        $stmt->execute([$id]);
+        $user = $stmt->fetch(PDO::FETCH_ASSOC);
+        if (!$user) {
+            throw new UserVisibleException('USER_AUTHENTICATION_REQUIRED', 'An active user is required to sign in.');
+        }
+        self::establishSession($user, $method);
+    }
+
+    /** @param array<string, mixed> $user */
+    private static function establishSession(array $user, string $method): void
+    {
         if (session_status() === PHP_SESSION_ACTIVE) {
             session_regenerate_id(true);
         }
-        $_SESSION['user_id'] = $id;
+        $_SESSION['user_id'] = (int) $user['id'];
         $_SESSION['auth_method'] = $method;
+        $_SESSION['auth_generation'] = (int) $user['session_generation'];
     }
 
     public static function logout(): void
     {
-        unset($_SESSION['user_id'], $_SESSION['auth_method']);
+        unset($_SESSION['user_id'], $_SESSION['auth_method'], $_SESSION['auth_generation']);
         if (session_status() === PHP_SESSION_ACTIVE) {
             session_regenerate_id(true);
         }
@@ -228,8 +262,11 @@ final class Auth
 
     public static function setActive(int $id, bool $active): void
     {
-        $stmt = Database::connection()->prepare('UPDATE users SET active = ? WHERE id = ?');
-        $stmt->execute([$active ? 1 : 0, $id]);
+        $value = $active ? 1 : 0;
+        $stmt = Database::connection()->prepare(
+            'UPDATE users SET active = ?, session_generation = session_generation + 1 WHERE id = ? AND active != ?',
+        );
+        $stmt->execute([$value, $id, $value]);
     }
 
     /** @param array<int, int|string> $activeIds */
@@ -239,11 +276,13 @@ final class Auth
         if (!in_array($actorId, $ids, true)) {
             $ids[] = $actorId;
         }
-        foreach (self::users() as $user) {
-            $active = in_array((int) $user['id'], $ids, true);
-            self::setActive((int) $user['id'], $active);
-        }
-        self::audit($actorId, 'users.active_bulk', 'user', null, 'Updated active user flags');
+        WriteTransaction::run(Database::connection(), static function () use ($ids, $actorId): void {
+            foreach (self::users() as $user) {
+                $active = in_array((int) $user['id'], $ids, true);
+                self::setActive((int) $user['id'], $active);
+            }
+            self::audit($actorId, 'users.active_bulk', 'user', null, 'Updated active user flags');
+        });
     }
 
     public static function setPassword(int $id, string $password, int $actorId): void
@@ -251,9 +290,18 @@ final class Auth
         if (strlen($password) < 8) {
             throw new UserVisibleException('USER_PASSWORD_INVALID', 'Password must be at least 8 characters.');
         }
-        $stmt = Database::connection()->prepare('UPDATE users SET password_hash = ? WHERE id = ?');
-        $stmt->execute([password_hash($password, PASSWORD_DEFAULT), $id]);
-        self::audit($actorId, 'user.password_reset', 'user', $id, 'Password reset by administrator');
+        $hash = password_hash($password, PASSWORD_DEFAULT);
+        $pdo = Database::connection();
+        WriteTransaction::run($pdo, static function () use ($pdo, $id, $hash, $actorId): void {
+            $stmt = $pdo->prepare(
+                'UPDATE users SET password_hash = ?, session_generation = session_generation + 1 WHERE id = ?',
+            );
+            $stmt->execute([$hash, $id]);
+            if ($stmt->rowCount() !== 1) {
+                throw new UserVisibleException('USER_NOT_FOUND', 'User not found.');
+            }
+            self::audit($actorId, 'user.password_reset', 'user', $id, '', $pdo);
+        });
     }
 
     public static function audit(

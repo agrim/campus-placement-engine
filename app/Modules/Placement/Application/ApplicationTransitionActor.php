@@ -27,6 +27,7 @@ final class ApplicationTransitionActor
         private readonly string $serviceAccountPublicId,
         private readonly int $institutionId,
         private readonly string $institutionPublicId,
+        private readonly int $sessionGeneration,
     ) {
     }
 
@@ -44,6 +45,7 @@ final class ApplicationTransitionActor
             '',
             0,
             '',
+            (int) ($user['session_generation'] ?? 0),
         );
     }
 
@@ -70,6 +72,7 @@ final class ApplicationTransitionActor
             $serviceAccountPublicId,
             $institutionId,
             $institutionPublicId,
+            0,
         );
     }
 
@@ -106,6 +109,11 @@ final class ApplicationTransitionActor
     public function active(): bool
     {
         return $this->active;
+    }
+
+    public function sessionGeneration(): int
+    {
+        return $this->sessionGeneration;
     }
 
     public function serviceAccountId(): int

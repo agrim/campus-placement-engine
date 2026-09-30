@@ -98,3 +98,9 @@ browser/accessibility, static and security analysis, capacity, compatibility,
 privacy/incident evidence, and characterization-first maintainability work. An
 item is complete only when its issue acceptance criteria and cited evidence are
 satisfied; closing the issue is not itself proof.
+
+## September authority review
+
+See [the 5 September 2026 authority review](reviews/2026-09-05-authority-hardening.md) for
+source-grounded corrections, regression commands, and rollout limitations.
+This review does not remove the production qualification gates above.

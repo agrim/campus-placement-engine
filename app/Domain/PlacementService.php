@@ -9,6 +9,8 @@ use App\Core\Events\DomainEvent;
 use App\Core\Persistence\WriteTransaction;
 use App\Modules\Placement\Install\LegacyDomainSynchronizer;
 use App\Modules\Placement\Application\ApplicationStatusWriter;
+use App\Modules\Placement\Application\ApplicationTransitionActor;
+use App\Modules\Placement\Application\ApplicationTransitionService;
 use App\Modules\Placement\Workflow\WorkflowEngine;
 use App\Modules\Placement\Workflow\WorkflowPublisher;
 use App\Modules\Placement\Workflow\WorkflowRepository;
@@ -79,9 +81,9 @@ final class PlacementService
         $role = (string) ($user['role'] ?? 'admin');
         $staleCutoff = $this->staleCutoff($this->staleMinutesForUser((int) ($user['id'] ?? 0)));
         $activeApplicationSql = $this->activeApplicationSql('ac');
-        if ($this->isCompanyScopedUser($user) && ($user['scope_value'] ?? '') !== '') {
+        if ($this->isCompanyScopedUser($user)) {
             $where[] = 'co.code = ?';
-            $params[] = strtoupper((string) $user['scope_value']);
+            $params[] = strtoupper(trim((string) ($user['scope_value'] ?? '')));
         }
         $company = strtoupper(trim((string) ($filters['company'] ?? '')));
         if ($company !== '' && !$this->isCompanyScopedUser($user)) {
@@ -240,9 +242,9 @@ final class PlacementService
             ARRAY_FILTER_USE_KEY
         );
         $companies = [];
-        if ($this->isCompanyScopedUser($user) && trim((string) ($user['scope_value'] ?? '')) !== '') {
+        if ($this->isCompanyScopedUser($user)) {
             $stmt = $this->pdo->prepare('SELECT code, name FROM companies WHERE code = ? ORDER BY code');
-            $stmt->execute([strtoupper((string) $user['scope_value'])]);
+            $stmt->execute([strtoupper(trim((string) ($user['scope_value'] ?? '')))]);
             $companies = $stmt->fetchAll();
         } else {
             $companies = $this->pdo->query('SELECT code, name FROM companies ORDER BY code')->fetchAll();
@@ -4008,6 +4010,14 @@ final class PlacementService
 
         return $this->transactional(function () use ($key, $actorUserId, $action, $applicationId, $requestHash, $actorContext, $operation): array {
             if ($actorContext !== []) {
+                if ($action === 'board.return_to_idle') {
+                    $actor = ApplicationTransitionActor::fromAuthenticatedUser($actorContext);
+                    if ($actor->userId() !== $actorUserId) {
+                        throw new UserVisibleException('BOARD_CORRECTION_FORBIDDEN', 'Correction actor attribution is invalid.');
+                    }
+                    $actorContext = (new ApplicationTransitionService($this->pdo))
+                        ->authorizeBrowserActorWithinTransaction($actor, ApplicationTransitionService::CORRECTION_CAPABILITY);
+                }
                 $this->assertCanActOnApplicationContext($applicationId, $actorContext, true);
             }
             if ($key !== '') {
