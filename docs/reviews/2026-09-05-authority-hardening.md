@@ -49,7 +49,8 @@ The authority contract uses a new synthetic SQLite database by default. Setting
 database. Never point it at a live institution. Its checks cover valid/missing
 scope, normalization, password and SSO revocation, disable/reactivate, legacy
 sessions, and stale correction authority. CI runs the SQLite authority contract
-on PHP 8.2/8.3/8.4 and the PostgreSQL path in the main contract workflow.
+on PHP 8.2/8.3/8.4 and the PostgreSQL path in a separate fresh database in the
+production-hardening workflow.
 
 These tests are not proof of physical candidate availability or universal panel
 capacity enforcement. Current active-conflict/capacity warnings and slot-planner

@@ -38,6 +38,7 @@ jobs:
           php -l app/Controllers/AdminController.php
           php -l tests/capability_factory_contract.php
           php -l tests/admin_settings_transaction_contract.php
+          php -l tests/review_authority_contract.php
 
       - name: Run focused SQLite contracts
         env:
@@ -45,6 +46,7 @@ jobs:
         run: |
           php tests/capability_factory_contract.php
           php tests/admin_settings_transaction_contract.php
+          php tests/review_authority_contract.php
 
   postgres-transaction:
     name: PostgreSQL admin settings transaction
@@ -82,3 +84,11 @@ jobs:
           CPE_POSTGRES_POOL_MODE: direct
           CPE_POSTGRES_ALLOW_INSECURE_LOOPBACK: "1"
         run: php tests/admin_settings_transaction_contract.php
+
+      - name: Run PostgreSQL authority contract in a fresh database
+        env:
+          CPE_REVIEW_AUTHORITY_DATABASE_URL: postgresql://cpe:cpe-hardening-password@127.0.0.1:5432/cpe_review_authority?sslmode=disable
+          CPE_POSTGRES_ALLOW_INSECURE_LOOPBACK: "1"
+        run: |
+          docker exec "${{ job.services.postgres.id }}" createdb --username=cpe cpe_review_authority
+          php tests/review_authority_contract.php
