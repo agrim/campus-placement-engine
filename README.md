@@ -318,3 +318,7 @@ and [docs/publication-risk-register.md](docs/publication-risk-register.md).
 Before public release, review [SECURITY.md](SECURITY.md),
 [CONTRIBUTING.md](CONTRIBUTING.md), and
 [docs/release-checklist.md](docs/release-checklist.md).
+
+## Codex Cloud development
+
+See [.codex/cloud/README.md](.codex/cloud/README.md) for Linux environment setup, available validation commands, and the checks that require the native platform or additional services.
