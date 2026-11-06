@@ -53,7 +53,7 @@ Kafka, RabbitMQ, Node.js, container runtime, or Cloud service.
 
 ## Install on university web hosting
 
-1. Confirm the host provides PHP 8.2 or newer with `mbstring`, `pdo_sqlite`, and `sqlite3`.
+1. Confirm the host provides patched PHP (8.2.35+, 8.3.36+, 8.4.27+, or 8.5.12+ within its branch) with `mbstring`, `pdo_sqlite`, and `sqlite3`.
 2. Upload the extracted release folder.
 3. Point the domain's document root at the release's `public/` folder.
 4. Make the `data/` folder writable by PHP.

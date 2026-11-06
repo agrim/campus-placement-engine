@@ -3285,6 +3285,21 @@ test_case('doctor reports pending migrations before querying newer health schema
     }
 });
 
+test_case('system requirements enforce branch-specific PHP security fixes', function (): void {
+    foreach (['8.1.34', '8.2.34', '8.3.35', '8.4.26', '8.5.11'] as $version) {
+        assert_true(
+            version_compare($version, SystemRequirements::minimumSecurePhp($version), '<'),
+            'Pre-security-release PHP must fail requirements: ' . $version,
+        );
+    }
+    foreach (['8.2.35', '8.2.36', '8.3.36', '8.3.37', '8.4.27', '8.4.28', '8.5.12', '8.5.13'] as $version) {
+        assert_true(
+            version_compare($version, SystemRequirements::minimumSecurePhp($version), '>='),
+            'Patched PHP must satisfy the security floor: ' . $version,
+        );
+    }
+});
+
 test_case('system requirements preflight fails closed for installer reuse', function (): void {
     $requirements = new SystemRequirements();
     assert_true($requirements->isReady(), 'Current test runtime should satisfy install requirements');
@@ -6367,6 +6382,70 @@ test_case('audit request metadata retention is opt-in', function (): void {
         } else {
             $_SERVER['HTTP_USER_AGENT'] = $originalAgent;
         }
+    }
+});
+
+test_case('local password entry points reject bcrypt truncation and null bytes', function (): void {
+    $pdo = Database::connection();
+    $adminId = (int) $pdo->query("SELECT id FROM users WHERE email = 'admin@test.local'")->fetchColumn();
+    $initialSession = $_SESSION;
+    $expectCode = static function (callable $operation, string $code): void {
+        try {
+            $operation();
+        } catch (UserVisibleException $failure) {
+            assert_same($code, $failure->publicCode(), 'Password rejection should use its existing public error code');
+            return;
+        }
+        throw new RuntimeException('Password outside the supported byte range was accepted.');
+    };
+
+    try {
+        foreach ([str_repeat('A', 72), str_repeat('é', 36), str_repeat('é', 4)] as $index => $password) {
+            $email = 'password-boundary-' . $index . '@example.test';
+            $userId = Auth::createUser('Password Boundary', $email, $password, 'auditor');
+            assert_true(Auth::attempt($email, $password), 'An accepted ASCII/Unicode password must authenticate unchanged');
+            if (strlen($password) === 72) {
+                Auth::logout();
+                assert_true(!Auth::attempt($email, $password . 'suffix'), 'A suffix beyond bcrypt capacity must not authenticate');
+                assert_true(!isset($_SESSION['user_id']), 'Rejected login must not establish a session');
+            }
+            Auth::setPassword($userId, $password, $adminId);
+            assert_true(Auth::attempt($email, $password), 'Password reset must preserve accepted byte boundaries');
+        }
+
+        $boundaryAdmin = Auth::createAdmin('Boundary Admin', 'password-admin@example.test', str_repeat('A', 72));
+        $oldHash = (string) $pdo->query('SELECT password_hash FROM users WHERE id = ' . $boundaryAdmin)->fetchColumn();
+        $userCount = (int) $pdo->query('SELECT COUNT(*) FROM users')->fetchColumn();
+        foreach ([str_repeat('A', 73), str_repeat('é', 37), 'short', "valid-password\0suffix"] as $invalid) {
+            $expectCode(
+                static fn () => Auth::createAdmin('Invalid Admin', 'invalid-admin@example.test', $invalid),
+                'USER_PASSWORD_INVALID',
+            );
+            $expectCode(
+                static fn () => Auth::createUser('Invalid User', 'invalid-user@example.test', $invalid, 'auditor'),
+                'USER_DETAILS_INVALID',
+            );
+            $expectCode(static fn () => Auth::setPassword($boundaryAdmin, $invalid, $adminId), 'USER_PASSWORD_INVALID');
+            $expectCode(static fn () => (new Installer())->install([
+                'college_name' => 'Invalid Password College',
+                'admin_name' => 'Invalid Admin',
+                'admin_email' => 'invalid-install@example.test',
+                'admin_password' => $invalid,
+            ]), 'SETUP_ADMIN_DETAILS_INVALID');
+            Auth::logout();
+            assert_true(!Auth::attempt('password-admin@example.test', $invalid), 'Invalid password must fail sign-in safely');
+            assert_true(!isset($_SESSION['user_id']), 'Invalid sign-in must not establish a session');
+            assert_same($userCount, (int) $pdo->query('SELECT COUNT(*) FROM users')->fetchColumn(), 'Rejected passwords must not create users');
+            assert_same($oldHash, (string) $pdo->query('SELECT password_hash FROM users WHERE id = ' . $boundaryAdmin)->fetchColumn(), 'Rejected reset must preserve the prior credential');
+        }
+        assert_true(Auth::attempt('password-admin@example.test', str_repeat('A', 72)), 'Rejected reset must leave the original password usable');
+        $legacyHash = password_hash('oldpass', PASSWORD_DEFAULT);
+        $pdo->prepare('UPDATE users SET password_hash = ? WHERE id = ?')->execute([$legacyHash, $boundaryAdmin]);
+        assert_true(Auth::attempt('password-admin@example.test', 'oldpass'), 'Existing short credentials must remain verifiable until reset');
+        $expectCode(static fn () => Auth::setPassword($boundaryAdmin, 'oldpass', $adminId), 'USER_PASSWORD_INVALID');
+        assert_same($legacyHash, (string) $pdo->query('SELECT password_hash FROM users WHERE id = ' . $boundaryAdmin)->fetchColumn(), 'Rejected short reset must preserve the existing credential');
+    } finally {
+        $_SESSION = $initialSession;
     }
 });
 

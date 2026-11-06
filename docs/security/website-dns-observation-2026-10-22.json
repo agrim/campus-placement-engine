@@ -1,0 +1,66 @@
+{
+  "observed_at_utc": "2026-10-22T17:13:26.680816+00:00",
+  "hostname": "agrim.github.io",
+  "website_path": "/campus-placement-engine/",
+  "zone_owner": "GitHub, not a user-controlled custom DNS zone",
+  "pages_custom_cname": null,
+  "dns": {
+    "A": [
+      "185.199.108.153",
+      "185.199.109.153",
+      "185.199.110.153",
+      "185.199.111.153"
+    ],
+    "AAAA": [
+      "2606:50c0:8000::153",
+      "2606:50c0:8001::153",
+      "2606:50c0:8002::153",
+      "2606:50c0:8003::153"
+    ],
+    "ttl_observed": 3600,
+    "authoritative_zone": "github.io",
+    "ns": [
+      "dns1.p05.nsone.net.",
+      "dns2.p05.nsone.net.",
+      "dns3.p05.nsone.net.",
+      "dns4.p05.nsone.net.",
+      "ns-1339.awsdns-39.org.",
+      "ns-1622.awsdns-10.co.uk.",
+      "ns-393.awsdns-49.com.",
+      "ns-692.awsdns-22.net."
+    ],
+    "ownership": "GitHub-managed zone; no custom user-controlled domain in Pages metadata",
+    "dnssec": "No validation claim from these probes"
+  },
+  "authoritative_queries": [
+    {
+      "server": "dns1.p05.nsone.net",
+      "name": "agrim.github.io",
+      "type": "A",
+      "exit": 0,
+      "answer": "\n; <<>> DiG 9.10.6 <<>> @dns1.p05.nsone.net agrim.github.io A +norecurse +noall +comments +answer +authority +time=2 +tries=1\n; (1 server found)\n;; global options: +cmd\n;; Got answer:\n;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 36242\n;; flags: qr aa; QUERY: 1, ANSWER: 4, AUTHORITY: 0, ADDITIONAL: 1\n\n;; OPT PSEUDOSECTION:\n; EDNS: version: 0, flags:; udp: 1232\n;; ANSWER SECTION:\nagrim.github.io.\t3600\tIN\tA\t185.199.108.153\nagrim.github.io.\t3600\tIN\tA\t185.199.109.153\nagrim.github.io.\t3600\tIN\tA\t185.199.110.153\nagrim.github.io.\t3600\tIN\tA\t185.199.111.153\n\n",
+      "stderr": ""
+    },
+    {
+      "server": "dns1.p05.nsone.net",
+      "name": "agrim.github.io",
+      "type": "AAAA",
+      "exit": 0,
+      "answer": "\n; <<>> DiG 9.10.6 <<>> @dns1.p05.nsone.net agrim.github.io AAAA +norecurse +noall +comments +answer +authority +time=2 +tries=1\n; (1 server found)\n;; global options: +cmd\n;; Got answer:\n;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 27747\n;; flags: qr aa; QUERY: 1, ANSWER: 4, AUTHORITY: 0, ADDITIONAL: 1\n\n;; OPT PSEUDOSECTION:\n; EDNS: version: 0, flags:; udp: 1232\n;; ANSWER SECTION:\nagrim.github.io.\t3600\tIN\tAAAA\t2606:50c0:8000::153\nagrim.github.io.\t3600\tIN\tAAAA\t2606:50c0:8001::153\nagrim.github.io.\t3600\tIN\tAAAA\t2606:50c0:8002::153\nagrim.github.io.\t3600\tIN\tAAAA\t2606:50c0:8003::153\n\n",
+      "stderr": ""
+    },
+    {
+      "server": "ns-1622.awsdns-10.co.uk",
+      "name": "github.io",
+      "type": "SOA",
+      "exit": 0,
+      "answer": "\n; <<>> DiG 9.10.6 <<>> @ns-1622.awsdns-10.co.uk github.io SOA +norecurse +noall +comments +answer +authority +time=2 +tries=1\n; (1 server found)\n;; global options: +cmd\n;; Got answer:\n;; ->>HEADER<<- opcode: QUERY, status: NOERROR, id: 8939\n;; flags: qr aa; QUERY: 1, ANSWER: 1, AUTHORITY: 8, ADDITIONAL: 1\n\n;; OPT PSEUDOSECTION:\n; EDNS: version: 0, flags:; udp: 4096\n;; ANSWER SECTION:\ngithub.io.\t\t900\tIN\tSOA\tns-1622.awsdns-10.co.uk. awsdns-hostmaster.amazon.com. 1 7200 900 1209600 86400\n\n;; AUTHORITY SECTION:\ngithub.io.\t\t900\tIN\tNS\tdns1.p05.nsone.net.\ngithub.io.\t\t900\tIN\tNS\tdns2.p05.nsone.net.\ngithub.io.\t\t900\tIN\tNS\tdns3.p05.nsone.net.\ngithub.io.\t\t900\tIN\tNS\tdns4.p05.nsone.net.\ngithub.io.\t\t900\tIN\tNS\tns-1339.awsdns-39.org.\ngithub.io.\t\t900\tIN\tNS\tns-1622.awsdns-10.co.uk.\ngithub.io.\t\t900\tIN\tNS\tns-393.awsdns-49.com.\ngithub.io.\t\t900\tIN\tNS\tns-692.awsdns-22.net.\n\n",
+      "stderr": ""
+    }
+  ],
+  "limitations": [
+    "Point-in-time public observation, not a complete zone export or DNSSEC validation.",
+    "No registrar, nameserver, proxy or provider-account changes performed.",
+    "Restore provider-managed github.io through GitHub; do not recreate shared records in an unrelated zone."
+  ]
+}

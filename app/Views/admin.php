@@ -197,7 +197,8 @@ ob_start();
         <?php endforeach; ?>
       </select>
       <label for="reset_user_password">New password</label>
-      <input id="reset_user_password" type="password" name="password" minlength="8" autocomplete="new-password" required>
+      <input id="reset_user_password" type="password" name="password" autocomplete="new-password" aria-describedby="reset_password_hint" required>
+      <p id="reset_password_hint">Use 8–72 bytes. Some characters, including emoji, use more than one byte.</p>
       <p><button type="submit">Reset password</button></p>
     </form>
 
@@ -209,7 +210,8 @@ ob_start();
       <label for="new_user_email">Email</label>
       <input id="new_user_email" type="email" name="email" autocomplete="username" required>
       <label for="new_user_password">Password</label>
-      <input id="new_user_password" type="password" name="password" minlength="8" autocomplete="new-password" required>
+      <input id="new_user_password" type="password" name="password" autocomplete="new-password" aria-describedby="new_password_hint" required>
+      <p id="new_password_hint">Use 8–72 bytes. Some characters, including emoji, use more than one byte.</p>
       <label for="new_user_role">Role</label>
       <select id="new_user_role" name="role">
         <?php foreach ($roles as $key => $label): ?>

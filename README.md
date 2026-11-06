@@ -43,7 +43,8 @@ This modernization is intentionally dependency-light:
 
 Requirements:
 
-- PHP 8.2 through 8.4 for the current verified release window.
+- PHP 8.2 through 8.4 for the current verified release window, with security
+  fixes: 8.2.35+, 8.3.36+, or 8.4.27+. PHP 8.5 deployments require 8.5.12+.
 - `mbstring`, `pdo_sqlite`, and `sqlite3` PHP extensions.
 - A writable `data/` directory.
 

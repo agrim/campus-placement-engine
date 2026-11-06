@@ -5,7 +5,7 @@ runtime. The default self-hosted shape is still plain PHP plus SQLite.
 
 ## Requirements
 
-- PHP 8.2 or newer.
+- Patched PHP: 8.2.35+, 8.3.36+, 8.4.27+, or 8.5.12+ within its branch.
 - `mbstring` plus `pdo_sqlite` and `sqlite3` for the default SQLite shape.
 - A writable `data/` directory.
 - No Node.js, Composer runtime, Redis, image assets, or container runtime is

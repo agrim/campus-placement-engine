@@ -271,6 +271,44 @@ for (const file of files) {
 
 const indexPath = path.join(DIST_ROOT, "index.html");
 const indexHtml = textByPath.get("index.html") ?? "";
+const policyTag = indexHtml.match(/<meta\b(?=[^>]*http-equiv="Content-Security-Policy")[^>]*content="([^"]*)"[^>]*>/i);
+if (!policyTag) {
+  fail("index.html is missing its Content Security Policy");
+} else {
+  const policy = new Map();
+  for (const directive of policyTag[1].replaceAll("&#39;", "'").split(";")) {
+    const [rawName, ...sources] = directive.trim().split(/\s+/);
+    const name = rawName.toLowerCase();
+    if (!name) continue;
+    if (policy.has(name)) {
+      fail(`duplicate ${name} security policy directive`);
+    } else {
+      // Browsers use the first occurrence and ignore duplicate directives.
+      policy.set(name, sources.join(" "));
+    }
+  }
+  for (const [directive, sources] of Object.entries({
+    "default-src": "'none'",
+    "script-src": "'self'",
+    "style-src": "'self'",
+    "style-src-attr": "'unsafe-inline'",
+    "img-src": "'self'",
+    "media-src": "'self'",
+    "base-uri": "'none'",
+    "form-action": "'none'",
+    "connect-src": "'none'",
+    "object-src": "'none'",
+    "frame-src": "'none'",
+    "worker-src": "'none'",
+  })) {
+    if (policy.get(directive) !== sources) fail(`unexpected ${directive} security policy`);
+  }
+  const firstResource = indexHtml.search(/<(?:script|link|img|iframe)\b/i);
+  if (firstResource !== -1 && policyTag.index > firstResource) fail("security policy must precede resources");
+}
+if (!/<meta\b(?=[^>]*name="referrer")[^>]*content="same-origin"/i.test(indexHtml)) {
+  fail("index.html must restrict referrer disclosure to the same origin");
+}
 if (!/<html\s[^>]*lang=["']en["']/i.test(indexHtml)) fail("index.html must declare lang=\"en\"");
 if (!/<meta\s[^>]*name=["']description["']/i.test(indexHtml)) fail("index.html is missing its description metadata");
 if (!/<meta\s[^>]*name=["']viewport["']/i.test(indexHtml)) fail("index.html is missing responsive viewport metadata");

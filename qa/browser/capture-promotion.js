@@ -1,14 +1,16 @@
 import { chromium } from '@playwright/test';
 import { mkdir } from 'node:fs/promises';
 import { resolve } from 'node:path';
+import { newQualificationContext } from './tests/fixtures.js';
+import { qualificationOrigin } from './security/network-policy.js';
 
 const baseURL = process.env.CPE_BROWSER_BASE_URL || 'http://127.0.0.1:8010';
+qualificationOrigin(baseURL);
 const websiteAssets = resolve('../../website/public/demo');
 await mkdir(websiteAssets, { recursive: true });
 
 const browser = await chromium.launch();
-const context = await browser.newContext({
-  baseURL,
+const context = await newQualificationContext(browser, baseURL, {
   viewport: { width: 1440, height: 900 },
   recordVideo: { dir: resolve('../../output/playwright/promotion-video'), size: { width: 1440, height: 900 } },
 });
@@ -41,7 +43,7 @@ if (video) {
 }
 await context.close();
 
-const mobileContext = await browser.newContext({ baseURL, viewport: { width: 390, height: 844 } });
+const mobileContext = await newQualificationContext(browser, baseURL, { viewport: { width: 390, height: 844 } });
 const mobile = await mobileContext.newPage();
 await mobile.goto('/?r=login');
 await mobile.getByLabel('Email').fill('admin@example.test');

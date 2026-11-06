@@ -1,6 +1,9 @@
 import { defineConfig, devices } from '@playwright/test';
+import { qualificationOrigin } from './security/network-policy.js';
 
 const outputRoot = '../../output/playwright';
+const baseURL = process.env.CPE_BROWSER_BASE_URL || 'http://127.0.0.1:8010';
+qualificationOrigin(baseURL);
 
 export default defineConfig({
   testDir: './tests',
@@ -14,7 +17,8 @@ export default defineConfig({
     : [['list'], ['html', { outputFolder: `${outputRoot}/report`, open: 'never' }]],
   outputDir: `${outputRoot}/results`,
   use: {
-    baseURL: process.env.CPE_BROWSER_BASE_URL || 'http://127.0.0.1:8010',
+    baseURL,
+    serviceWorkers: 'block',
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',

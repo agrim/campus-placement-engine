@@ -398,11 +398,11 @@ function install_app(array $args): void
         $input['seed_demo'] = '1';
     }
 
-    if ($input['college_name'] === '' || $input['admin_name'] === '' || $input['admin_email'] === '' || strlen($input['admin_password']) < 8) {
+    if ($input['college_name'] === '' || $input['admin_name'] === '' || $input['admin_email'] === '' || !\App\Security\PasswordPolicy::allows($input['admin_password'])) {
         install_help();
         throw new UserVisibleException(
             'CLI_INSTALL_OPTIONS_REQUIRED',
-            'Missing required install options: college, admin-name, admin-email, and an 8+ character admin password.',
+            'Install requires college, admin-name, admin-email, and an 8–72 byte admin password without null bytes.',
         );
     }
 

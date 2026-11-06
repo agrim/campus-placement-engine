@@ -15,6 +15,7 @@ use App\Modules\Placement\Install\LegacyDomainSynchronizer;
 use App\Modules\Placement\Application\PlacementService;
 use App\Modules\Placement\Workflow\WorkflowPublisher;
 use App\Security\SetupRecoveryAuthority;
+use App\Security\PasswordPolicy;
 use App\Support\Auth;
 use App\Support\Database;
 use App\Support\TimezoneValidator;
@@ -75,10 +76,10 @@ final class Installer
         $email = trim((string) ($input['admin_email'] ?? ''));
         $password = (string) ($input['admin_password'] ?? '');
 
-        if ($college === '' || $name === '' || !filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($password) < 8) {
+        if ($college === '' || $name === '' || !filter_var($email, FILTER_VALIDATE_EMAIL) || !PasswordPolicy::allows($password)) {
             throw new UserVisibleException(
                 'SETUP_ADMIN_DETAILS_INVALID',
-                'College, admin name, valid email, and an 8+ character password are required.',
+                'College, admin name, valid email, and an 8–72 byte password without null bytes are required.',
             );
         }
 

@@ -116,7 +116,8 @@ ob_start();
         <input id="admin_email" type="email" name="admin_email" value="admin@example.test" autocomplete="username" required>
 
         <label for="admin_password">Admin password</label>
-        <input id="admin_password" type="password" name="admin_password" minlength="8" autocomplete="new-password" required>
+        <input id="admin_password" type="password" name="admin_password" autocomplete="new-password" aria-describedby="admin_password_hint" required>
+        <p id="admin_password_hint">Use 8–72 bytes. Some characters, including emoji, use more than one byte.</p>
       </fieldset>
 
       <fieldset class="setup-section">

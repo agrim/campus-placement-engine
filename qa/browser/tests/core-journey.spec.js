@@ -1,4 +1,4 @@
-import { expect, test } from '@playwright/test';
+import { expect, test, newQualificationContext } from './fixtures.js';
 import {
   assertNoPageOverflow,
   assertNoSeriousAccessibilityViolations,
@@ -6,7 +6,7 @@ import {
   watchBrowserErrors,
 } from './helpers.js';
 
-test('authentication, public access, role boundaries, and core administration remain usable', async ({ browser, page }) => {
+test('authentication, public access, role boundaries, and core administration remain usable', async ({ browser, page, baseURL }) => {
   const browserErrors = watchBrowserErrors(page);
 
   await page.goto('/?r=login');
@@ -42,14 +42,14 @@ test('authentication, public access, role boundaries, and core administration re
   await page.getByRole('button', { name: 'Sign out' }).click();
   await expect(page.getByRole('heading', { name: 'Sign in' })).toBeVisible();
 
-  const publicContext = await browser.newContext();
+  const publicContext = await newQualificationContext(browser, baseURL);
   const publicPage = await publicContext.newPage();
   await publicPage.goto('/?r=public');
   await expect(publicPage.getByRole('heading', { level: 1 })).toBeVisible();
   await assertNoSeriousAccessibilityViolations(publicPage);
   await publicContext.close();
 
-  const restrictedContext = await browser.newContext();
+  const restrictedContext = await newQualificationContext(browser, baseURL);
   const restricted = await restrictedContext.newPage();
   await signIn(restricted, 'atlas@example.test');
   const denial = await restricted.goto('/?r=records');

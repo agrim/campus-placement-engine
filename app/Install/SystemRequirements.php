@@ -10,6 +10,7 @@ use App\Support\Database;
 final class SystemRequirements
 {
     public const MINIMUM_PHP = '8.2.0';
+    private const MINIMUM_SECURE_PHP = '8.2.35';
 
     public function __construct(
         private string $minimumPhp = self::MINIMUM_PHP,
@@ -175,12 +176,16 @@ final class SystemRequirements
      */
     public function runtimeChecks(): array
     {
+        $minimumPhp = version_compare($this->minimumPhp, self::minimumSecurePhp(PHP_VERSION), '>=')
+            ? $this->minimumPhp
+            : self::minimumSecurePhp(PHP_VERSION);
+
         return [
             [
                 'key' => 'PHP',
                 'label' => 'PHP',
-                'ok' => version_compare(PHP_VERSION, $this->minimumPhp, '>='),
-                'value' => PHP_VERSION . ' (requires >= ' . $this->minimumPhp . ')',
+                'ok' => version_compare(PHP_VERSION, $minimumPhp, '>='),
+                'value' => PHP_VERSION . ' (requires >= ' . $minimumPhp . ')',
             ],
             [
                 'key' => 'mbstring',
@@ -189,6 +194,18 @@ final class SystemRequirements
                 'value' => extension_loaded('mbstring') ? 'yes' : 'no',
             ],
         ];
+    }
+
+    /** Branch-specific fixes for CVE-2026-109618 and CVE-2026-109619. */
+    public static function minimumSecurePhp(string $version): string
+    {
+        $branch = implode('.', array_slice(explode('.', $version), 0, 2));
+        return match ($branch) {
+            '8.5' => '8.5.12',
+            '8.4' => '8.4.27',
+            '8.3' => '8.3.36',
+            default => self::MINIMUM_SECURE_PHP,
+        };
     }
 
     /**

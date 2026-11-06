@@ -64,6 +64,10 @@ dependencies in `tests/requirements-public-event-schema.txt` to register both
 URN resources and validate with a real Draft 2020-12 implementation. Missing
 tooling is a hard failure; the runtime and release application have no schema
 validator dependency.
+CI first installs the hash-pinned `tests/requirements-security-bootstrap.txt`
+with Python 3.10+ to obtain pip 26.2.2 and its patched certifi trust store
+(GHSA-6q48-6c7w-9gw2), then asserts the vendored certifi version. Installing
+the six validator libraries alone does not update pip's separate CA bundle.
 `tests/webhook_delivery_contract.php` is the signed per-subscription delivery
 gate. It runs against SQLite and a fresh dedicated PostgreSQL database and
 proves lifecycle/DB guards, no plaintext persistence or re-reveal, AES-GCM

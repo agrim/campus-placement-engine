@@ -7,6 +7,7 @@ namespace App\Support;
 use App\Core\Http\AuthorizationException;
 use App\Core\Http\UserVisibleException;
 use App\Core\Security\AuthorizationUnavailable;
+use App\Security\PasswordPolicy;
 use PDO;
 
 final class Auth
@@ -169,6 +170,9 @@ final class Auth
 
     public static function attempt(string $email, string $password): bool
     {
+        if (!PasswordPolicy::canVerify($password)) {
+            return false;
+        }
         $stmt = Database::connection()->prepare('SELECT * FROM users WHERE lower(email) = lower(?) AND active = 1');
         $stmt->execute([$email]);
         $user = $stmt->fetch(PDO::FETCH_ASSOC);
@@ -203,6 +207,9 @@ final class Auth
 
     public static function createAdmin(string $name, string $email, string $password): int
     {
+        if (!PasswordPolicy::allows($password)) {
+            throw new UserVisibleException('USER_PASSWORD_INVALID', 'Password must be 8–72 bytes and contain no null bytes.');
+        }
         $stmt = Database::connection()->prepare('INSERT INTO users (name, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)');
         $stmt->execute([$name, $email, password_hash($password, PASSWORD_DEFAULT), 'admin', cpe_now()]);
         return Database::lastInsertId(Database::connection());
@@ -210,8 +217,8 @@ final class Auth
 
     public static function createUser(string $name, string $email, string $password, string $role, string $scopeType = '', string $scopeValue = ''): int
     {
-        if (trim($name) === '' || !filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($password) < 8) {
-            throw new UserVisibleException('USER_DETAILS_INVALID', 'Name, valid email, and an 8+ character password are required.');
+        if (trim($name) === '' || !filter_var($email, FILTER_VALIDATE_EMAIL) || !PasswordPolicy::allows($password)) {
+            throw new UserVisibleException('USER_DETAILS_INVALID', 'Name, valid email, and an 8–72 byte password without null bytes are required.');
         }
         $stmt = Database::connection()->prepare(
             'INSERT INTO users (name, email, password_hash, role, scope_type, scope_value, created_at)
@@ -248,8 +255,8 @@ final class Auth
 
     public static function setPassword(int $id, string $password, int $actorId): void
     {
-        if (strlen($password) < 8) {
-            throw new UserVisibleException('USER_PASSWORD_INVALID', 'Password must be at least 8 characters.');
+        if (!PasswordPolicy::allows($password)) {
+            throw new UserVisibleException('USER_PASSWORD_INVALID', 'Password must be 8–72 bytes and contain no null bytes.');
         }
         $stmt = Database::connection()->prepare('UPDATE users SET password_hash = ? WHERE id = ?');
         $stmt->execute([password_hash($password, PASSWORD_DEFAULT), $id]);

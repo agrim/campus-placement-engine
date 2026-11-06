@@ -13,6 +13,32 @@ Institutions that want external delivery can enable optional channels:
 - `whatsapp` posts the same compact JSON payload to a college-approved
   WhatsApp or messaging gateway.
 
+## Email transport and non-sending verification
+
+The public static website has no contact form or transactional email service.
+The optional Engine email channel hands a message to the host's mail transport;
+`mail()` returning true proves handoff only. For live delivery, configure an
+institution-approved authenticated SMTP relay in the operating system's MTA,
+or use the existing webhook channel with an approved provider integration.
+Keep relay credentials in the deployment's secret manager, outside Git and the
+institution settings database. The default in-app mode remains independent of
+external mail services.
+
+Before enabling external email, record the actual From domain, envelope sender,
+provider and DKIM selector. Verify the authoritative SPF record, DKIM public key,
+DMARC policy and alignment of the From domain with SPF or DKIM, plus the
+provider's TLS, bounce, complaint, quota and retry handling. Use the provider's
+sandbox before a separately authorized real delivery test. [Google's sender
+guidance](https://support.google.com/mail/answer/81126?hl=en) describes these
+authentication and alignment requirements. SMTP alone does not establish them.
+
+For a non-sending local check, set `CPE_NOTIFICATION_EMAIL_OUTBOX_PATH` to a
+private file outside the web root, using synthetic recipients. The existing
+`tests/run.php` email tests exercise queue delivery and templates through this
+outbox and reject line breaks in mail headers. They establish no real sender
+authentication or inbox-delivery result. Treat outboxes as sensitive data;
+restrict file access and retention and never put them in a public artifact.
+
 Configure the non-secret settings in Admin:
 
 - `notification_delivery_channels`: `file`, `webhook`, `email`, `sms`,

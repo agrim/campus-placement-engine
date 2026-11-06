@@ -47,7 +47,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
-          node-version: 22.13.0
+          node-version: 22.23.4
           cache: npm
           cache-dependency-path: qa/browser/package-lock.json
 
@@ -55,6 +55,8 @@ jobs:
         shell: bash
         run: |
           python3 -m venv "$RUNNER_TEMP/cpe-public-schema-validator"
+          "$RUNNER_TEMP/cpe-public-schema-validator/bin/python" -m pip install --disable-pip-version-check --only-binary=:all: --require-hashes --requirement tests/requirements-security-bootstrap.txt
+          "$RUNNER_TEMP/cpe-public-schema-validator/bin/python" -c 'import pip._vendor.certifi as certifi; assert certifi.__version__ >= "2026.10.19", certifi.__version__'
           "$RUNNER_TEMP/cpe-public-schema-validator/bin/python" -m pip install --disable-pip-version-check --requirement tests/requirements-public-event-schema.txt
           "$RUNNER_TEMP/cpe-public-schema-validator/bin/python" tests/validate_public_event_schemas.py
           "$RUNNER_TEMP/cpe-public-schema-validator/bin/python" tests/validate_public_api_contracts.py
@@ -182,6 +184,7 @@ jobs:
           CPE_BROWSER_BASE_URL: http://127.0.0.1:8010
         run: |
           npm ci --prefix qa/browser --ignore-scripts --no-audit --no-fund
+          npm run test:security --prefix qa/browser
           ./qa/browser/node_modules/.bin/playwright install --with-deps chromium firefox webkit
           php placement install-demo
           php placement seed-large-demo 40 6

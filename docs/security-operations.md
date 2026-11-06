@@ -4,6 +4,18 @@ This document covers deployment controls around the application. It does not
 replace an institution's risk assessment, data policy, or identity-provider
 review.
 
+## PHP Security Baseline
+
+The [21 October 2026 PHP security release](https://www.php.net/archive/2026.php#2026-10-21-5)
+fixes CVE-2026-109618 and CVE-2026-109619. Use 8.2.35+, 8.3.36+,
+8.4.27+, or 8.5.12+ within the selected branch. Update the actual web SAPI,
+containers, and worker binaries, then restart every worker. `php placement
+doctor` checks the invoked binary; a passing CLI check does not prove the FPM
+or Apache runtime has been updated. These faults can happen before application
+code runs, so application request limits or an application version check do not
+replace the runtime update. See the [security and recovery review](security/review-2026-10-22.md)
+for the observed website boundary and remaining deployment checks.
+
 ## TLS And Proxy Trust
 
 Use HTTPS for real data. Direct HTTPS is detected from the server connection.
@@ -22,6 +34,21 @@ Password login uses PHP password hashing, session-ID rotation, CSRF-protected
 login state changes, and database-backed throttling by hashed identity/network.
 Hosted mode defaults to database sessions; self-hosting defaults to PHP file
 sessions. Set `CPE_SESSION_DRIVER=database` to opt in elsewhere.
+
+New and reset local passwords must contain 8–72 bytes and no null bytes.
+Sign-in also rejects inputs over 72 bytes or containing null bytes, while
+preserving verification of existing shorter credentials. The byte limit
+applies to installation, administrator/user creation, resets and sign-in;
+some Unicode characters use multiple bytes. Forms retain the complete input
+so the server can reject overlength values without silently truncating them.
+This limit matches PHP's current bcrypt `PASSWORD_DEFAULT` implementation.
+
+Older releases accepted passwords longer than 72 bytes, but bcrypt stored
+only their first 72 bytes. Existing hashes cannot reveal original lengths.
+Before public activation, require an administrator-mediated reset for accounts
+that may have used overlength passwords; until reset, their 72-byte prefix
+still matches the old hash. Do not infer that input validation repairs existing
+credentials. This review did not inspect or reset institution accounts.
 
 Database sessions hash browser session IDs before storage and hold a bounded
 database lock for each request. Tune only when needed:
