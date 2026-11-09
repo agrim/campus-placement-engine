@@ -115,6 +115,11 @@ jobs:
       - name: Run test suite
         run: |
           php tests/run.php
+          php tests/audit_identity_regressions.php
+          php tests/audit_placement_regressions.php
+          php tests/audit_import_privacy_regressions.php
+          php tests/audit_backup_regressions.php
+          php tests/sqlite_migration_writer_contract.php
           php tests/authorization_failure_contract.php
           php tests/authorization_state_contract.php
           php tests/installation_state_contract.php
@@ -152,6 +157,18 @@ jobs:
           php tests/setup_authorization_contract.php
           php tests/hosted_install_contract.php
           php tests/managed_hosting_contract.php
+
+      - name: Run PostgreSQL identity and restore regressions
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_POSTGRES_ALLOW_INSECURE_LOOPBACK: "1"
+          CPE_POSTGRES_POOL_MODE: direct
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_identity_regressions'
+          CPE_DATABASE_URL='postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_identity_regressions?sslmode=disable' php tests/audit_identity_regressions.php
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_restore_regressions'
+          CPE_DATABASE_URL='postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_restore_regressions?sslmode=disable' php tests/audit_backup_regressions.php
 
       - name: Run PostgreSQL database contract
         env:

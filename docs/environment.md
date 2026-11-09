@@ -42,6 +42,7 @@ profile, proxy, or container definition.
 | `CPE_BACKUP_DIR` | Backup and restore-safety destination. Defaults to `data/backups`. |
 | `CPE_PG_DUMP_BINARY` | Absolute `pg_dump` override when it is not in a known Homebrew/system location. |
 | `CPE_PG_RESTORE_BINARY` | Absolute `pg_restore` override. |
+| `CPE_PSQL_BINARY` | Optional absolute `psql` override for atomic PostgreSQL restores. Defaults to the executable beside `pg_restore`, then `/usr/bin/psql`. |
 | `CPE_IMPORT_ROLLBACK_DIR` | Import rollback snapshots. |
 | `CPE_CONFIG_SNAPSHOT_DIR` | Config import safety copies. |
 | `CPE_PRIVACY_SNAPSHOT_DIR` | Privacy erasure safety copies. |
