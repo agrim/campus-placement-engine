@@ -159,6 +159,11 @@ final class SqlMigrationRunner
                         throw DatabaseLockException::sessionChanged();
                     }
                     DatabaseLock::assertPostgresSession($this->pdo, $lockBackendPid);
+                } else {
+                    // Reserve SQLite's writer before migration reads. A deferred
+                    // read-to-write upgrade can otherwise deadlock with an
+                    // independent ownership verifier holding BEGIN IMMEDIATE.
+                    $this->pdo->exec('UPDATE ' . $table . ' SET migration = migration WHERE 0');
                 }
                 $this->executeMigrationInCurrentTransaction($driver, $table, $file);
                 if ($driver === 'pgsql') {

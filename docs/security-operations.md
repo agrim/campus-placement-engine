@@ -20,6 +20,13 @@ referrer policy, and disabled camera/microphone/geolocation permissions.
 
 Password login uses PHP password hashing, session-ID rotation, CSRF-protected
 login state changes, and database-backed throttling by hashed identity/network.
+New and reset passwords must contain 8–72 bytes. Bcrypt cannot distinguish later
+bytes, so existing bcrypt users with longer passwords must have their password
+reset before signing in; entering an alternate suffix is never accepted.
+User email addresses are trimmed, lowercased, and unique under that same rule.
+If an upgrade reports a `users_email_normalized` collision, an administrator must
+resolve the duplicate accounts before retrying. The migration does not merge
+accounts or change either identity when a collision exists.
 Hosted mode defaults to database sessions; self-hosting defaults to PHP file
 sessions. Set `CPE_SESSION_DRIVER=database` to opt in elsewhere.
 

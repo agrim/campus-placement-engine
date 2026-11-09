@@ -77,8 +77,17 @@ final class PrivacyService
                 ->execute(['resolved', '[redacted by candidate anonymization]', $now, $candidateId]);
             $this->pdo->prepare('UPDATE wanted_alerts SET status = ?, reason = ?, resolved_at = COALESCE(resolved_at, ?) WHERE candidate_id = ?')
                 ->execute(['resolved', '[redacted by candidate anonymization]', $now, $candidateId]);
+            // Distinguish same-time windows without colliding with an original label.
+            $unavailabilityPrefix = 'Unavailable period ' . bin2hex(random_bytes(16)) . '-';
+            $this->pdo->prepare('UPDATE candidate_unavailability_windows SET label = ? || CAST(id AS TEXT), notes = ?, updated_at = ? WHERE candidate_id = ?')
+                ->execute([$unavailabilityPrefix, '[redacted by candidate anonymization]', $now, $candidateId]);
 
             if ($applicationIds !== []) {
+                $this->executeForIds(
+                    'UPDATE workflow_transition_events SET reason = ?, note = ? WHERE application_id IN (%s)',
+                    $applicationIds,
+                    ['[redacted by candidate anonymization]', '[redacted by candidate anonymization]']
+                );
                 $this->executeForIds(
                     'UPDATE application_slot_assignments SET notes = ?, updated_at = ? WHERE application_id IN (%s)',
                     $applicationIds,

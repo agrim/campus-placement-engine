@@ -8,6 +8,11 @@ the two supported database shapes and real HTTP behavior.
 ```bash
 php placement doctor
 php tests/run.php
+php tests/audit_identity_regressions.php
+php tests/audit_placement_regressions.php
+php tests/audit_import_privacy_regressions.php
+php tests/audit_backup_regressions.php
+php tests/sqlite_migration_writer_contract.php
 php tests/backup_restore_contract.php
 php tests/database_connection_cleanup_contract.php
 php tests/incident_boundary_contract.php
@@ -38,6 +43,13 @@ php placement publication-check
 ```
 
 `tests/run.php` is the broad SQLite integration suite.
+The `audit_*_regressions.php` suites preserve the reproduced account, webhook,
+board, import, privacy, scheduling, and restore failure cases. CI also runs the
+identity and backup regressions against separate empty PostgreSQL databases;
+set `CPE_DATABASE_URL` to a disposable database to run those PostgreSQL cases
+locally. PostgreSQL restore requires `psql` alongside `pg_dump` and `pg_restore`.
+The SQLite writer contract coordinates migration and ownership verification to
+prove a migration acquires its write reservation before reading its tables.
 `tests/migration_lock_contract.php` proves unknown pre-existing registry rows
 stop pending DDL and that callback insertions and deletions cannot let a run
 return success. Its fileless SQLite cases prove the outer transaction restores

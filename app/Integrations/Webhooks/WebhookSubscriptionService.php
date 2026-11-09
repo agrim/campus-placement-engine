@@ -157,7 +157,8 @@ final class WebhookSubscriptionService
             $update = $pdo->prepare(
                 'UPDATE webhook_subscriptions
                  SET current_secret_ciphertext = ?, current_secret_nonce = ?, current_secret_tag = ?,
-                     current_secret_key_version = ?, lifecycle_state = ?, revoked_at = NULL, updated_at = ?
+                     current_secret_key_version = ?, lifecycle_state = ?, revoked_at = NULL,
+                     last_validated_at = NULL, validation_generation = validation_generation + 1, updated_at = ?
                  WHERE id = ? AND current_secret_ciphertext IS NULL',
             );
             $update->execute([
@@ -214,7 +215,9 @@ final class WebhookSubscriptionService
                      previous_secret_key_version = current_secret_key_version,
                      previous_secret_expires_at = ?,
                      current_secret_ciphertext = ?, current_secret_nonce = ?, current_secret_tag = ?,
-                     current_secret_key_version = ?, updated_at = ?
+                     current_secret_key_version = ?,
+                     last_validated_at = CASE WHEN lifecycle_state IN (\'active\', \'degraded\') THEN last_validated_at ELSE NULL END,
+                     validation_generation = validation_generation + 1, updated_at = ?
                  WHERE id = ?',
             );
             $update->execute([
@@ -256,8 +259,10 @@ final class WebhookSubscriptionService
             }
             $pdo->prepare(
                 "UPDATE webhook_subscriptions
-                 SET lifecycle_state = 'validating', updated_at = ? WHERE id = ?",
+                 SET lifecycle_state = 'validating', last_validated_at = NULL,
+                     validation_generation = validation_generation + 1, updated_at = ? WHERE id = ?",
             )->execute([cpe_now(), (int) $row['id']]);
+            $row['validation_generation'] = (int) $row['validation_generation'] + 1;
             Auth::audit(
                 $actorUserId,
                 'webhook.validation.start',
@@ -299,9 +304,9 @@ final class WebhookSubscriptionService
                 "UPDATE webhook_subscriptions
                  SET lifecycle_state = 'setup_required', last_failure_at = ?, last_failure_code = ?,
                      last_failure_reference = ?, updated_at = ?
-                 WHERE id = ? AND lifecycle_state = 'validating'",
+                 WHERE id = ? AND lifecycle_state = 'validating' AND validation_generation = ?",
             );
-            $failed->execute([cpe_now(), 'validation_failed', $reference, cpe_now(), (int) $row['id']]);
+            $failed->execute([cpe_now(), 'validation_failed', $reference, cpe_now(), (int) $row['id'], (int) $row['validation_generation']]);
             throw new UserVisibleException(
                 'WEBHOOK_VALIDATION_FAILED',
                 'The endpoint could not be validated. Review its TLS and network policy, then retry. Reference: ' . $reference,
@@ -319,9 +324,10 @@ final class WebhookSubscriptionService
                 "UPDATE webhook_subscriptions
                  SET last_validated_at = ?, last_failure_at = NULL, last_failure_code = '',
                      last_failure_reference = '', updated_at = ?
-                 WHERE id = ? AND lifecycle_state = 'validating' AND endpoint_version = ?",
+                 WHERE id = ? AND lifecycle_state = 'validating' AND endpoint_version = ?
+                   AND validation_generation = ?",
             );
-            $updated->execute([$now, $now, (int) $row['id'], (int) $row['endpoint_version']]);
+            $updated->execute([$now, $now, (int) $row['id'], (int) $row['endpoint_version'], (int) $row['validation_generation']]);
             if ($updated->rowCount() !== 1) {
                 throw new RuntimeException('Webhook endpoint changed while validation was in flight.');
             }
@@ -461,6 +467,7 @@ final class WebhookSubscriptionService
                          previous_secret_ciphertext = NULL, previous_secret_nonce = NULL,
                          previous_secret_tag = NULL, previous_secret_key_version = NULL,
                          previous_secret_expires_at = NULL, circuit_open_until = NULL,
+                         last_validated_at = NULL, validation_generation = validation_generation + 1,
                          disabled_at = ?, revoked_at = ?, updated_at = ? WHERE id = ?",
                 )->execute([$now, $now, $now, (int) $row['id']]);
                 $pdo->prepare(

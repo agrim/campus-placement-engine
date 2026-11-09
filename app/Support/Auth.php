@@ -169,10 +169,17 @@ final class Auth
 
     public static function attempt(string $email, string $password): bool
     {
-        $stmt = Database::connection()->prepare('SELECT * FROM users WHERE lower(email) = lower(?) AND active = 1');
-        $stmt->execute([$email]);
-        $user = $stmt->fetch(PDO::FETCH_ASSOC);
-        if (!$user || !password_verify($password, $user['password_hash'])) {
+        $stmt = Database::connection()->prepare('SELECT * FROM users WHERE lower(trim(email)) = ? AND active = 1');
+        $stmt->execute([self::normalizeEmail($email)]);
+        $users = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        if (count($users) !== 1) {
+            return false;
+        }
+        $user = $users[0];
+        // Existing bcrypt hashes cannot distinguish any bytes after byte 72.
+        // Do not authenticate a different suffix against a legacy hash.
+        if ((password_get_info((string) $user['password_hash'])['algoName'] === 'bcrypt' && strlen($password) > 72)
+            || !password_verify($password, $user['password_hash'])) {
             return false;
         }
         if (session_status() === PHP_SESSION_ACTIVE) {
@@ -203,22 +210,50 @@ final class Auth
 
     public static function createAdmin(string $name, string $email, string $password): int
     {
-        $stmt = Database::connection()->prepare('INSERT INTO users (name, email, password_hash, role, created_at) VALUES (?, ?, ?, ?, ?)');
-        $stmt->execute([$name, $email, password_hash($password, PASSWORD_DEFAULT), 'admin', cpe_now()]);
-        return Database::lastInsertId(Database::connection());
+        return self::createUser($name, $email, $password, 'admin');
     }
 
     public static function createUser(string $name, string $email, string $password, string $role, string $scopeType = '', string $scopeValue = ''): int
     {
-        if (trim($name) === '' || !filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($password) < 8) {
+        $name = trim($name);
+        $email = self::normalizeEmail($email);
+        if ($name === '' || !filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($password) < 8) {
             throw new UserVisibleException('USER_DETAILS_INVALID', 'Name, valid email, and an 8+ character password are required.');
         }
-        $stmt = Database::connection()->prepare(
+        self::validatePassword($password);
+        $pdo = Database::connection();
+        $existing = $pdo->prepare('SELECT COUNT(*) FROM users WHERE lower(trim(email)) = ?');
+        $existing->execute([$email]);
+        if ((int) $existing->fetchColumn() !== 0) {
+            throw new UserVisibleException('USER_EMAIL_EXISTS', 'A user already has that email address.');
+        }
+        if ($role === 'company') {
+            $scopeType = strtolower(trim($scopeType));
+            $scopeValue = strtoupper(trim($scopeValue));
+            $company = $pdo->prepare('SELECT COUNT(*) FROM companies WHERE code = ?');
+            $company->execute([$scopeValue]);
+            if ($scopeType !== 'company' || $scopeValue === '' || (int) $company->fetchColumn() !== 1) {
+                throw new UserVisibleException('USER_COMPANY_SCOPE_INVALID', 'Company tracker accounts require the code of an existing company.');
+            }
+        }
+        $stmt = $pdo->prepare(
             'INSERT INTO users (name, email, password_hash, role, scope_type, scope_value, created_at)
              VALUES (?, ?, ?, ?, ?, ?, ?)'
         );
         $stmt->execute([$name, $email, password_hash($password, PASSWORD_DEFAULT), $role, $scopeType, $scopeValue, cpe_now()]);
-        return Database::lastInsertId(Database::connection());
+        return Database::lastInsertId($pdo);
+    }
+
+    public static function normalizeEmail(string $email): string
+    {
+        return strtolower(trim($email));
+    }
+
+    public static function validatePassword(string $password): void
+    {
+        if (strlen($password) < 8 || strlen($password) > 72 || str_contains($password, "\0")) {
+            throw new UserVisibleException('USER_PASSWORD_INVALID', 'Password must be between 8 and 72 bytes and contain no null bytes.');
+        }
     }
 
     public static function users(): array
@@ -248,9 +283,7 @@ final class Auth
 
     public static function setPassword(int $id, string $password, int $actorId): void
     {
-        if (strlen($password) < 8) {
-            throw new UserVisibleException('USER_PASSWORD_INVALID', 'Password must be at least 8 characters.');
-        }
+        self::validatePassword($password);
         $stmt = Database::connection()->prepare('UPDATE users SET password_hash = ? WHERE id = ?');
         $stmt->execute([password_hash($password, PASSWORD_DEFAULT), $id]);
         self::audit($actorId, 'user.password_reset', 'user', $id, 'Password reset by administrator');
