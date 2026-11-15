@@ -91,8 +91,8 @@ ob_start();
   <aside class="panel">
     <h2>Templates</h2>
     <?php foreach ($samples as $name => $sample): ?>
-      <h3><?= h(ucfirst($name)) ?></h3>
-      <pre><?= h($sample) ?></pre>
+      <h3 id="import-template-<?= h($name) ?>"><?= h(ucfirst($name)) ?></h3>
+      <pre tabindex="0" role="region" aria-labelledby="import-template-<?= h($name) ?>"><code><?= h($sample) ?></code></pre>
     <?php endforeach; ?>
   </aside>
 </div>

@@ -7,12 +7,14 @@ ob_start();
 ?>
 <section class="panel" style="max-width:720px">
   <h1><?= h($title) ?></h1>
+  <search aria-label="Candidate status lookup">
   <form method="get" action="/">
     <input type="hidden" name="r" value="student">
-    <label><?= h($candidateLabel) ?> ID</label>
-    <input name="external_id" value="<?= h($externalId) ?>" placeholder="C001">
+    <label for="candidate-external-id"><?= h($candidateLabel) ?> ID</label>
+    <input id="candidate-external-id" name="external_id" spellcheck="false" autocapitalize="none" value="<?= h($externalId) ?>" placeholder="C001">
     <p><button class="primary" type="submit">Check status</button></p>
   </form>
+  </search>
 </section>
 
 <?php if ($externalId !== ''): ?>

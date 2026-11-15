@@ -10,7 +10,7 @@
   --success: #0b6b3a;
 }
 
-:where(html, body, header, nav, main, section, article, aside, footer, div, span, a, p, h1, h2, h3, ul, ol, li, dl, dt, dd, figure, figcaption, img, details, summary, table, caption, thead, tbody, tr, th, td, form, label, input, textarea, select, option, button, fieldset, legend, pre) { box-sizing: border-box; }
+:where(html, body, header, nav, main, search, section, article, aside, footer, div, span, a, p, h1, h2, h3, ul, ol, li, dl, dt, dd, figure, figcaption, img, details, summary, table, caption, thead, tbody, tr, th, td, form, label, input, textarea, select, option, button, fieldset, legend, pre) { box-sizing: border-box; }
 .visually-hidden {
   position: absolute !important;
   width: 1px;

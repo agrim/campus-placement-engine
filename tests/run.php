@@ -5185,6 +5185,19 @@ test_case('board card fields are configurable and normalized', function (): void
     assert_true(in_array('program', $service->boardCardFields(), true), 'Invalid board card settings should fall back to defaults');
 });
 
+test_case('lookup filters and CSV templates expose native accessible semantics', function (): void {
+    $html = render_view_for_test('student', ['externalId' => '', 'studentData' => null]);
+    assert_true(str_contains($html, '<search aria-label="Candidate status lookup">'), 'Lookup should be a named native search landmark');
+    assert_true(str_contains($html, '<label for="candidate-external-id">'), 'Candidate identifier must have an associated visible label');
+    assert_true(str_contains($html, '<input id="candidate-external-id" name="external_id" spellcheck="false" autocapitalize="none"'), 'Identifier should not be spellchecked or auto-capitalized');
+    $html = render_view_for_test('import', ['recentImports' => []]);
+    assert_true(str_contains($html, '<h3 id="import-template-candidates">Candidates</h3>'), 'Template heading must name its region');
+    assert_true(str_contains($html, '<pre tabindex="0" role="region" aria-labelledby="import-template-candidates"><code>'), 'CSV template must expose named keyboard-scrollable code content');
+    $board = file_get_contents(dirname(__DIR__) . '/app/Views/board.php');
+    assert_true(str_contains($board, '<search aria-label="Board filters">'), 'Board filters should have a search landmark');
+    assert_true(str_contains($board, "</search>\n  <form class=\"preference-actions\""), 'Saving preferences must stay outside the search landmark');
+});
+
 test_case('web typography respects browser text size and declares the initial color scheme', function (): void {
     $css = file_get_contents(dirname(__DIR__) . '/public/assets/app.css');
     assert_true(!preg_match('/font-size:\s*[^;}]*px/', $css), 'Typography should use font-relative sizes');

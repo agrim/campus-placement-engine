@@ -43,6 +43,7 @@ ob_start();
   <?php elseif (!empty($savedFilters)): ?>
     <p class="muted preference-note">Saved board default available when opening the board without filters.</p>
   <?php endif; ?>
+  <search aria-label="Board filters">
   <form method="get" action="/">
     <input type="hidden" name="r" value="board">
     <div class="filter-row">
@@ -82,6 +83,7 @@ ob_start();
       <a class="button" href="<?= h(url('board', ['view' => 'all'])) ?>">Reset</a>
     </div>
   </form>
+  </search>
   <form class="preference-actions" method="post" action="<?= h(url('board-preferences')) ?>">
     <?= Csrf::input() ?>
     <?php foreach (['q', 'company', 'status', 'flag', 'actionable', 'compact'] as $key): ?>
