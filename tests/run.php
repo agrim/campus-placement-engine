@@ -5185,6 +5185,16 @@ test_case('board card fields are configurable and normalized', function (): void
     assert_true(in_array('program', $service->boardCardFields(), true), 'Invalid board card settings should fall back to defaults');
 });
 
+test_case('web typography respects browser text size and declares the initial color scheme', function (): void {
+    $css = file_get_contents(dirname(__DIR__) . '/public/assets/app.css');
+    assert_true(!preg_match('/font-size:\s*[^;}]*px/', $css), 'Typography should use font-relative sizes');
+    assert_true(str_contains($css, 'font: 0.875rem/1.45'), 'Body typography should follow browser text sizing');
+    assert_true(str_contains($css, 'font-size: max(1rem, 1em)'), 'Controls should inherit larger text without falling below one rem');
+    assert_true(!preg_match('/(?:^|[}\n])\s*\*\s*\{/', $css), 'Reset rules should name their intended elements');
+    $html = render_layout_for_test(['title' => 'Text sizing', 'content' => '<h1>Text sizing</h1>']);
+    assert_true(str_contains($html, '<meta name="color-scheme" content="light">') && strpos($html, '<meta name="color-scheme" content="light">') < strpos($html, '<link rel="stylesheet"'), 'Supported light scheme should be declared before styles load');
+});
+
 test_case('installer stacks its setup form and requirements on narrow screens', function (): void {
     $css = file_get_contents(dirname(__DIR__) . '/public/assets/app.css');
     assert_true((bool) preg_match('/@media\\s*\\(max-width:\\s*760px\\)\\s*\\{\\s*[^{}]*\\.setup-layout\\s*\\{\\s*display:\\s*block;/', $css), 'The narrow-screen breakpoint should collapse the setup layout, not only other split layouts');
