@@ -9,6 +9,15 @@ function escapeRegExp(value: string): string {
 }
 
 describe("DemoApp", () => {
+  it("exposes profile and mode actions as named groups, not page navigation", () => {
+    render(<DemoApp />);
+    const profiles = screen.getByRole("group", { name: "Demo user profiles" });
+    expect(within(profiles).getAllByRole("button").length).toBeGreaterThan(1);
+    expect(screen.queryByRole("navigation", { name: "Demo user profiles" })).not.toBeInTheDocument();
+    const modes = screen.getByRole("group", { name: "Demo mode" });
+    expect(within(modes).getByRole("button", { name: "Guided demo" })).toHaveAttribute("aria-pressed", "true");
+  });
+
   it("preserves the shared scenario when the visitor changes profiles", async () => {
     const user = userEvent.setup();
     render(<DemoApp />);

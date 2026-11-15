@@ -15,7 +15,7 @@ export function MissionProgress({ session, dispatch }: Props) {
 
   return (
     <div className="mission-progress">
-      <div className="mode-controls" aria-label="Demo mode">
+      <div className="mode-controls" role="group" aria-label="Demo mode">
         <button
           type="button"
           className={session.mode === "guided" ? "is-active" : ""}

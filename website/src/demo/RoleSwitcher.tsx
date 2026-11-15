@@ -22,7 +22,7 @@ export function RoleSwitcher({ session, dispatch }: Props) {
   const next = nextGuidedStep(session);
 
   return (
-    <nav className="role-switcher" aria-label="Demo user profiles">
+    <div className="role-switcher" role="group" aria-label="Demo user profiles">
       {roleOrder.map((role) => {
         const active = session.activeRole === role;
         const waiting = next?.role === role;
@@ -44,6 +44,6 @@ export function RoleSwitcher({ session, dispatch }: Props) {
           </button>
         );
       })}
-    </nav>
+    </div>
   );
 }
