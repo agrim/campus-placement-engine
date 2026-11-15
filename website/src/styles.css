@@ -106,6 +106,13 @@
   /* Dark panels need a light ring; keep light-page focus dark for contrast. */
   .action-panel, footer { --focus-ring: var(--paper); }
 
+  /* Press is distinct from hover/selected state and survives forced colors. */
+  :is(button, a):active:not(:disabled):not([aria-disabled="true"]) {
+    text-decoration-line: underline;
+    text-decoration-style: double;
+    text-underline-offset: .15em;
+  }
+
   .skip-link {
     position: fixed;
     z-index: 100;

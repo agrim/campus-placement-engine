@@ -395,3 +395,11 @@ label { display: block; font-weight: 600; margin: 10px 0 5px; }
 
 form[data-field-validation] input[aria-invalid="true"] { border-color: var(--danger); }
 .field-error { color: var(--danger); font-size: .875rem; }
+
+/* Distinct press feedback without movement, layout shifts or focus replacement. */
+:is(button, input[type="submit"], .button):hover:not(:disabled) { text-decoration-line: underline; }
+:is(button, input[type="submit"], a):active:not(:disabled):not([aria-disabled="true"]) {
+  text-decoration-line: underline;
+  text-decoration-style: double;
+  text-underline-offset: .15em;
+}
