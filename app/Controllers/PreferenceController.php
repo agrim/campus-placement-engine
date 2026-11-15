@@ -36,7 +36,7 @@ final class PreferenceController
             (new PlacementService())->createPreferenceRequest((int) ($_POST['candidate_id'] ?? 0), $_POST['company_ids'] ?? [], (int) $user['id'], trim((string) ($_POST['note'] ?? '')));
             Flash::add('success', 'Preference request created.');
         } catch (\Throwable $e) {
-            ControllerFailure::flash($e, 'CPE_PREFERENCE_CREATE_FAILURE', 'preference.create');
+            ControllerFailure::flash($e, 'CPE_PREFERENCE_CREATE_FAILURE', 'preference.create', 'preference.create');
         }
         redirect(url('preferences'));
     }
@@ -52,7 +52,7 @@ final class PreferenceController
             (new PlacementService())->resolvePreferenceRequest((int) ($_POST['request_id'] ?? 0), (int) ($_POST['company_id'] ?? 0), (int) $user['id']);
             Flash::add('success', 'Preference decision recorded.');
         } catch (\Throwable $e) {
-            ControllerFailure::flash($e, 'CPE_PREFERENCE_RESOLVE_FAILURE', 'preference.resolve');
+            ControllerFailure::flash($e, 'CPE_PREFERENCE_RESOLVE_FAILURE', 'preference.resolve', 'preference.resolve');
         }
         redirect(url('preferences'));
     }

@@ -1,8 +1,21 @@
 <?php
 
 use App\Security\Csrf;
+use App\Support\Flash;
 
 $title = 'Preference Backloop';
+$preferenceErrors = ['preference.create' => [], 'preference.resolve' => []];
+$layoutFlashes = [];
+foreach (Flash::pull() as $flash) {
+    $origin = $flash['origin'] ?? '';
+    if ($flash['type'] === 'error' && isset($preferenceErrors[$origin])) {
+        $preferenceErrors[$origin][] = $flash;
+    } else {
+        $layoutFlashes[] = $flash;
+    }
+}
+$createErrors = $preferenceErrors['preference.create'];
+$resolveErrors = $preferenceErrors['preference.resolve'];
 ob_start();
 ?>
 <div class="page-head">
@@ -13,8 +26,17 @@ ob_start();
 </div>
 
 <section class="panel">
-  <h2>Create request</h2>
-  <form method="post" action="<?= h(url('preferences')) ?>" data-field-validation>
+  <h2 id="preference-create-heading">Create request</h2>
+  <form method="post" action="<?= h(url('preferences')) ?>" data-field-validation aria-labelledby="preference-create-heading"<?= $createErrors ? ' aria-describedby="preference-create-errors"' : '' ?>>
+    <?php if ($createErrors): ?>
+      <div id="preference-create-errors" role="group" tabindex="-1" autofocus aria-label="Create request failed" aria-describedby="preference-create-messages">
+        <div id="preference-create-messages">
+        <?php foreach ($createErrors as $flash): ?>
+          <p class="flash error"><?= h($flash['message']) ?></p>
+        <?php endforeach; ?>
+        </div>
+      </div>
+    <?php endif; ?>
     <?= Csrf::input() ?>
     <label for="preference_candidate_id">Candidate (required)</label>
     <select id="preference_candidate_id" name="candidate_id" required data-error="preference-candidate-error">
@@ -37,10 +59,20 @@ ob_start();
   </form>
 </section>
 
-<section class="panel">
-  <h2>Requests</h2>
+<section class="panel" aria-labelledby="preference-requests-heading"<?= $resolveErrors ? ' aria-describedby="preference-resolve-errors"' : '' ?>>
+  <h2 id="preference-requests-heading">Requests</h2>
+  <?php if ($resolveErrors): ?>
+    <div id="preference-resolve-errors" role="group" tabindex="-1"<?= !$createErrors ? ' autofocus' : '' ?> aria-label="Resolve request failed" aria-describedby="preference-resolve-messages">
+      <div id="preference-resolve-messages">
+      <?php foreach ($resolveErrors as $flash): ?>
+        <p class="flash error"><?= h($flash['message']) ?></p>
+      <?php endforeach; ?>
+      </div>
+    </div>
+  <?php endif; ?>
+  <div class="table-scroll" role="region" tabindex="0" aria-label="Preference requests table">
   <table class="table">
-    <thead><tr><th>Candidate</th><th>Status</th><th>Options</th><th>Decision</th><th>Note</th></tr></thead>
+    <thead><tr><th scope="col">Candidate</th><th scope="col">Status</th><th scope="col">Options</th><th scope="col">Decision</th><th scope="col">Note</th></tr></thead>
     <tbody>
     <?php foreach ($requests as $request): ?>
       <?php $options = $service->preferenceOptions((int) $request['id']); ?>
@@ -68,6 +100,7 @@ ob_start();
     <?php if (!$requests): ?><tr><td colspan="5">No preference requests yet.</td></tr><?php endif; ?>
     </tbody>
   </table>
+  </div>
 </section>
 <?php
 $content = ob_get_clean();

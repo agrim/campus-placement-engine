@@ -16,13 +16,13 @@ use Throwable;
  */
 final class ControllerFailure
 {
-    public static function flash(Throwable $exception, string $diagnosticCode, string $operation): void
+    public static function flash(Throwable $exception, string $diagnosticCode, string $operation, ?string $flashOrigin = null): void
     {
         if ($exception instanceof AuthorizationUnavailable) {
             throw $exception;
         }
         if ($exception instanceof UserVisibleException) {
-            Flash::add('error', $exception->publicMessage());
+            Flash::add('error', $exception->publicMessage(), $flashOrigin);
             return;
         }
 
@@ -32,6 +32,6 @@ final class ControllerFailure
             'controller',
             ['operation' => $operation],
         );
-        Flash::add('error', 'Request could not be completed. Reference: ' . $incidentId);
+        Flash::add('error', 'Request could not be completed. Reference: ' . $incidentId, $flashOrigin);
     }
 }

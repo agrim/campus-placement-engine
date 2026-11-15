@@ -5244,6 +5244,30 @@ test_case('login server failures describe the form without identifying a wrong c
     }
 });
 
+test_case('preference failure origins associate only the authored action without leaking inputs', function (): void {
+    $previous = $_SESSION['flash'] ?? null;
+    try {
+        foreach (['preference.create' => 'create', 'preference.resolve' => 'resolve', 'unknown' => null] as $origin => $target) {
+            $_SESSION['flash'] = [];
+            \App\Support\ControllerFailure::flash(new \App\Core\Http\UserVisibleException('SYNTHETIC', '<Synthetic failure>'), 'CPE_TEST_FAILURE', $origin, $origin);
+            assert_same(['type', 'message', 'origin'], array_keys($_SESSION['flash'][0]), 'Flash stores no submitted data');
+            \App\Support\Flash::add('success', 'Synthetic success.');
+            $html = render_view_for_test('preferences', ['requests' => [], 'candidates' => [], 'companies' => []]);
+            assert_same(1, substr_count($html, '&lt;Synthetic failure&gt;'), 'Escaped error occurs once');
+            assert_same(1, substr_count($html, 'Synthetic success.'), 'Success remains in layout once');
+            foreach (['create', 'resolve'] as $action) {
+                assert_same($target === $action, str_contains($html, 'aria-describedby="preference-' . $action . '-errors"'), 'Only known action gets association');
+            }
+            assert_same($target === null ? 0 : 1, substr_count($html, ' autofocus'), 'Only known error target receives focus');
+            assert_true(!str_contains($html, 'aria-invalid="true"'), 'Generic failures do not blame fields');
+            $clean = render_view_for_test('preferences', ['requests' => [], 'candidates' => [], 'companies' => []]);
+            assert_true(!str_contains($clean, 'Synthetic failure') && !str_contains($clean, ' autofocus'), 'Consumed error is not replayed');
+        }
+    } finally {
+        if ($previous === null) unset($_SESSION['flash']); else $_SESSION['flash'] = $previous;
+    }
+});
+
 test_case('wanted and CSV forms expose required feedback without changing submit actions', function (): void {
     $wanted = render_view_for_test('wanted', ['candidates' => [], 'alerts' => []]);
     assert_true(str_contains($wanted, 'data-field-validation') && str_contains($wanted, 'data-error="wanted-candidate-error"') && str_contains($wanted, 'data-error="wanted-reason-error"'), 'Wanted form exposes bounded required-field errors');

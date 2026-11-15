@@ -50,3 +50,40 @@ and a fallback when the original row is no longer visible. Preserve current esca
 anti-enumeration, fresh CSRF and one-time flash behavior. Never infer a field from
 message wording. No server-return behavior changed in this pass; real AT response
 remains unverified. The bounded login association is already implemented separately.
+
+## Trusted Preferences action-origin follow-up
+
+Preferences controller failures now pass a constant `preference.create` or
+`preference.resolve` origin through the existing failure boundary into Flash.
+The optional metadata is backward compatible: other callers still store only
+type/message. It contains no submitted candidate, company, request ID, note,
+credential, or field value. Reviewed public messages and opaque incident
+references are unchanged; authorization-unavailable still rethrows, and
+CSRF/capability/service checks are unchanged.
+
+The Preferences view consumes flashes once and recognizes only these two origins
+on errors. Create failures describe the named create form. Resolve failures
+describe the named Requests section, deliberately not the create form or a
+guessed option button. Each action has an escaped, focusable error group; native
+autofocus targets the first group only, without requiring JavaScript or blaming
+an individual field. Unknown origins and all success notices remain in the
+shared layout once. A subsequent clean visit has no stale error or autofocus.
+
+Synthetic rendered Chromium tests verify create/resolve association and focus,
+no product script fallback, native required focus, fresh CSRF presence, 320px
+with 200% root-font reflow, and axe. The new narrow test exposed a preexisting
+keyboard-inaccessible horizontally scrolling Requests panel at enlarged text.
+The table now has a named keyboard-scrollable wrapper and column scopes;
+ArrowRight scrolling is directly tested. No live POST or authenticated data
+was used.
+
+Still partial: no exact resolve-row association (requires authorization-safe
+context, including rows/options no longer rendered); no submitted-value
+retention; no real screen-reader speech, Safari/Firefox, or OS text-scale proof.
+This does not resolve server-return feedback in other module forms.
+
+Validation for this follow-up: 146 PHP contracts pass, 10 Chromium field/error
+interaction tests pass, 5 browser-control Node contracts pass, PHP lint and
+`git diff --check` pass. The browser test uses local response fulfillment and
+blocks all other requests; its generic error has an asserted accessible
+name/description rather than a claim about actual screen-reader output.

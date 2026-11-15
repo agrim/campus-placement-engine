@@ -6,12 +6,17 @@ namespace App\Support;
 
 final class Flash
 {
-    public static function add(string $type, string $message): void
+    public static function add(string $type, string $message, ?string $origin = null): void
     {
-        $_SESSION['flash'][] = ['type' => $type, 'message' => $message];
+        $flash = ['type' => $type, 'message' => $message];
+        // Application-authored action identity only; never submitted field values.
+        if ($origin !== null) {
+            $flash['origin'] = $origin;
+        }
+        $_SESSION['flash'][] = $flash;
     }
 
-    /** @return array<int, array{type:string,message:string}> */
+    /** @return array<int, array{type:string,message:string,origin?:string}> */
     public static function pull(): array
     {
         $messages = $_SESSION['flash'] ?? [];
