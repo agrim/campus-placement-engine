@@ -57,13 +57,20 @@
 
   forms.forEach(function (form) {
     var states = new Map();
-    form.querySelectorAll('input[data-error]').forEach(function (field) {
+    form.querySelectorAll('input[data-error], select[data-error]').forEach(function (field) {
       var error = document.getElementById(field.getAttribute('data-error'));
       // Do not replace independently authored server errors.
       if (!error || field.getAttribute('aria-invalid') === 'true') return;
       states.set(field, { error: error, dirty: false, announced: false });
+      syncMinimumSelections(field);
       field.setAttribute('aria-invalid', 'false');
     });
+    function syncMinimumSelections(field) {
+      var minimum = Number(field.getAttribute('data-min-selections'));
+      if (field.tagName !== 'SELECT' || !field.multiple || !Number.isInteger(minimum) || minimum < 1) return;
+      var state = states.get(field);
+      field.setCustomValidity(field.selectedOptions.length < minimum ? state.error.textContent : '');
+    }
     function update(field, invalid, announce) {
       var state = states.get(field);
       if (!state) return;
@@ -94,6 +101,7 @@
       var field = event.target;
       var state = states.get(field);
       if (!state) return;
+      if (event.type === 'input' || event.type === 'change') syncMinimumSelections(field);
       if (event.type === 'invalid') {
         clearTimeout(timer);
         announcer.textContent = '';
@@ -114,6 +122,7 @@
       setTimeout(function () {
         if (event.defaultPrevented) return;
         states.forEach(function (state, field) {
+          syncMinimumSelections(field);
           state.dirty = false;
           update(field, false, false);
         });

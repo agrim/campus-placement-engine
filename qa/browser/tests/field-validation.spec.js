@@ -54,3 +54,21 @@ test('no script retains native validation; preexisting server errors are not rep
   await expect(page.locator('#email')).toHaveAttribute('aria-invalid','true');
   await expect(page.locator('#email')).toHaveAttribute('aria-describedby','server-error');
 });
+
+test('required multi-select feedback follows submit/change and resets without values in messages', async ({page}) => {
+ await page.setContent(`<form data-field-validation><label for="choices">Company options</label><select id="choices" multiple required data-min-selections="2" data-error="choices-error"><option value="fictional-a">Fictional A</option><option value="fictional-b">Fictional B</option></select><p id="choices-error" hidden>Error: Select at least two company options.</p><button>Create request</button></form>`);
+ await page.addScriptTag({content:source});const choices=page.locator('#choices');
+ await expect(choices).toHaveAttribute('aria-invalid','false');await choices.focus();await page.locator('button').focus();await expect(page.locator('#choices-error')).toBeHidden();
+ await page.locator('form').evaluate(f=>f.requestSubmit());await expect(choices).toBeFocused();await expect(choices).toHaveAttribute('aria-describedby','choices-error');
+ await choices.selectOption(['fictional-a']);await expect(choices).toHaveAttribute('aria-invalid','true');
+ await choices.selectOption(['fictional-a','fictional-b']);await expect(choices).toHaveAttribute('aria-invalid','false');await expect(page.locator('#choices-error')).toBeHidden();
+ await choices.selectOption([]);await expect(choices).toHaveAttribute('aria-invalid','true');await expect(page.locator('[aria-live]')).toHaveText('Company options: Error: Select at least two company options.');
+ await page.locator('form').evaluate(f=>f.reset());await expect(choices).toHaveAttribute('aria-invalid','false');await expect(page.locator('[aria-live]')).toBeEmpty();
+});
+
+test('empty candidate source and script-free multi-select retain native validation', async ({page}) => {
+ await page.setContent(`<form data-field-validation><label for="candidate">Candidate</label><select id="candidate" required data-error="candidate-error"></select><p id="candidate-error" hidden>Error: Select an available candidate.</p><label for="companies">Companies</label><select id="companies" required multiple data-min-selections="2" data-error="companies-error"><option value="a">A</option><option value="b">B</option></select><p id="companies-error" hidden>Error: Select two companies.</p><button>Create</button></form>`);
+ await page.locator('form').evaluate(f=>f.requestSubmit());await expect(page.locator('#candidate')).toBeFocused();
+ expect(await page.locator('#companies').evaluate(e=>e.validity.valueMissing)).toBe(true);
+ await page.addScriptTag({content:source});await page.locator('form').evaluate(f=>f.requestSubmit());await expect(page.locator('#candidate')).toBeFocused();await expect(page.locator('#candidate')).toHaveAttribute('aria-describedby','candidate-error');await expect(page.locator('#companies')).toHaveAttribute('aria-invalid','true');
+});

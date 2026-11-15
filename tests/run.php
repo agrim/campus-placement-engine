@@ -5224,6 +5224,14 @@ test_case('custom workflow heading colors retain readable contrast across palett
     assert_true(str_contains($css, 'color: var(--status-text, #000000);') && str_contains($css, 'color: contrast-color(var(--status-bg, #ffffff));'), 'Modern contrast must follow the fallback declaration');
 });
 
+test_case('preference choices expose bounded validation and the server minimum', function (): void {
+    $html = render_view_for_test('preferences', ['candidates' => [['id' => 1, 'external_id' => 'SYN1', 'name' => 'Fictional Candidate']], 'companies' => [['id' => 1, 'code' => 'SYN1', 'name' => 'Fictional One'], ['id' => 2, 'code' => 'SYN2', 'name' => 'Fictional Two']], 'requests' => []]);
+    assert_true(str_contains($html, 'data-field-validation'), 'Preference create form opts into field feedback');
+    assert_true(str_contains($html, 'multiple required size="5" data-error="preference-companies-error" data-min-selections="2"'), 'Native multiple selection and the existing server minimum stay aligned');
+    assert_true(str_contains($html, 'aria-describedby="preference-companies-hint"'), 'Minimum remains visible/described before interaction');
+    assert_true(str_contains($html, 'id="preference-companies-error" class="field-error" hidden'), 'Authored error is neutral until interaction');
+});
+
 test_case('navigation announces only the current route and board cards retain heading structure', function (): void {
     $previousGet = $_GET;
     $previousSession = $_SESSION;

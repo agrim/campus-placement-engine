@@ -108,5 +108,8 @@ describe("DemoApp", () => {
     expect(within(opportunities).getByText("Placed")).toBeInTheDocument();
     expect(within(opportunities).getByText("Opportunity closed")).toBeInTheDocument();
     expect(screen.getByText(/Closed Dev’s competing Atlas application/i)).toBeInTheDocument();
+    expect(screen.getByRole("button", { name: /Replay the mission/i })).toHaveFocus();
+    await user.keyboard("{Enter}");
+    expect(screen.getByRole("button", { name: new RegExp(escapeRegExp(guidedSteps[0].actionLabel), "i") })).toHaveFocus();
   });
 });

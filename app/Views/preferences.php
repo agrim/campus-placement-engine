@@ -14,20 +14,23 @@ ob_start();
 
 <section class="panel">
   <h2>Create request</h2>
-  <form method="post" action="<?= h(url('preferences')) ?>">
+  <form method="post" action="<?= h(url('preferences')) ?>" data-field-validation>
     <?= Csrf::input() ?>
-    <label for="preference_candidate_id">Candidate</label>
-    <select id="preference_candidate_id" name="candidate_id" required>
+    <label for="preference_candidate_id">Candidate (required)</label>
+    <select id="preference_candidate_id" name="candidate_id" required data-error="preference-candidate-error">
       <?php foreach ($candidates as $candidate): ?>
         <option value="<?= h($candidate['id']) ?>"><?= h($candidate['external_id']) ?> - <?= h($candidate['name']) ?></option>
       <?php endforeach; ?>
     </select>
-    <label for="preference_company_ids">Company options</label>
-    <select id="preference_company_ids" name="company_ids[]" multiple required size="5">
+    <p id="preference-candidate-error" class="field-error" hidden>Error: Select an available candidate.</p>
+    <label for="preference_company_ids">Company options (required)</label>
+    <select id="preference_company_ids" name="company_ids[]" multiple required size="5" data-error="preference-companies-error" data-min-selections="2" aria-describedby="preference-companies-hint">
       <?php foreach ($companies as $company): ?>
         <option value="<?= h($company['id']) ?>"><?= h($company['code']) ?> - <?= h($company['name']) ?></option>
       <?php endforeach; ?>
     </select>
+    <p id="preference-companies-hint" class="muted">Select at least two companies to compare.</p>
+    <p id="preference-companies-error" class="field-error" hidden>Error: Select at least two company options.</p>
     <label for="preference_note">Note</label>
     <input id="preference_note" name="note" placeholder="Why is this decision needed?">
     <p><button class="primary" type="submit">Create preference request</button></p>
