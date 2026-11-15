@@ -407,3 +407,11 @@ form[data-field-validation] :is(input, select, textarea)[aria-invalid="true"] { 
   text-decoration-style: double;
   text-underline-offset: .15em;
 }
+
+/* Static presentation belongs in the stylesheet; configured status colors stay data. */
+.panel.login-panel { max-width: 420px; }
+.panel.student-panel { max-width: 720px; }
+input.checkbox-natural { width: auto; }
+.card-meta.accommodation-note { color: #6b3b00; font-weight: 700; }
+.card-meta.urgent-note { color: var(--danger); font-weight: 700; }
+.card-meta.attention-note { color: #7a4c00; font-weight: 700; }

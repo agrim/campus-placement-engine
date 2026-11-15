@@ -69,7 +69,7 @@ ob_start();
         </select>
       </fieldset>
       <label>
-        <input type="checkbox" name="configuration_freeze" value="1" style="width:auto" <?= ($settingsMap['configuration_freeze'] ?? '0') === '1' ? 'checked' : '' ?> <?= $canManageSettings ? '' : 'disabled' ?>>
+        <input type="checkbox" name="configuration_freeze" value="1" class="checkbox-natural" <?= ($settingsMap['configuration_freeze'] ?? '0') === '1' ? 'checked' : '' ?> <?= $canManageSettings ? '' : 'disabled' ?>>
         Freeze configuration changes before live operations
       </label>
       <fieldset class="setting-fieldset">
@@ -139,11 +139,11 @@ ob_start();
         <?php endforeach; ?>
       </fieldset>
       <label>
-        <input type="checkbox" name="placement_freeze" value="1" style="width:auto" <?= ($settingsMap['placement_freeze'] ?? '0') === '1' ? 'checked' : '' ?> <?= $canManageSettings ? '' : 'disabled' ?>>
+        <input type="checkbox" name="placement_freeze" value="1" class="checkbox-natural" <?= ($settingsMap['placement_freeze'] ?? '0') === '1' ? 'checked' : '' ?> <?= $canManageSettings ? '' : 'disabled' ?>>
         Freeze placement decisions unless admin overrides
       </label>
       <label>
-        <input type="checkbox" name="allow_offer_upgrade" value="1" style="width:auto" <?= ($settingsMap['allow_offer_upgrade'] ?? '0') === '1' ? 'checked' : '' ?> <?= $canManageSettings ? '' : 'disabled' ?>>
+        <input type="checkbox" name="allow_offer_upgrade" value="1" class="checkbox-natural" <?= ($settingsMap['allow_offer_upgrade'] ?? '0') === '1' ? 'checked' : '' ?> <?= $canManageSettings ? '' : 'disabled' ?>>
         Allow offer upgrades after a candidate is already placed
       </label>
       <?php if ($canManageSettings): ?>
@@ -172,7 +172,7 @@ ob_start();
       <tbody>
       <?php foreach ($users as $row): ?>
         <tr>
-          <td><input type="checkbox" name="active[]" value="<?= h($row['id']) ?>" aria-label="Active user: <?= h($row['name']) ?> (<?= h($row['email']) ?>)" style="width:auto" <?= $row['active'] ? 'checked' : '' ?> <?= $canManageUsers ? '' : 'disabled' ?>></td>
+          <td><input type="checkbox" name="active[]" value="<?= h($row['id']) ?>" aria-label="Active user: <?= h($row['name']) ?> (<?= h($row['email']) ?>)" class="checkbox-natural" <?= $row['active'] ? 'checked' : '' ?> <?= $canManageUsers ? '' : 'disabled' ?>></td>
           <td><?= h($row['name']) ?></td>
           <td><?= h($row['email']) ?></td>
           <td><?= h($row['role']) ?></td>

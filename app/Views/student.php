@@ -5,7 +5,7 @@ $companyLabel = cpe_term('company');
 $title = cpe_candidate_status_title();
 ob_start();
 ?>
-<section class="panel" style="max-width:720px">
+<section class="panel student-panel">
   <h1><?= h($title) ?></h1>
   <search aria-label="Candidate status lookup">
   <form method="get" action="/">

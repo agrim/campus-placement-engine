@@ -41,7 +41,7 @@ ob_start();
         <div role="cell"><input name="current_location" value="<?= h($candidate['current_location']) ?>" aria-label="Current location"></div>
         <div role="cell"><input name="accommodation_notes" value="<?= h($candidate['accommodation_notes'] ?? '') ?>" aria-label="Accommodation notes"></div>
         <div role="cell"><input name="custom_fields_json" value="<?= h($candidate['custom_fields_json'] ?? '{}') ?>" aria-label="<?= h($candidateLabel) ?> custom fields JSON"></div>
-        <div role="cell"><input type="checkbox" name="opted_out" value="1" style="width:auto" <?= $candidate['opted_out'] ? 'checked' : '' ?> aria-label="Opted out"></div>
+        <div role="cell"><input type="checkbox" name="opted_out" value="1" class="checkbox-natural" <?= $candidate['opted_out'] ? 'checked' : '' ?> aria-label="Opted out"></div>
         <div role="cell"><button type="submit">Save</button></div>
       </form>
     <?php endforeach; ?>
@@ -54,7 +54,7 @@ ob_start();
       <div role="cell"><input name="current_location" value="CP" aria-label="New <?= h(strtolower($candidateLabel)) ?> current location"></div>
       <div role="cell"><input name="accommodation_notes" placeholder="Room/floor need" aria-label="New <?= h(strtolower($candidateLabel)) ?> accommodation notes"></div>
       <div role="cell"><input name="custom_fields_json" value="{}" aria-label="New <?= h(strtolower($candidateLabel)) ?> custom fields JSON"></div>
-      <div role="cell"><input type="checkbox" name="opted_out" value="1" style="width:auto" aria-label="New <?= h(strtolower($candidateLabel)) ?> opted out"></div>
+      <div role="cell"><input type="checkbox" name="opted_out" value="1" class="checkbox-natural" aria-label="New <?= h(strtolower($candidateLabel)) ?> opted out"></div>
       <div role="cell"><button class="primary" type="submit">Add</button></div>
     </form>
   </div>

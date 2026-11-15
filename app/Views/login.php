@@ -11,7 +11,7 @@ $layoutFlashes = array_values(array_filter($loginFlashes, static fn (array $flas
 $loginErrorDescription = $loginErrors ? ' aria-describedby="login-server-errors"' : '';
 ob_start();
 ?>
-<section class="panel" style="max-width:420px">
+<section class="panel login-panel">
   <h1>Sign in</h1>
   <form data-field-validation<?= $loginErrorDescription ?> method="post" action="<?= h(url('login')) ?>">
     <?php if ($loginErrors): ?>

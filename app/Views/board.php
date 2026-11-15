@@ -163,7 +163,7 @@ ob_start();
             <div class="card-meta">Location: <?= h($app['current_location']) ?></div>
           <?php endif; ?>
           <?php if ($showCardField('accommodation') && !empty($app['accommodation_notes'])): ?>
-            <div class="card-meta" style="color:#6b3b00;font-weight:700">Accommodation: <?= h($app['accommodation_notes']) ?></div>
+            <div class="card-meta accommodation-note">Accommodation: <?= h($app['accommodation_notes']) ?></div>
           <?php endif; ?>
           <?php if ($showCardField('custom_fields')): ?>
             <?php if (($app['candidate_custom_fields_json'] ?? '{}') !== '{}'): ?>
@@ -177,19 +177,19 @@ ob_start();
             <div class="card-meta">Waitlist #<?= h($app['waitlist_rank']) ?></div>
           <?php endif; ?>
           <?php if (!empty($app['opted_out'])): ?>
-            <div class="card-meta" style="color:#9f1d1d;font-weight:700">Opted out</div>
+            <div class="card-meta urgent-note">Opted out</div>
           <?php endif; ?>
           <?php if ((int) ($app['open_wanted_count'] ?? 0) > 0): ?>
-            <div class="card-meta" style="color:#9f1d1d;font-weight:700">Wanted alert open</div>
+            <div class="card-meta urgent-note">Wanted alert open</div>
           <?php endif; ?>
           <?php if ((int) ($app['open_preference_count'] ?? 0) > 0): ?>
-            <div class="card-meta" style="color:#7a4c00;font-weight:700">Preference request open</div>
+            <div class="card-meta attention-note">Preference request open</div>
           <?php endif; ?>
           <?php if (!empty($app['has_active_conflict'])): ?>
-            <div class="card-meta" style="color:#7a4c00;font-weight:700">Active in <?= h($app['active_company_codes']) ?></div>
+            <div class="card-meta attention-note">Active in <?= h($app['active_company_codes']) ?></div>
           <?php endif; ?>
           <?php if (!empty($app['is_stale'])): ?>
-            <div class="card-meta" style="color:#7a4c00;font-weight:700">Stale active item</div>
+            <div class="card-meta attention-note">Stale active item</div>
           <?php endif; ?>
           <?php if ($workflowActions): ?>
             <?php foreach ($workflowActions as $action): ?>
