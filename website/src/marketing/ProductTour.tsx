@@ -12,6 +12,8 @@ export function ProductTour() {
       </div>
       <div className="product-tour-grid">
         <video
+          width={1440}
+          height={900}
           controls
           playsInline
           preload="metadata"
@@ -36,7 +38,7 @@ export function ProductTour() {
             <li>Keep records, readiness checks, and public results together.</li>
           </ul>
           <figure>
-            <img src={`${demoRoot}/board-mobile.png`} alt="The live placement board reflowed for a phone-width screen" />
+            <img src={`${demoRoot}/board-mobile.png`} width={390} height={844} loading="lazy" alt="The live placement board reflowed for a phone-width screen" />
             <figcaption>The same essential actions remain available on a narrow screen.</figcaption>
           </figure>
         </div>

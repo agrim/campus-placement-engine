@@ -67,7 +67,7 @@
     --amber-soft: #fff0ce;
     --red: #aa3f2d;
     --red-soft: #f8ded7;
-    --muted: #63706b;
+    --muted: #56615d;
     --line: rgba(16, 37, 31, 0.19);
     --line-strong: rgba(16, 37, 31, 0.42);
     --serif: Georgia, "Times New Roman", serif;
@@ -651,6 +651,7 @@
 
   .product-tour video {
     width: 100%;
+    height: auto;
     border: 1px solid var(--ink);
     background: #202831;
   }
@@ -685,6 +686,7 @@
     position: absolute;
     left: 0;
     content: "•";
+    content: "•" / "";
     color: var(--forest);
   }
 
@@ -696,6 +698,7 @@
 
   .product-tour-copy img {
     width: 100%;
+    height: auto;
     max-height: 360px;
     object-fit: cover;
     object-position: top;

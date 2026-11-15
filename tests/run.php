@@ -5185,6 +5185,26 @@ test_case('board card fields are configurable and normalized', function (): void
     assert_true(in_array('program', $service->boardCardFields(), true), 'Invalid board card settings should fall back to defaults');
 });
 
+test_case('installer stacks its setup form and requirements on narrow screens', function (): void {
+    $css = file_get_contents(dirname(__DIR__) . '/public/assets/app.css');
+    assert_true((bool) preg_match('/@media\\s*\\(max-width:\\s*760px\\)\\s*\\{\\s*[^{}]*\\.setup-layout\\s*\\{\\s*display:\\s*block;/', $css), 'The narrow-screen breakpoint should collapse the setup layout, not only other split layouts');
+});
+
+test_case('sign-in identifiers disable spellcheck while preserving native autofill', function (): void {
+    $html = render_view_for_test('login', ['ssoEnabled' => false]);
+    assert_true((bool) preg_match('/<input\\b[^>]*id="email"[^>]*type="email"[^>]*autocomplete="username"[^>]*spellcheck="false"[^>]*required/', $html), 'Sign-in email should keep native validation/autofill without spellchecking identifiers');
+    assert_true(str_contains($html, 'autocomplete="current-password" required'), 'Sign-in password should retain existing-password autofill and required validation');
+});
+
+test_case('shared layout lets keyboard users bypass repeated navigation', function (): void {
+    $html = render_layout_for_test(['title' => 'Records', 'content' => '<h1>Records</h1>']);
+    $link = '<a class="skip-link" href="#main-content">Skip to content</a>';
+    assert_true(str_contains($html, $link), 'Layout should offer a skip link');
+    assert_true(strpos($html, $link) < strpos($html, '<header'), 'Skip link should precede repeated navigation');
+    assert_same(1, substr_count($html, 'id="main-content"'), 'Skip target should uniquely identify the main content');
+    assert_true(str_contains($html, '<main class="shell" id="main-content">'), 'Skip target should include notices and page content');
+});
+
 test_case('board refresh setting is normalized and renders a pausable control only when enabled', function (): void {
     $pdo = Database::connection();
     $service = new PlacementService($pdo);

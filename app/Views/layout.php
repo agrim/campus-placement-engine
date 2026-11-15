@@ -44,6 +44,7 @@ if ($user && Database::isInstalled()) {
   <link rel="stylesheet" href="/assets/app.css">
 </head>
 <body>
+  <a class="skip-link" href="#main-content">Skip to content</a>
   <header class="topbar">
     <div>
       <div class="brand"><?= h($college) ?></div>
@@ -72,7 +73,7 @@ if ($user && Database::isInstalled()) {
       </nav>
     <?php endif; ?>
   </header>
-  <main class="shell">
+  <main class="shell" id="main-content">
     <?php if ($metaRefreshSeconds > 0): ?>
       <div class="board-refresh-control" data-board-refresh-seconds="<?= h($metaRefreshSeconds) ?>">
         <button type="button" data-board-refresh-toggle aria-pressed="false">Pause automatic refresh</button>

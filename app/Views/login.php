@@ -10,7 +10,7 @@ ob_start();
   <form method="post" action="<?= h(url('login')) ?>">
     <?= Csrf::input() ?>
     <label for="email">Email</label>
-    <input id="email" type="email" name="email" autocomplete="username" required autofocus>
+    <input id="email" type="email" name="email" autocomplete="username" spellcheck="false" required autofocus>
     <label for="password">Password</label>
     <input id="password" type="password" name="password" autocomplete="current-password" required>
     <p><button class="primary" type="submit">Sign in</button></p>
