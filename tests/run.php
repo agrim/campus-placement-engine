@@ -5224,6 +5224,26 @@ test_case('custom workflow heading colors retain readable contrast across palett
     assert_true(str_contains($css, 'color: var(--status-text, #000000);') && str_contains($css, 'color: contrast-color(var(--status-bg, #ffffff));'), 'Modern contrast must follow the fallback declaration');
 });
 
+test_case('login server failures describe the form without identifying a wrong credential', function (): void {
+    $previousFlashes = $_SESSION['flash'] ?? null;
+    try {
+        $_SESSION['flash'] = [];
+        \App\Support\Flash::add('error', 'Invalid login.');
+        \App\Support\Flash::add('error', '<unsafe synthetic markup>');
+        \App\Support\Flash::add('success', 'Signed out.');
+        $html = render_view_for_test('login', ['ssoEnabled' => false]);
+        assert_same(1, substr_count($html, 'Invalid login.'), 'Generic message is retained once');
+        assert_same(1, substr_count($html, 'Signed out.'), 'Non-error notice is retained once');
+        assert_true(str_contains($html, '&lt;unsafe synthetic markup&gt;'), 'Error text stays escaped');
+        assert_same(2, substr_count($html, 'aria-describedby="login-server-errors"'), 'Form and initial focus field describe the failed attempt');
+        assert_true(!str_contains($html, 'aria-invalid="true"'), 'Server auth failure does not blame a specific credential');
+        assert_true(!str_contains(render_view_for_test('login', ['ssoEnabled' => false]), 'login-server-errors'), 'Consumed failure is not replayed on a clean visit');
+    } finally {
+        if ($previousFlashes === null) unset($_SESSION['flash']);
+        else $_SESSION['flash'] = $previousFlashes;
+    }
+});
+
 test_case('wanted and CSV forms expose required feedback without changing submit actions', function (): void {
     $wanted = render_view_for_test('wanted', ['candidates' => [], 'alerts' => []]);
     assert_true(str_contains($wanted, 'data-field-validation') && str_contains($wanted, 'data-error="wanted-candidate-error"') && str_contains($wanted, 'data-error="wanted-reason-error"'), 'Wanted form exposes bounded required-field errors');

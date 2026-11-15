@@ -87,7 +87,7 @@ if ($user && Database::isInstalled()) {
         <span class="visually-hidden" data-board-refresh-announcement role="status" aria-live="polite" aria-atomic="true"></span>
       </div>
     <?php endif; ?>
-    <?php foreach (Flash::pull() as $flash): ?>
+    <?php foreach ($layoutFlashes ?? Flash::pull() as $flash): ?>
       <div class="flash <?= h($flash['type']) ?>"><?= h($flash['message']) ?></div>
     <?php endforeach; ?>
     <?= $content ?? '' ?>

@@ -36,3 +36,15 @@ against initial autofocus only on error returns, and typed field/error metadata 
 non-auth failures. Preserve generic authentication and incident boundaries, never
 retain passwords, and do not map exception text to a guessed field. This probe did
 not change authentication semantics or introduce global auto-focus.
+
+### Bounded login follow-up
+
+The login view now consumes its flashes once and places existing generic error
+messages in a visible form-level group. Both the form and its existing autofocus
+email control reference that group through aria-describedby. No credential is
+marked invalid merely because authentication failed; messages remain escaped and
+unchanged, non-error notices stay in the shared layout, and local field correction
+retains the generic server description. No password/value retention, new failure
+classification, focus redirection, role=alert, controller or throttle change.
+Synthetic rendered output confirms the email still receives initial focus and now
+has the generic description. Actual assistive-technology speech remains unverified.
