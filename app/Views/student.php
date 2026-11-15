@@ -11,7 +11,7 @@ ob_start();
   <form method="get" action="/">
     <input type="hidden" name="r" value="student">
     <label for="candidate-external-id"><?= h($candidateLabel) ?> ID</label>
-    <input id="candidate-external-id" name="external_id" spellcheck="false" autocapitalize="none" value="<?= h($externalId) ?>" placeholder="C001">
+    <input id="candidate-external-id" name="external_id" spellcheck="false" autocapitalize="none" autocorrect="off" value="<?= h($externalId) ?>" placeholder="C001">
     <p><button class="primary" type="submit">Check status</button></p>
   </form>
   </search>

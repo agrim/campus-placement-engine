@@ -9,9 +9,9 @@ ob_start();
   <h1>Sign in</h1>
   <form method="post" action="<?= h(url('login')) ?>">
     <?= Csrf::input() ?>
-    <label for="email">Email</label>
-    <input id="email" type="email" name="email" autocomplete="username" spellcheck="false" required autofocus>
-    <label for="password">Password</label>
+    <label for="email">Email (required)</label>
+    <input id="email" type="email" name="email" autocomplete="username" spellcheck="false" autocorrect="off" autocapitalize="none" required autofocus>
+    <label for="password">Password (required)</label>
     <input id="password" type="password" name="password" autocomplete="current-password" required>
     <p><button class="primary" type="submit">Sign in</button></p>
   </form>

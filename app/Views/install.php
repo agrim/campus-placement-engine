@@ -113,7 +113,7 @@ ob_start();
         <input id="admin_name" name="admin_name" value="Placement Admin" required>
 
         <label for="admin_email">Admin email</label>
-        <input id="admin_email" type="email" name="admin_email" value="admin@example.test" autocomplete="username" required>
+        <input id="admin_email" type="email" name="admin_email" value="admin@example.test" autocomplete="username" spellcheck="false" autocorrect="off" autocapitalize="none" required>
 
         <label for="admin_password">Admin password</label>
         <input id="admin_password" type="password" name="admin_password" autocomplete="new-password" aria-describedby="admin_password_hint" required>

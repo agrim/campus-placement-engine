@@ -48,7 +48,7 @@ ob_start();
     <input type="hidden" name="r" value="board">
     <div class="filter-row">
       <label for="q">Search</label>
-      <input id="q" name="q" value="<?= h($filters['q'] ?? '') ?>" placeholder="Candidate, company, program">
+      <input id="q" name="q" spellcheck="false" autocorrect="off" autocapitalize="none" value="<?= h($filters['q'] ?? '') ?>" placeholder="Candidate, company, program">
       <label for="status">Status</label>
       <select id="status" name="status">
         <option value="">Any status</option>
