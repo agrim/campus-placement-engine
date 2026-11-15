@@ -1,0 +1,77 @@
+{
+  "source_revision": "2fe3395",
+  "guide_source": "https://github.com/GoogleChrome/modern-web-guidance/tree/main/skills/modern-web-guidance/guides",
+  "method": "Full guide reads plus source feature/data-flow inspection. No new field, cross-browser or assistive-technology evidence. N/A applies only to the recipe, not foundational requirements.",
+  "rows": [
+    {
+      "guide": "brand-consistent-forms",
+      "status": "partial_with_gaps",
+      "evidence": "Native checkbox controls remain visible and usable in admin.php, board.php, records.php. No accent-color in app.css; existing --accent is used on buttons instead. Marketing progress uses vendor progress pseudos with forced-colors support. Branded-native-checkbox recipe not implemented; mandatory custom fallback only applies if requiring cross-browser brand consistency. No measured usability defect justifies replacing native inputs. Dark palette absent; do not falsely enable color-scheme light dark."
+    },
+    {
+      "guide": "form-fields-automatically-fit-contents",
+      "status": "not_applicable_recipe",
+      "evidence": "Inputs/selects/textareas intentionally width100%; textarea min-height150px, native scroll/resize. Admin notification/JSON templates and import CSV can be long but no dynamic autosizing feature or demonstrated loss of content. Guide explicitly recommends native fixed-field fallback unless growth is critical. No field-sizing content, so its reset-width/minmax/stretch conditions are inactive."
+    },
+    {
+      "guide": "rich-media-picker",
+      "status": "not_applicable_recipe",
+      "evidence": "PHP selects use text options, name/value/native submission; no embedded media/custom picker or base-select. Marketing role buttons are persistent mode actions, not a rich-media select. Keeping text-native dropdown does not require base-select/polyfill."
+    },
+    {
+      "guide": "select-menu-interaction",
+      "status": "partial_with_gaps",
+      "evidence": "Most required single selects (records/wanted/preferences) default to first real option, while empty filter values mean Any and are optional. preferences.php26 required multiple company_ids has no default selection and can be invalid; empty-source required selects also possible. Thus cannot mark globally N/A. Login-only enhancement does not cover selects: native constraints work but authored delayed error/ARIA/describedby/live announcement remains uncovered. Need empty-data/multiple-selection/server-validation tests before extending."
+    },
+    {
+      "guide": "break-up-long-tasks",
+      "status": "partial_with_gaps",
+      "evidence": "App script has bounded confirmation/refresh/error work; demo reducer updates fixed synthetic candidates/applications. No authored bulk browser compute/import loop; CSV import server-side. No measured task over50ms yet; framework/render cost on slower clients still unprofiled. Scheduler fallback recipe inactive; do not insert yielding into synchronous reducer/native validation blindly."
+    },
+    {
+      "guide": "defer-rendering-heavy-content",
+      "status": "partial_with_gaps",
+      "evidence": "Board/status columns and long reports can grow; no content-visibility. Need production-size synthetic board distribution, initial fold identification, derived intrinsic sizes, keyboard/AT boundary checks before containment. Small login/setup surfaces not suitable. No fake global pass from absence of property."
+    },
+    {
+      "guide": "deliver-optimized-decorative-images",
+      "status": "not_applicable_recipe",
+      "evidence": "App/marketing authoredCSS contains no background/mask/content URL image. ProductTour screenshot and video poster are informative HTML media, not decorative CSS art; existing icons inlineSVG. image-set format/order/fallback rules inactive. Informative-media optimization remains under performance."
+    },
+    {
+      "guide": "faster-spa-view-transitions",
+      "status": "not_applicable_recipe",
+      "evidence": "PHP navigation loads documents. Marketing demo mutates one React scenario; no router with cached inactive page-view containers. Desktop/mobile candidatequeue presentation is responsive duplication, not SPA route cache. No cache/inert/LRU API required for this feature set."
+    },
+    {
+      "guide": "identify-heavy-scripts",
+      "status": "partial_with_gaps",
+      "evidence": "No PerformanceObserver long-animation-frame collection or production reporting. Small authored appJS does not establish framework/script performance; marketing React bundle still relevant. Source review identifies no third-party SDK but field duration/count grouping and privacy-reviewed telemetry remain absent. No analytics added."
+    },
+    {
+      "guide": "identify-inp-causes",
+      "status": "partial_with_gaps",
+      "evidence": "No web-vitals attribution/EventTiming/LoAF collection or endpoint. Synthetic Chromium interactions cannot establish field INP or split input/processing/presentation delay. Real-device sampling, minimization of target/URL data and retention needed; no unapproved telemetry transmitted."
+    },
+    {
+      "guide": "improve-next-page-load-performance",
+      "status": "partial_with_gaps",
+      "evidence": "No speculationrules. Marketing links are same-document fragments or external GitHub release/discussion, so ordinary sameorigin-nextdocument recipe N/A there. PHP authenticated MPA is technically applicable but dynamic private records/one-shot notices and response no-store make blanket prefetch/prerender unsafe; requires safe-route side-effect inventory and budget. No state-changing routes speculated."
+    },
+    {
+      "guide": "optimize-preload-priority",
+      "status": "partial_with_gaps",
+      "evidence": "No authored link preload/font downloads/CSSimage. PHP text pages have no imageLCP candidate. Marketing initial text is JS-rendered, ProductTour poster lower page; no measured LCP candidate/networktrace. Adding high-priority poster preload without proving critical visibility risks contention. Existingno-preloads does not prove bestLCP."
+    },
+    {
+      "guide": "schedule-tasks-by-priority",
+      "status": "not_applicable_recipe",
+      "evidence": "No authored analytics/prefetch/background heavy work queue. App timer countdown+formfeedback are boundedUI work; demo reducer sync state operations. No postTask or scheduler dependency; scheduler/polyfill branches not active. Broader main-thread performance remains partial, not inferred good."
+    },
+    {
+      "guide": "restrict-outbound-connections",
+      "status": "partial_with_gaps",
+      "evidence": "bootstrap.php cpe_security_headers provides self CSP with explicit form-action/script-src/object-src, sameoriginworker fallback; no Connection-Allowlist/Report-Only/reportcollector. Essential login/portal/form redirects need redirects=allow after destination review. Marketing GitHub releases/discussion externalnavigation also must be inventoried; static host header capability unverified. No worker/WebRTC feature, but policy not redundant with CSP. Requires staged reports and approved endpoint/privacy scope; no blind enforcement."
+    }
+  ]
+}
