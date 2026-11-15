@@ -312,6 +312,7 @@ if (!/<meta\b(?=[^>]*name="referrer")[^>]*content="same-origin"/i.test(indexHtml
 if (!/<html\s[^>]*lang=["']en["']/i.test(indexHtml)) fail("index.html must declare lang=\"en\"");
 if (!/<meta\s[^>]*name=["']description["']/i.test(indexHtml)) fail("index.html is missing its description metadata");
 if (!/<meta\s[^>]*name=["']viewport["']/i.test(indexHtml)) fail("index.html is missing responsive viewport metadata");
+if (!/<meta\s[^>]*name=["']text-scale["'][^>]*content=["']scale["']/i.test(indexHtml)) fail("index.html is missing operating-system text scaling opt-in");
 if (!/<title>[^<]*Campus Placement Engine[^<]*<\/title>/i.test(indexHtml)) fail("index.html is missing the product title");
 if (/\/(?:src|website)\//i.test(indexHtml)) fail("index.html references source files instead of built assets");
 if (!indexHtml.includes(`https://agrim.github.io${WEBSITE_BASE}og-outcomes.png`)) {

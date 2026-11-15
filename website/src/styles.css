@@ -77,7 +77,7 @@
   body {
     min-width: 320px;
     min-height: 100vh;
-    overflow-x: hidden;
+    overflow-wrap: anywhere;
     background: var(--cream);
     color: var(--ink);
   }

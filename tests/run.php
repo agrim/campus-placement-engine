@@ -5211,6 +5211,7 @@ test_case('web typography respects browser text size and declares the initial co
     assert_true(str_contains($css, 'font-size: max(1rem, 1em)'), 'Controls should inherit larger text without falling below one rem');
     assert_true(!preg_match('/(?:^|[}\n])\s*\*\s*\{/', $css), 'Reset rules should name their intended elements');
     $html = render_layout_for_test(['title' => 'Text sizing', 'content' => '<h1>Text sizing</h1>']);
+    assert_true(str_contains($html, '<meta name="text-scale" content="scale">'), 'Application layout should opt into OS text scaling');
     assert_true(str_contains($html, '<meta name="color-scheme" content="light">') && strpos($html, '<meta name="color-scheme" content="light">') < strpos($html, '<link rel="stylesheet"'), 'Supported light scheme should be declared before styles load');
 });
 
