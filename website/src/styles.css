@@ -1373,19 +1373,17 @@
 
   .candidate-name strong,
   .candidate-company strong {
-    overflow: hidden;
     font-size: 0.72rem;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 
   .candidate-name small,
   .candidate-company small {
-    overflow: hidden;
     color: var(--muted);
     font-size: 0.59rem;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 
   .candidate-company {
@@ -1570,10 +1568,9 @@
   }
 
   .opportunity-strip strong {
-    overflow: hidden;
     font-size: 0.7rem;
-    text-overflow: ellipsis;
-    white-space: nowrap;
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 
   .opportunity-strip small {
