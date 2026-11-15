@@ -77,7 +77,7 @@ if ($user && Database::isInstalled()) {
   <main class="shell" id="main-content">
     <?php if ($metaRefreshSeconds > 0): ?>
       <div class="board-refresh-control" data-board-refresh-seconds="<?= h($metaRefreshSeconds) ?>">
-        <button type="button" data-board-refresh-toggle aria-pressed="false">Pause automatic refresh</button>
+        <button type="button" data-board-refresh-toggle>Pause automatic refresh</button>
         <span data-board-refresh-countdown>
           Next board refresh in <?= h($metaRefreshSeconds) ?> seconds.
         </span>

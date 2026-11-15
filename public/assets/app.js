@@ -19,7 +19,6 @@
   var paused = false;
   function renderRefreshState(message) {
     button.textContent = paused ? 'Resume automatic refresh' : 'Pause automatic refresh';
-    button.setAttribute('aria-pressed', paused ? 'true' : 'false');
     countdown.textContent = paused
       ? 'Automatic board refresh paused.'
       : 'Next board refresh in ' + remaining + ' seconds.';

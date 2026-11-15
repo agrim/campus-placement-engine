@@ -25,10 +25,10 @@ test('automatic refresh pauses while hidden and supports explicit pause/resume',
   ui.tick(); assert.match(ui.countdown.textContent, /11 seconds/);
   ui.document.hidden = true; ui.tick(); assert.match(ui.countdown.textContent, /11 seconds/);
   ui.document.hidden = false; ui.tick(); assert.match(ui.announcement.textContent, /10 seconds/);
-  ui.click(); assert.equal(ui.attributes['aria-pressed'], 'true');
+  ui.click(); assert.equal(ui.button.textContent, 'Resume automatic refresh'); assert.equal(ui.attributes['aria-pressed'], undefined);
   const paused = ui.countdown.textContent; ui.tick(); assert.equal(ui.countdown.textContent, paused);
   assert.equal(ui.reloads(), 0);
-  ui.click(); assert.equal(ui.attributes['aria-pressed'], 'false'); assert.match(ui.countdown.textContent, /12 seconds/);
+  ui.click(); assert.equal(ui.button.textContent, 'Pause automatic refresh'); assert.equal(ui.attributes['aria-pressed'], undefined); assert.match(ui.countdown.textContent, /12 seconds/);
   for (let i = 0; i < 12; i++) ui.tick();
   assert.equal(ui.reloads(), 1);
 });
@@ -48,4 +48,9 @@ test('confirmation cancellation blocks submission without disabling native forms
     ui.submit({ target: { matches: () => false }, preventDefault: () => prevented = true });
     assert.equal(prevented, false);
   }
+});
+
+test('refresh action label is not combined with a pressed-state toggle', () => {
+  const layout = readFileSync(join(__dirname, '../app/Views/layout.php'), 'utf8');
+  assert.doesNotMatch(layout, /<button[^>]*data-board-refresh-toggle[^>]*aria-pressed/);
 });
