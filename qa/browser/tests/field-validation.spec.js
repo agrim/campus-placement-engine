@@ -96,3 +96,24 @@ test('generic server error remains associated through local correction without c
  await page.locator('#email').fill('bad');await page.locator('#password').focus();await expect(page.locator('#email')).toHaveAttribute('aria-describedby','login-server-errors email-error');
  await page.locator('#email').fill('fictional@example.test');await expect(page.locator('#email')).toHaveAttribute('aria-describedby','login-server-errors');await expect(page.locator('#login-server-errors')).toHaveText('Invalid login.');
 });
+
+test('repeated advising notes keep labels and errors separate without announcing note text', async ({page}) => {
+ const view = readFileSync(new URL('../../../app/Modules/Advising/Views/dashboard.php', import.meta.url), 'utf8');
+ const action = view.indexOf("url('advising-note')");
+ const template = view.slice(view.lastIndexOf('<form', action), view.indexOf('</form>', action) + 7);
+ const rendered = [901,902].map(id => template.replace(/<\?=.*?\?>/gs, php => php.includes("$appointment['id']") ? String(id) : php.includes('Csrf::input') ? '<input type="hidden" name="_token" value="synthetic-only">' : '/advising-note')).join('');
+ await page.setContent(rendered); await page.addScriptTag({content:source});
+ const first = page.locator('#advising-note-901'); const second = page.locator('#advising-note-902');
+ await expect(first).toHaveAccessibleName('Staff note (required)'); await expect(second).toHaveAccessibleName('Staff note (required)');
+ await first.locator('xpath=ancestor::form').evaluate(form => form.requestSubmit());
+ await expect(first).toBeFocused(); await expect(first).toHaveAttribute('aria-describedby','advising-note-error-901');
+ await expect(page.locator('#advising-note-error-902')).toBeHidden();
+ await first.fill('Fictional private note text');
+ await expect(first).not.toHaveAttribute('aria-describedby', /.+/);
+ await second.locator('xpath=ancestor::form').evaluate(form => form.requestSubmit());
+ await expect(second).toBeFocused(); await expect(second).toHaveAttribute('aria-describedby','advising-note-error-902');
+ await expect(page.locator('[aria-live]')).not.toContainText('Fictional private note text');
+ await expect(first).toHaveValue('Fictional private note text');
+ await second.locator('xpath=ancestor::form').evaluate(form => form.reset());
+ await expect(page.locator('#advising-note-error-902')).toBeHidden();
+});

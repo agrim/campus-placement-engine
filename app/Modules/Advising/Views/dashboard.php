@@ -103,7 +103,8 @@ ob_start();
               <form method="post" action="<?= h(url('advising-status')) ?>">
                 <?= Csrf::input() ?>
                 <input type="hidden" name="appointment_id" value="<?= (int) $appointment['id'] ?>">
-                <select name="appointment_status">
+                <label for="advising-status-<?= (int) $appointment['id'] ?>">Appointment status</label>
+                <select id="advising-status-<?= (int) $appointment['id'] ?>" name="appointment_status">
                   <?php foreach ($statusTransitions[$appointment['appointment_status']] as $value => $label): ?>
                     <option value="<?= h($value) ?>"><?= h($label) ?></option>
                   <?php endforeach; ?>
@@ -114,10 +115,12 @@ ob_start();
             <?php if ($canManageNotes): ?>
               <details>
                 <summary>Add staff note</summary>
-                <form method="post" action="<?= h(url('advising-note')) ?>">
+                <form method="post" action="<?= h(url('advising-note')) ?>" data-field-validation>
                   <?= Csrf::input() ?>
                   <input type="hidden" name="appointment_id" value="<?= (int) $appointment['id'] ?>">
-                  <textarea class="textarea-compact" name="body" maxlength="4000" required></textarea>
+                  <label for="advising-note-<?= (int) $appointment['id'] ?>">Staff note (required)</label>
+                  <textarea id="advising-note-<?= (int) $appointment['id'] ?>" class="textarea-compact" name="body" maxlength="4000" required data-error="advising-note-error-<?= (int) $appointment['id'] ?>"></textarea>
+                  <p id="advising-note-error-<?= (int) $appointment['id'] ?>" class="field-error" hidden>Error: Enter a staff note.</p>
                   <button type="submit">Add note</button>
                 </form>
               </details>

@@ -87,3 +87,29 @@ interaction tests pass, 5 browser-control Node contracts pass, PHP lint and
 `git diff --check` pass. The browser test uses local response fulfillment and
 blocks all other requests; its generic error has an asserted accessible
 name/description rather than a claim about actual screen-reader output.
+
+## Advising required-note and status-control follow-up
+
+The finite form inventory identified an actual missing-name issue: each
+appointment's required staff-note textarea had no label, and its status select
+also lacked a programmatic label. Both now have visible labels and unique IDs
+based on the already-rendered integer appointment ID. Only staff-note forms opt
+into the existing progressive validation. Each has a fixed hidden error paragraph
+and unique association; no note text is inserted into announcements.
+
+The PHP contract renders two synthetic appointment rows through the real module
+view and checks distinct labels/error IDs. The Chromium contract extracts the
+actual note-form template with fictional substitutions, checking native invalid
+focus, separate errors in repeated forms, correction/reset and no note content
+in the live region. This is not an authenticated submission, a full advising
+layout/AT audit, or proof of the server-error return journey.
+
+No controller, permission, CSRF, endpoint, maxlength, required constraint or
+service persistence behavior changes. Appointment creation and other required
+module forms are still native-only. Advising server failures still return a
+shared safe flash without action/row association; that remains a separate open
+scope rather than being attributed to the note textarea.
+
+Validation: 147 PHP contracts, 9 Chromium field-validation tests, and 5 Node
+browser-control tests pass; PHP lint and whitespace checks pass. No live data
+or external network was used by the focused browser test.

@@ -5244,6 +5244,20 @@ test_case('login server failures describe the form without identifying a wrong c
     }
 });
 
+test_case('advising repeated note and status controls have distinct native labels', function (): void {
+    $user = Database::connection()->query("SELECT * FROM users WHERE role = 'admin' AND active = 1 LIMIT 1")->fetch();
+    $appointments = [];
+    foreach ([901, 902] as $id) $appointments[] = ['id' => $id, 'starts_at_display' => 'Synthetic start', 'ends_at_display' => 'Synthetic end', 'student_name' => 'Fictional Student', 'external_id' => 'SYN', 'adviser_name' => 'Fictional Advisor', 'appointment_mode' => 'video', 'topic' => 'Synthetic topic', 'location' => '', 'appointment_status' => 'scheduled', 'note_count' => 0];
+    $html = render_view_for_test('../Modules/Advising/Views/dashboard', ['user' => $user, 'appointments' => $appointments, 'students' => [], 'advisers' => [], 'notes' => [], 'tasks' => [], 'stats' => ['upcoming' => 0, 'completed' => 0, 'open_tasks' => 0, 'students_seen' => 0]]);
+    foreach ([901, 902] as $id) {
+        assert_same(1, substr_count($html, 'id="advising-note-' . $id . '"'), 'Distinct note control ID');
+        assert_true(str_contains($html, 'for="advising-note-' . $id . '"'), 'Visible note label');
+        assert_true(str_contains($html, 'data-error="advising-note-error-' . $id . '"'), 'Distinct fixed error association');
+        assert_true(str_contains($html, 'for="advising-status-' . $id . '"'), 'Visible status label');
+    }
+    assert_same(2, substr_count($html, 'data-field-validation'), 'Only note forms opt into feedback');
+});
+
 test_case('preference failure origins associate only the authored action without leaking inputs', function (): void {
     $previous = $_SESSION['flash'] ?? null;
     try {
