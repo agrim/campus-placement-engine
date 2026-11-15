@@ -121,6 +121,7 @@ testing.
 php placement setup --check
 php placement doctor
 php tests/run.php
+php tests/email_identity_preflight_contract.php
 php tests/public_event_contract.php
 php tests/webhook_delivery_contract.php
 php tests/webhook_delivery_concurrency_contract.php
@@ -140,12 +141,21 @@ SQLite, and writable data/database locations, and exits non-zero when a true
 system requirement is missing. `INFO installed: no` is normal before the first
 setup run. The first-run browser installer uses the same checks.
 
+Before upgrading an existing installation, run `php placement pre-upgrade-check`
+from verified newer application files against the intended database configuration.
+It reports email-normalization collision counts without changing the database.
+Exit status is `0` for clean, `2` for collisions, and `1` for an invalid or
+unavailable check. See the [upgrade walkthrough](docs/installation-walkthrough.md#7-upgrade-safely)
+and [private remediation guidance](docs/security-operations.md#authentication-and-sessions)
+for staging, explicit user IDs, and the final check after stopping writes.
+
 ## Useful CLI Commands
 
 ```bash
 php placement setup [127.0.0.1:8000] [--check]
 php placement doctor
 php placement migrate
+php placement pre-upgrade-check [--show-user-ids]
 php placement upgrade
 php placement serve [127.0.0.1:8000]
 php placement install --college="College" --cycle-name="Final Placements 2026" --admin-name="Admin" --admin-email=admin@example.test

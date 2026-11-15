@@ -116,6 +116,7 @@ jobs:
         run: |
           php tests/run.php
           php tests/audit_identity_regressions.php
+          php tests/email_identity_preflight_contract.php
           php tests/audit_placement_regressions.php
           php tests/audit_import_privacy_regressions.php
           php tests/audit_backup_regressions.php
@@ -167,6 +168,8 @@ jobs:
         run: |
           psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_identity_regressions'
           CPE_DATABASE_URL='postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_identity_regressions?sslmode=disable' php tests/audit_identity_regressions.php
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_email_identity_preflight_contract'
+          CPE_DATABASE_URL='postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_email_identity_preflight_contract?sslmode=disable' php tests/email_identity_preflight_contract.php
           psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_restore_regressions'
           CPE_DATABASE_URL='postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_restore_regressions?sslmode=disable' php tests/audit_backup_regressions.php
 

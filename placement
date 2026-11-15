@@ -3,6 +3,12 @@
 
 declare(strict_types=1);
 
+// Inspection must not create data directories, sessions, or run platform hooks.
+if (($argv[1] ?? '') === 'pre-upgrade-check') {
+    define('CPE_READ_ONLY_BOOTSTRAP', true);
+    define('CPE_SKIP_HTTP_BOOTSTRAP', true);
+}
+
 require __DIR__ . '/app/bootstrap.php';
 
 use App\Modules\Placement\Application\PlacementService;
@@ -46,6 +52,7 @@ use App\Security\SetupHttp;
 use App\Operations\MetricsService;
 use App\Operations\HttpLoadProbe;
 use App\Operations\SupportReportService;
+use App\Operations\EmailIdentityPreflight;
 use App\Support\Csv;
 use App\Support\Database;
 use App\Support\IncidentReporter;
@@ -56,6 +63,7 @@ try {
     match ($command) {
         'doctor' => doctor(),
         'migrate' => migrate(),
+        'pre-upgrade-check' => pre_upgrade_check(array_slice($argv, 2)),
         'upgrade' => upgrade(array_slice($argv, 2)),
         'setup' => setup(array_slice($argv, 2)),
         'serve' => serve(array_slice($argv, 2)),
@@ -223,6 +231,31 @@ function migrate(): void
 {
     Database::migrate();
     echo "Migrations applied.\n";
+}
+
+function pre_upgrade_check(array $args): void
+{
+    if ($args === ['--help'] || $args === ['-h']) {
+        echo "Read-only email identity check before upgrade:\n";
+        echo "  php placement pre-upgrade-check [--show-user-ids]\n";
+        echo "Exit codes: 0 clean, 2 collisions, 1 check unavailable or invalid arguments.\n";
+        echo "Default JSON contains counts only. --show-user-ids adds collision groups of account IDs.\n";
+        echo "Keep IDs private; no email addresses or other account attributes are printed.\n";
+        echo "Uses the configured database directly; platform hooks and hosted routing are skipped.\n";
+        echo "A clean result is a snapshot. Stop writers and rerun before upgrading.\n";
+        return;
+    }
+    if ($args !== [] && $args !== ['--show-user-ids']) {
+        throw new UserVisibleException(
+            'CLI_EMAIL_PREFLIGHT_ARGUMENT_INVALID',
+            'Use `php placement pre-upgrade-check [--show-user-ids]`.',
+        );
+    }
+    $result = (new EmailIdentityPreflight())->check($args === ['--show-user-ids']);
+    echo json_encode($result, JSON_THROW_ON_ERROR) . "\n";
+    if ($result['collision_groups'] > 0) {
+        exit(2);
+    }
 }
 
 function upgrade(array $args): void
@@ -3390,6 +3423,7 @@ function help(): void
     echo "Commands:\n";
     echo "  php placement doctor\n";
     echo "  php placement migrate\n";
+    echo "  php placement pre-upgrade-check [--show-user-ids]\n";
     echo "  php placement upgrade\n";
     echo "  php placement setup [127.0.0.1:8000] [--check]\n";
     echo "  php placement serve [127.0.0.1:8000]\n";
@@ -3475,6 +3509,7 @@ function upgrade_help(): void
     echo "Safely apply an installed app upgrade:\n";
     echo "  php placement upgrade\n";
     echo "\n";
+    echo "Run `php placement pre-upgrade-check` first to detect legacy email collisions.\n";
     echo "The command checks driver-specific requirements, writes a timestamped database backup,\n";
     echo "applies migrations, then prints live-day readiness checks. Warnings are reported but\n";
     echo "do not stop the upgrade; failing readiness checks exit non-zero after migrations.\n";

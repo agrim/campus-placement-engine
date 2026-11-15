@@ -24,9 +24,53 @@ New and reset passwords must contain 8–72 bytes. Bcrypt cannot distinguish lat
 bytes, so existing bcrypt users with longer passwords must have their password
 reset before signing in; entering an alternate suffix is never accepted.
 User email addresses are trimmed, lowercased, and unique under that same rule.
-If an upgrade reports a `users_email_normalized` collision, an administrator must
-resolve the duplicate accounts before retrying. The migration does not merge
-accounts or change either identity when a collision exists.
+Before upgrading, check legacy accounts for collisions using the verified newer
+application files in a staging directory and the intended database configuration:
+
+```bash
+php /path/to/staged-release/placement pre-upgrade-check
+```
+
+For SQLite, set `CPE_DB_DRIVER=sqlite` and `CPE_DB_PATH` to the absolute path of
+the existing database or an isolated restored copy. For PostgreSQL, use the same
+`CPE_DATABASE_URL` or `CPE_PG_*` configuration, TLS policy, and credentials as the
+intended target. The check inspects all users with the database's own
+`lower(trim(email))` expression, matching the new unique index. It supports
+unowned legacy databases without adopting ownership. It does not run migrations,
+create backups, change accounts or permissions, or write application logs. It
+bypasses hosted/platform bootstrap; managed operators must select the intended
+tenant database explicitly rather than relying on host resolution.
+
+Normal output is JSON containing aggregate counts only:
+
+```json
+{"collision_groups":0,"conflicting_users":0}
+```
+
+Exit status `0` means no collision was found, `2` means collisions were found,
+and `1` means the arguments or database could not be checked. A missing,
+unreadable, or incompatible database is an error, not a clean result. This is an
+email-identity check, not certification that every upgrade requirement is met.
+
+To identify affected accounts, an administrator may explicitly run
+`php /path/to/staged-release/placement pre-upgrade-check --show-user-ids` in a
+private administrative session. This adds `user_id_groups` containing the user
+IDs in each collision group; email addresses, names, and credentials are never
+printed. Treat these IDs as private account information and keep any captured
+output in restricted local storage, away from ordinary logs, CI output, and
+shared support reports. Review those accounts through authorized administrative
+tools and deliberately correct their email identities. A normalization match
+alone is not evidence that accounts should be merged or deleted.
+
+Run the check early against the intended target or a verified restored copy to
+allow time for resolution. Before the actual upgrade, stop application and
+worker writes, take a verified backup, and rerun the check against the target.
+A result describes one database snapshot; it does not reserve email identities
+or prevent a later writer from creating a collision. The migration's unique
+index remains the final enforcement boundary. If an upgrade still reports a
+`users_email_normalized` collision, resolve it deliberately and rerun the check
+before retrying. The migration fails closed without merging accounts or
+partially normalizing their email identities.
 Hosted mode defaults to database sessions; self-hosting defaults to PHP file
 sessions. Set `CPE_SESSION_DRIVER=database` to opt in elsewhere.
 

@@ -107,6 +107,7 @@ jobs:
           find app config public tests -name '*.php' -print0 | xargs -0 -n 1 php -l
           php -l placement
           php tests/run.php
+          php tests/email_identity_preflight_contract.php
           php tests/authorization_failure_contract.php
           php tests/authorization_state_contract.php
           php tests/installation_state_contract.php
@@ -210,6 +211,15 @@ jobs:
             ${{ runner.temp }}/cpe-release-browser-server.log
           if-no-files-found: ignore
           retention-days: 7
+
+      - name: Test PostgreSQL email identity preflight
+        env:
+          CPE_DB_DRIVER: pgsql
+          CPE_DATABASE_URL: postgresql://cpe:cpe-contract-password@127.0.0.1:5432/cpe_email_identity_preflight_contract?sslmode=disable
+          PGPASSWORD: cpe-contract-password
+        run: |
+          psql -h 127.0.0.1 -U cpe -d postgres -v ON_ERROR_STOP=1 -c 'CREATE DATABASE cpe_email_identity_preflight_contract'
+          php tests/email_identity_preflight_contract.php
 
       - name: Test PostgreSQL data plane
         env:
