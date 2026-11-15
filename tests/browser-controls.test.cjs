@@ -14,7 +14,7 @@ function fixture({ seconds = 12, enabled = true, confirmed = true } = {}) {
   const announcement = { textContent: '' };
   const nodes = { '[data-board-refresh-toggle]': button, '[data-board-refresh-countdown]': countdown, '[data-board-refresh-announcement]': announcement };
   const control = { getAttribute: () => String(seconds), querySelector: selector => nodes[selector] };
-  const document = { hidden: false, addEventListener: (name, fn) => documentListeners[name] = fn, querySelector: () => enabled ? control : null };
+  const document = { querySelectorAll: () => [], hidden: false, addEventListener: (name, fn) => documentListeners[name] = fn, querySelector: () => enabled ? control : null };
   let tick; let reloads = 0;
   runInNewContext(source, { document, window: { confirm: () => confirmed, location: { reload: () => reloads++ }, setInterval: fn => { tick = fn; } } });
   return { document, button, countdown, announcement, attributes, click: () => clickListeners.click(), tick: () => tick?.(), submit: event => documentListeners.submit(event), reloads: () => reloads, hasTimer: () => Boolean(tick) };

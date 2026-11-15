@@ -5241,6 +5241,9 @@ test_case('installer stacks its setup form and requirements on narrow screens', 
 
 test_case('sign-in identifiers disable spellcheck while preserving native autofill', function (): void {
     $html = render_view_for_test('login', ['ssoEnabled' => false]);
+    assert_true(str_contains($html, '<form data-field-validation method="post"'), 'Only explicitly opted-in forms should enhance validation');
+    assert_true(str_contains($html, 'id="email-error" class="field-error" hidden') && str_contains($html, 'id="password-error" class="field-error" hidden'), 'Login field messages must start hidden and have stable IDs');
+    assert_true(!str_contains($html, 'novalidate'), 'Enhancement must retain native validation');
     assert_true((bool) preg_match('/<input\\b[^>]*id="email"[^>]*type="email"[^>]*autocomplete="username"[^>]*spellcheck="false"[^>]*required/', $html), 'Sign-in email should keep native validation/autofill without spellchecking identifiers');
     assert_true(str_contains($html, 'autocorrect="off" autocapitalize="none"'), 'Email identifiers should not be corrected or capitalized');
     assert_true(str_contains($html, '>Email (required)</label>') && str_contains($html, '>Password (required)</label>'), 'Sign-in required fields should be visibly identified');

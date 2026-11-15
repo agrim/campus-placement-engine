@@ -22,3 +22,9 @@ A permanent `aria-invalid="false"` would conceal subsequent errors. A global han
 6. Validate Chromium, Firefox and Safari with actual screen-reader output before calling announcement behavior verified. Current isolated Chromium DOM checks are not a substitute.
 
 No product behavior or security policy was changed by this audit record.
+
+## Bounded sign-in enhancement follow-up
+
+The two-field Engine sign-in form now explicitly opts into progressive field-error handling. Fixed DOM messages are associated only while invalid. A single polite announcer uses labels/messages, never values. Native constraints, submit focus, no-script operation and server authentication are unchanged. The event-based validity bridge does not depend on `:user-invalid` support, and reset handling honors cancellation. Other product forms are not opted in.
+
+Three isolated Chromium tests verify untouched fields, malformed email, correction, hint retention, native submit focus, password non-disclosure, reset/stale timer cancellation, cancelled reset, no-script behavior and preexisting server-invalid preservation. These are DOM/behavior tests, not screen-reader speech evidence. Firefox/WebKit binaries are not installed locally; real AT and those engines remain unverified. Cloud remains a separate follow-up and must not inherit this product source automatically.
