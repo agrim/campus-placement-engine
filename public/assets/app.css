@@ -374,3 +374,12 @@ label { display: block; font-weight: 600; margin: 10px 0 5px; }
   .filter-row > * { margin-top: 7px; }
   .shell { padding: 10px; }
 }
+
+/* Keep dense desktop layouts, but enlarge controls for touch input. */
+@media (pointer: coarse) {
+  button, .button, select, input:not([type="checkbox"]):not([type="radio"]):not([type="hidden"]), .checkline, .nav a, summary {
+    min-block-size: 44px;
+    min-inline-size: 44px;
+  }
+  .button, .nav a { display: inline-flex; align-items: center; justify-content: center; }
+}

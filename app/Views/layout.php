@@ -89,6 +89,6 @@ if ($user && Database::isInstalled()) {
     <?php endforeach; ?>
     <?= $content ?? '' ?>
   </main>
-  <script src="/assets/app.js"></script>
+  <script src="/assets/app.js" defer></script>
 </body>
 </html>

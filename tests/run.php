@@ -5208,6 +5208,13 @@ test_case('web typography respects browser text size and declares the initial co
     assert_true(str_contains($html, '<meta name="color-scheme" content="light">') && strpos($html, '<meta name="color-scheme" content="light">') < strpos($html, '<link rel="stylesheet"'), 'Supported light scheme should be declared before styles load');
 });
 
+test_case('touch controls have larger targets and shared scripts do not block parsing', function (): void {
+    $css = file_get_contents(dirname(__DIR__) . '/public/assets/app.css');
+    assert_true(str_contains($css, '@media (pointer: coarse)') && str_contains($css, 'min-block-size: 44px'), 'Coarse pointers should receive larger targets without changing desktop density');
+    $html = render_layout_for_test(['title' => 'Touch controls', 'content' => '<h1>Touch controls</h1>']);
+    assert_true(str_contains($html, '<script src="/assets/app.js" defer></script>'), 'DOM-dependent shared script should defer parsing');
+});
+
 test_case('installer stacks its setup form and requirements on narrow screens', function (): void {
     $css = file_get_contents(dirname(__DIR__) . '/public/assets/app.css');
     assert_true((bool) preg_match('/@media\\s*\\(max-width:\\s*760px\\)\\s*\\{\\s*[^{}]*\\.setup-layout\\s*\\{\\s*display:\\s*block;/', $css), 'The narrow-screen breakpoint should collapse the setup layout, not only other split layouts');
