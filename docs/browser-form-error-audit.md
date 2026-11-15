@@ -28,3 +28,25 @@ No product behavior or security policy was changed by this audit record.
 The two-field Engine sign-in form now explicitly opts into progressive field-error handling. Fixed DOM messages are associated only while invalid. A single polite announcer uses labels/messages, never values. Native constraints, submit focus, no-script operation and server authentication are unchanged. The event-based validity bridge does not depend on `:user-invalid` support, and reset handling honors cancellation. Other product forms are not opted in.
 
 Three isolated Chromium tests verify untouched fields, malformed email, correction, hint retention, native submit focus, password non-disclosure, reset/stale timer cancellation, cancelled reset, no-script behavior and preexisting server-invalid preservation. These are DOM/behavior tests, not screen-reader speech evidence. Firefox/WebKit binaries are not installed locally; real AT and those engines remain unverified. Cloud remains a separate follow-up and must not inherit this product source automatically.
+
+## Preferences server-return ambiguity (source 7ac218d)
+
+A synthetic probe exercised the real ControllerFailure::flash boundary with reviewed
+UserVisibleException messages, then rendered the Preferences view. Create-invalid
+and resolve-forbidden cases both returned the same page title, body focus, an
+unidentified plain flash, and no form description. No authenticated POST or database
+mutation was performed; the synthetic view had no request rows.
+
+PreferenceController::create and ::resolve both redirect to Preferences and pass
+only safe text/type into Flash. Consequently an error cannot reliably be associated
+with the create form, a specific existing request or a particular field. Wanted
+create/resolve has the same structural ambiguity. Permission/CSRF/incident errors
+must not be presented as a malformed candidate or company selection.
+
+A follow-up should add optional trusted action/form identity at the controller
+boundary, retain only non-sensitive safe context, and render a form-level summary
+for the matching surface. Resolve failures need authorization-safe request identity
+and a fallback when the original row is no longer visible. Preserve current escaping,
+anti-enumeration, fresh CSRF and one-time flash behavior. Never infer a field from
+message wording. No server-return behavior changed in this pass; real AT response
+remains unverified. The bounded login association is already implemented separately.
