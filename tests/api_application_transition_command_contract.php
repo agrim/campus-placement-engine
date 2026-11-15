@@ -502,14 +502,28 @@ try {
         'Service-attributed transition audit aggregate changed within its institution.',
     );
     $pdo->prepare('UPDATE audit_logs SET detail = ? WHERE id = ?')->execute(['privacy rewrite', $serviceAuditId]);
-    api_command_rejects(
-        static fn (): bool => $auditInsert->execute([null, $other['id'], 'transition', 'application', $application['id'], '', '', '', $now]),
-        'Audit log accepted a cross-institution service-account actor.',
-    );
-    api_command_rejects(
-        static fn (): bool => $auditInsert->execute([null, $firstAccountId, 'settings.update', 'system', null, '', '', '', $now]),
-        'Audit log accepted service-account attribution outside application transition.',
-    );
+    $auditCountBeforeRejections = (int) $pdo->query('SELECT COUNT(*) FROM audit_logs')->fetchColumn();
+    foreach ([
+        [null, $other['id'], 'transition', 'application', $application['id'], '', '', '', $now],
+        [null, $firstAccountId, 'settings.update', 'system', null, '', '', '', $now],
+    ] as $invalidAudit) {
+        $failure = api_command_rejects(
+            static function () use ($auditInsert, $invalidAudit): bool {
+                try {
+                    return $auditInsert->execute($invalidAudit);
+                } finally {
+                    // Explicitly reset this deliberately rejected, reused statement.
+                    // PHP 8.5.12 SQLite otherwise reports SQLITE_MISUSE on the next execute.
+                    $auditInsert->closeCursor();
+                }
+            },
+            'Audit log accepted invalid service-account attribution.',
+            PDOException::class,
+        );
+        api_command_same($postgres ? 'P0001' : '23000', (string) $failure->getCode(), 'Audit rejection must be the database guard, not a statement lifecycle failure.');
+        api_command_assert(str_contains($failure->getMessage(), 'API transition audit actor must exclusively belong to the application institution'), 'Audit rejection must retain its specific guard diagnostic.');
+        api_command_same($auditCountBeforeRejections, (int) $pdo->query('SELECT COUNT(*) FROM audit_logs')->fetchColumn(), 'Rejected audit insert must not persist a row.');
+    }
     $auditInsert->execute([1, null, 'transition', 'application', $application['id'], '', '', '', $now]);
     $auditInsert->execute([null, null, 'system.fixture', 'system', null, '', '', '', $now]);
 

@@ -2371,6 +2371,12 @@ YAML;
     }
 });
 
+test_case('SQLite statement cleanup preserves real constraints and subsequent valid writes', function (): void {
+    [$code, $stdout, $stderr] = run_php_from(dirname(__DIR__), 'tests/sqlite_statement_lifecycle_contract.php');
+    assert_same(0, $code, 'SQLite statement lifecycle contract should pass: ' . $stdout . $stderr);
+    assert_true(str_contains($stdout, 'PASS SQLite cursor cleanup'), 'SQLite statement lifecycle contract should report its result');
+});
+
 test_case('conditional PostgreSQL TLS contract skips only absent or empty endpoint', function (): void {
     $runContract = static function (bool $present, string $value = ''): array {
         $environment = getenv();
