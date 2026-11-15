@@ -27,7 +27,7 @@ ob_start();
 
 <div class="split">
   <section class="panel">
-    <form method="post" action="<?= h(url('import')) ?>">
+    <form method="post" action="<?= h(url('import')) ?>" data-field-validation>
       <?= Csrf::input() ?>
       <label for="type">Import type</label>
       <select id="type" name="type">
@@ -41,8 +41,9 @@ ob_start();
         <option value="shortlists" <?= $selectedType === 'shortlists' ? 'selected' : '' ?>>Shortlists</option>
         <option value="legacy" <?= $selectedType === 'legacy' ? 'selected' : '' ?>>Legacy wide table</option>
       </select>
-      <label for="csv">CSV</label>
-      <textarea id="csv" name="csv" required><?= h($csv) ?></textarea>
+      <label for="csv">CSV (required)</label>
+      <textarea id="csv" name="csv" required data-error="csv-error"><?= h($csv) ?></textarea>
+      <p id="csv-error" class="field-error" hidden>Error: Paste CSV data before previewing or importing.</p>
       <p class="button-row">
         <button type="submit" name="action" value="preview">Preview CSV</button>
         <button class="primary" type="submit" name="action" value="import">Import CSV</button>

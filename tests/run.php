@@ -5224,6 +5224,14 @@ test_case('custom workflow heading colors retain readable contrast across palett
     assert_true(str_contains($css, 'color: var(--status-text, #000000);') && str_contains($css, 'color: contrast-color(var(--status-bg, #ffffff));'), 'Modern contrast must follow the fallback declaration');
 });
 
+test_case('wanted and CSV forms expose required feedback without changing submit actions', function (): void {
+    $wanted = render_view_for_test('wanted', ['candidates' => [], 'alerts' => []]);
+    assert_true(str_contains($wanted, 'data-field-validation') && str_contains($wanted, 'data-error="wanted-candidate-error"') && str_contains($wanted, 'data-error="wanted-reason-error"'), 'Wanted form exposes bounded required-field errors');
+    $import = render_view_for_test('import', ['csv' => '', 'recentImports' => []]);
+    assert_true(str_contains($import, 'data-error="csv-error"'), 'Empty CSV has authored feedback');
+    assert_true(str_contains($import, 'name="action" value="preview"') && str_contains($import, 'name="action" value="import"'), 'Preview and import remain distinct native submitters');
+});
+
 test_case('preference choices expose bounded validation and the server minimum', function (): void {
     $html = render_view_for_test('preferences', ['candidates' => [['id' => 1, 'external_id' => 'SYN1', 'name' => 'Fictional Candidate']], 'companies' => [['id' => 1, 'code' => 'SYN1', 'name' => 'Fictional One'], ['id' => 2, 'code' => 'SYN2', 'name' => 'Fictional Two']], 'requests' => []]);
     assert_true(str_contains($html, 'data-field-validation'), 'Preference create form opts into field feedback');

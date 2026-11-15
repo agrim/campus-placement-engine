@@ -72,3 +72,19 @@ test('empty candidate source and script-free multi-select retain native validati
  expect(await page.locator('#companies').evaluate(e=>e.validity.valueMissing)).toBe(true);
  await page.addScriptTag({content:source});await page.locator('form').evaluate(f=>f.requestSubmit());await expect(page.locator('#candidate')).toBeFocused();await expect(page.locator('#candidate')).toHaveAttribute('aria-describedby','candidate-error');await expect(page.locator('#companies')).toHaveAttribute('aria-invalid','true');
 });
+
+test('CSV textarea preserves native submitter actions and never announces pasted data', async ({page}) => {
+ await page.setContent(`<form data-field-validation><label for="csv">CSV (required)</label><textarea id="csv" name="csv" required data-error="csv-error"></textarea><p id="csv-error" hidden>Error: Paste CSV data before previewing or importing.</p><button name="action" value="preview">Preview CSV</button><button name="action" value="import">Import CSV</button></form>`);
+ await page.addScriptTag({content:source});await page.evaluate(()=>{window.submittedActions=[];document.querySelector('form').addEventListener('submit',e=>{e.preventDefault();window.submittedActions.push(e.submitter.value);});});
+ await page.getByRole('button',{name:'Preview CSV'}).click();await expect(page.locator('#csv')).toBeFocused();await expect(page.locator('#csv')).toHaveAttribute('aria-describedby','csv-error');
+ await page.locator('#csv').fill('fictional_id,name\nSYN1,Synthetic Candidate');await expect(page.locator('#csv')).toHaveAttribute('aria-invalid','false');
+ await page.getByRole('button',{name:'Preview CSV'}).click();await page.getByRole('button',{name:'Import CSV',exact:true}).click();expect(await page.evaluate(()=>window.submittedActions)).toEqual(['preview','import']);
+ await expect(page.locator('[aria-live]')).not.toContainText('Synthetic Candidate');
+ await page.locator('#csv').fill('');await page.getByRole('button',{name:'Preview CSV'}).focus();await expect(page.locator('[aria-live]')).toHaveText('CSV (required): Error: Paste CSV data before previewing or importing.');
+});
+
+test('wanted table overflow remains keyboard reachable at narrow enlarged text', async ({page}) => {
+ const css=readFileSync(new URL('../../../public/assets/app.css',import.meta.url),'utf8');
+ await page.setViewportSize({width:320,height:900});await page.setContent(`<style>${css}</style><section class="panel"><h2 id="alerts">Alerts</h2><div class="table-scroll" role="region" aria-labelledby="alerts" tabindex="0"><table class="table"><thead><tr>${['Candidate','Status','Reason','Created','Action'].map(x=>`<th scope="col">${x}</th>`).join('')}</tr></thead><tbody><tr><td>SYN1</td><td>Open</td><td>Fictional callback</td><td>2026-01-01</td><td>None</td></tr></tbody></table></div></section>`);await page.evaluate(()=>document.documentElement.style.fontSize='200%');
+ const region=page.getByRole('region',{name:'Alerts'});await region.focus();await expect(region).toBeFocused();await region.press('ArrowRight');await expect.poll(()=>region.evaluate(e=>e.scrollLeft)).toBeGreaterThan(0);expect(await page.evaluate(()=>document.documentElement.scrollWidth<=innerWidth)).toBe(true);
+});

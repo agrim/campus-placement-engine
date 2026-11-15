@@ -57,7 +57,7 @@
 
   forms.forEach(function (form) {
     var states = new Map();
-    form.querySelectorAll('input[data-error], select[data-error]').forEach(function (field) {
+    form.querySelectorAll('input[data-error], select[data-error], textarea[data-error]').forEach(function (field) {
       var error = document.getElementById(field.getAttribute('data-error'));
       // Do not replace independently authored server errors.
       if (!error || field.getAttribute('aria-invalid') === 'true') return;

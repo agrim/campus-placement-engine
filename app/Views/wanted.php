@@ -14,24 +14,27 @@ ob_start();
 
 <section class="panel">
   <h2>Create alert</h2>
-  <form method="post" action="<?= h(url('wanted')) ?>">
+  <form method="post" action="<?= h(url('wanted')) ?>" data-field-validation>
     <?= Csrf::input() ?>
-    <label for="wanted_candidate_id">Candidate</label>
-    <select id="wanted_candidate_id" name="candidate_id" required>
+    <label for="wanted_candidate_id">Candidate (required)</label>
+    <select id="wanted_candidate_id" name="candidate_id" required data-error="wanted-candidate-error">
       <?php foreach ($candidates as $candidate): ?>
         <option value="<?= h($candidate['id']) ?>"><?= h($candidate['external_id']) ?> - <?= h($candidate['name']) ?></option>
       <?php endforeach; ?>
     </select>
-    <label for="wanted_reason">Reason</label>
-    <input id="wanted_reason" name="reason" required placeholder="Needed at panel, missing from room, urgent callback...">
+    <p id="wanted-candidate-error" class="field-error" hidden>Error: Select an available candidate.</p>
+    <label for="wanted_reason">Reason (required)</label>
+    <input id="wanted_reason" name="reason" required data-error="wanted-reason-error" placeholder="Needed at panel, missing from room, urgent callback...">
+    <p id="wanted-reason-error" class="field-error" hidden>Error: Enter a reason for the alert.</p>
     <p><button class="primary" type="submit">Create wanted alert</button></p>
   </form>
 </section>
 
 <section class="panel">
-  <h2>Alerts</h2>
+  <h2 id="wanted-alerts-heading">Alerts</h2>
+  <div class="table-scroll" role="region" aria-labelledby="wanted-alerts-heading" tabindex="0">
   <table class="table">
-    <thead><tr><th>Candidate</th><th>Status</th><th>Reason</th><th>Created</th><th>Action</th></tr></thead>
+    <thead><tr><th scope="col">Candidate</th><th scope="col">Status</th><th scope="col">Reason</th><th scope="col">Created</th><th scope="col">Action</th></tr></thead>
     <tbody>
     <?php foreach ($alerts as $alert): ?>
       <tr>
@@ -55,6 +58,7 @@ ob_start();
     <?php if (!$alerts): ?><tr><td colspan="5">No wanted alerts yet.</td></tr><?php endif; ?>
     </tbody>
   </table>
+  </div>
 </section>
 <?php
 $content = ob_get_clean();
