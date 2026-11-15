@@ -11,6 +11,10 @@ function escapeRegExp(value: string): string {
 describe("DemoApp", () => {
   it("exposes profile and mode actions as named groups, not page navigation", () => {
     render(<DemoApp />);
+    const progress = screen.getByRole("progressbar", { name: "Placement mission progress" });
+    expect(progress.tagName).toBe("PROGRESS");
+    expect(progress).toHaveAttribute("value", "0");
+    expect(progress).toHaveAttribute("max", String(guidedSteps.length));
     const profiles = screen.getByRole("group", { name: "Demo user profiles" });
     expect(within(profiles).getAllByRole("button").length).toBeGreaterThan(1);
     expect(screen.queryByRole("navigation", { name: "Demo user profiles" })).not.toBeInTheDocument();
@@ -94,6 +98,7 @@ describe("DemoApp", () => {
       }
     }
 
+    expect(screen.getByRole("progressbar", { name: "Placement mission progress" })).toHaveAttribute("value", String(guidedSteps.length));
     const outcome = document.querySelector<HTMLElement>(".outcome-summary");
     expect(outcome).not.toBeNull();
     expect(outcome).toHaveTextContent(/2\s*Interviews attended/i);

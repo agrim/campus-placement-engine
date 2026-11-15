@@ -17,8 +17,7 @@ export default defineConfig({
               "default-src 'none'",
               "script-src 'self'",
               "style-src 'self'",
-              // The demo sets only its progress bar's width through React.
-              "style-src-attr 'unsafe-inline'",
+              "style-src-attr 'none'",
               "img-src 'self'",
               "media-src 'self'",
               "base-uri 'none'",

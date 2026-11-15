@@ -291,7 +291,7 @@ if (!policyTag) {
     "default-src": "'none'",
     "script-src": "'self'",
     "style-src": "'self'",
-    "style-src-attr": "'unsafe-inline'",
+    "style-src-attr": "'none'",
     "img-src": "'self'",
     "media-src": "'self'",
     "base-uri": "'none'",

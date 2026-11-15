@@ -10,7 +10,6 @@ type Props = {
 
 export function MissionProgress({ session, dispatch }: Props) {
   const completed = session.completedStepCount;
-  const percent = Math.round((completed / guidedSteps.length) * 100);
   const remaining = guidedSteps.length - completed;
 
   return (
@@ -39,16 +38,12 @@ export function MissionProgress({ session, dispatch }: Props) {
       <div className="progress-row">
         <div className="progress-meter">
           <span>{completed === guidedSteps.length ? "Mission complete" : `Step ${completed + 1} of ${guidedSteps.length}`}</span>
-          <div
+          <progress
             className="progress-track"
-            role="progressbar"
             aria-label="Placement mission progress"
-            aria-valuemin={0}
-            aria-valuemax={guidedSteps.length}
-            aria-valuenow={completed}
-          >
-            <i style={{ width: `${percent}%` }} />
-          </div>
+            max={guidedSteps.length}
+            value={completed}
+          />
         </div>
         <dl className="outcome-counters">
           <div><dt>{session.world.clashResolved ? 2 : 1}</dt><dd>Opportunities protected</dd></div>

@@ -66,3 +66,9 @@ test("rejects a policy that appears after resource elements", async () => {
   assert.equal(result.status, 1);
   assert.match(result.stderr, /security policy must precede resources/);
 });
+
+test("rejects restored inline style permissions after native progress migration", async () => {
+  const result = await verifyCopiedArtifact((html) => html.replace("style-src-attr &#39;none&#39;", "style-src-attr &#39;unsafe-inline&#39;"));
+  assert.equal(result.status, 1);
+  assert.match(result.stderr, /unexpected style-src-attr security policy/);
+});

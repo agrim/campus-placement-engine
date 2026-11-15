@@ -1167,17 +1167,26 @@
   }
 
   .progress-track {
+    appearance: none;
+    width: 100%;
     height: 8px;
-    overflow: hidden;
-    border: 1px solid var(--line-strong);
+    overflow: clip;
+    border: 0 solid;
     background: var(--paper-deep);
   }
 
-  .progress-track i {
-    display: block;
-    height: 100%;
-    background: var(--forest);
-    transition: width 220ms ease;
+  .progress-track::-webkit-progress-bar { background: transparent; }
+  .progress-track::-webkit-progress-value { background: var(--progress-fill, var(--forest)); forced-color-adjust: var(--progress-color-adjust, auto); }
+  .progress-track::-moz-progress-bar { background: var(--progress-fill, var(--forest)); forced-color-adjust: var(--progress-color-adjust, auto); }
+
+  @media (forced-colors: active) {
+    /* Preserve the semantic fill with the user's system palette, not brand colors. */
+    .progress-track {
+      border: 1px solid CanvasText;
+      background: Canvas;
+      --progress-fill: Highlight;
+      --progress-color-adjust: none;
+    }
   }
 
   .outcome-counters {
