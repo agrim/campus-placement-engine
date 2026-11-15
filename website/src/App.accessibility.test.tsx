@@ -40,6 +40,7 @@ describe("website accessibility", () => {
     expect(video).toHaveAttribute("width", "1440");
     expect(video).toHaveAttribute("height", "900");
     expect(video).toHaveAttribute("preload", "metadata");
+    expect(video).toHaveAttribute("loading", "lazy");
     expect(video).toHaveAttribute("controls");
     expect(video.querySelector('source[type="video/webm"]')?.getAttribute("src"))
       .toMatch(/\/demo\/campus-placement-engine-demo\.webm$/);

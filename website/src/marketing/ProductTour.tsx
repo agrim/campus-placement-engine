@@ -1,4 +1,7 @@
 export function ProductTour() {
+  // Native progressive enhancement; current React video typings omit loading.
+  // Unsupported browsers retain the metadata preload behavior.
+  const lazyVideoAttributes = { loading: "lazy" };
   const demoRoot = `${import.meta.env.BASE_URL}demo`;
 
   return (
@@ -12,6 +15,7 @@ export function ProductTour() {
       </div>
       <div className="product-tour-grid">
         <video
+          {...lazyVideoAttributes}
           width={1440}
           height={900}
           controls
