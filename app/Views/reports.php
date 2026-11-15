@@ -23,21 +23,24 @@ ob_start();
 </section>
 
 <section class="panel">
-  <h2>Application Status</h2>
+  <h2 id="report-table-0">Application Status</h2>
+  <div class="table-scroll" role="region" aria-labelledby="report-table-0" tabindex="0">
   <table class="table">
-    <thead><tr><th>Status</th><th>Count</th></tr></thead>
+    <thead><tr><th scope="col">Status</th><th scope="col">Count</th></tr></thead>
     <tbody>
     <?php foreach (($summary['applicationStatusCounts'] ?? []) as $row): ?>
       <tr><td><?= h($row['label']) ?></td><td><?= h($row['count']) ?></td></tr>
     <?php endforeach; ?>
     </tbody>
   </table>
+  </div>
 </section>
 
 <section class="panel">
-  <h2>Placements By Company</h2>
+  <h2 id="report-table-1">Placements By Company</h2>
+  <div class="table-scroll" role="region" aria-labelledby="report-table-1" tabindex="0">
   <table class="table">
-    <thead><tr><th>Company</th><th>Placed</th></tr></thead>
+    <thead><tr><th scope="col">Company</th><th scope="col">Placed</th></tr></thead>
     <tbody>
     <?php foreach (($summary['placementsByCompany'] ?? []) as $row): ?>
       <tr><td><?= h($row['code']) ?> - <?= h($row['name']) ?></td><td><?= h($row['placed_count']) ?></td></tr>
@@ -45,30 +48,35 @@ ob_start();
     <?php if (empty($summary['placementsByCompany'])): ?><tr><td colspan="2">No placements recorded yet.</td></tr><?php endif; ?>
     </tbody>
   </table>
+  </div>
 </section>
 
 <section class="panel">
-  <h2>Candidates By Program</h2>
+  <h2 id="report-table-2">Candidates By Program</h2>
+  <div class="table-scroll" role="region" aria-labelledby="report-table-2" tabindex="0">
   <table class="table">
-    <thead><tr><th>Program</th><th>Total</th><th>Placed</th></tr></thead>
+    <thead><tr><th scope="col">Program</th><th scope="col">Total</th><th scope="col">Placed</th></tr></thead>
     <tbody>
     <?php foreach (($summary['candidatesByProgram'] ?? []) as $row): ?>
       <tr><td><?= h($row['program']) ?></td><td><?= h($row['candidate_count']) ?></td><td><?= h($row['placed_count']) ?></td></tr>
     <?php endforeach; ?>
     </tbody>
   </table>
+  </div>
 </section>
 
 <section class="panel">
-  <h2>Candidates By Location</h2>
+  <h2 id="report-table-3">Candidates By Location</h2>
+  <div class="table-scroll" role="region" aria-labelledby="report-table-3" tabindex="0">
   <table class="table">
-    <thead><tr><th>Location</th><th>Candidates</th></tr></thead>
+    <thead><tr><th scope="col">Location</th><th scope="col">Candidates</th></tr></thead>
     <tbody>
     <?php foreach (($summary['candidatesByLocation'] ?? []) as $row): ?>
       <tr><td><?= h($row['current_location']) ?></td><td><?= h($row['candidate_count']) ?></td></tr>
     <?php endforeach; ?>
     </tbody>
   </table>
+  </div>
 </section>
 <?php
 $content = ob_get_clean();

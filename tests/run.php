@@ -1830,8 +1830,8 @@ test_case('local terminology labels render without client-side dependencies', fu
         ]],
         'studentLookupAllowed' => false,
     ]);
-    assert_true(str_contains($html, '<th>Recruiter</th>'), 'Public page should render custom company table label');
-    assert_true(str_contains($html, '<th>Placements</th>'), 'Public page should render aggregate placement counts');
+    assert_true(str_contains($html, '<th scope="col">Recruiter</th>'), 'Public page should render custom company table label');
+    assert_true(str_contains($html, '<th scope="col">Placements</th>'), 'Public page should render aggregate placement counts');
     assert_true(!str_contains($html, 'Example Learner') && !str_contains($html, 'L001'), 'Public page should not render candidate identities');
 
     $set->execute(['terminology_candidate_label', 'Candidate']);
@@ -5206,6 +5206,18 @@ test_case('web typography respects browser text size and declares the initial co
     assert_true(!preg_match('/(?:^|[}\n])\s*\*\s*\{/', $css), 'Reset rules should name their intended elements');
     $html = render_layout_for_test(['title' => 'Text sizing', 'content' => '<h1>Text sizing</h1>']);
     assert_true(str_contains($html, '<meta name="color-scheme" content="light">') && strpos($html, '<meta name="color-scheme" content="light">') < strpos($html, '<link rel="stylesheet"'), 'Supported light scheme should be declared before styles load');
+});
+
+test_case('aggregate and report tables expose named keyboard scroll regions', function (): void {
+    $html = render_view_for_test('public', ['placements' => [], 'studentLookupAllowed' => false]);
+    assert_true(str_contains($html, 'class="table-scroll" role="region" aria-labelledby="public-results-caption" tabindex="0"'), 'Public aggregates need a named keyboard scroll region');
+    assert_true(str_contains($html, '<caption id="public-results-caption"'), 'Public region should reference its table caption');
+    assert_same(3, substr_count($html, '<th scope="col">'), 'Aggregate columns should have explicit header scope');
+    $html = render_view_for_test('reports', ['summary' => []]);
+    assert_same(4, substr_count($html, 'class="table-scroll" role="region"'), 'Each report table needs its own keyboard region');
+    foreach (range(0, 3) as $index) {
+        assert_true(str_contains($html, 'aria-labelledby="report-table-' . $index . '"') && str_contains($html, 'id="report-table-' . $index . '"'), 'Every report region should reference its own heading');
+    }
 });
 
 test_case('touch controls have larger targets and shared scripts do not block parsing', function (): void {

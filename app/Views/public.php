@@ -15,8 +15,10 @@ ob_start();
 </div>
 
 <section class="panel">
+  <div class="table-scroll" role="region" aria-labelledby="public-results-caption" tabindex="0">
   <table class="table">
-    <thead><tr><th><?= h($companyLabel) ?></th><th>Program</th><th>Placements</th></tr></thead>
+    <caption id="public-results-caption" class="visually-hidden"><?= h($title) ?></caption>
+    <thead><tr><th scope="col"><?= h($companyLabel) ?></th><th scope="col">Program</th><th scope="col">Placements</th></tr></thead>
     <tbody>
       <?php foreach ($placements as $placement): ?>
         <tr>
@@ -28,6 +30,7 @@ ob_start();
       <?php if (!$placements): ?><tr><td colspan="3">No placements recorded yet.</td></tr><?php endif; ?>
     </tbody>
   </table>
+  </div>
 </section>
 <?php
 $content = ob_get_clean();

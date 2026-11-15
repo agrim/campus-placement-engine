@@ -383,3 +383,6 @@ label { display: block; font-weight: 600; margin: 10px 0 5px; }
   }
   .button, .nav a { display: inline-flex; align-items: center; justify-content: center; }
 }
+
+.table-scroll { max-width: 100%; overflow-x: auto; }
+.table-scroll:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
