@@ -1308,6 +1308,10 @@
     content: "";
   }
 
+  /* These controls meet the clipped demo edge: keep the entire focus ring inside. */
+  .role-button:focus-visible,
+  .mode-controls button:focus-visible { outline-offset: -3px; }
+
   .role-button.is-active {
     background: var(--lime);
     color: var(--ink);

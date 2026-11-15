@@ -22,6 +22,8 @@ if (Database::isInstalled()) {
 }
 $notificationCount = 0;
 $navigation = [];
+// Match the routed page, not its query filters or localized title.
+$navigationRoute = is_string($_GET['r'] ?? null) ? $_GET['r'] : 'portal';
 if ($user && Database::isInstalled()) {
     try {
         if (cpe_context()->modules()->isEnabled('placement')) {
@@ -55,11 +57,11 @@ if ($user && Database::isInstalled()) {
     <?php if ($user): ?>
       <nav class="nav" aria-label="Primary">
         <?php if (Auth::hasCapability($user, 'portal.modules.manage')): ?>
-          <a href="<?= h(url('modules')) ?>">Modules</a>
+          <a href="<?= h(url('modules')) ?>"<?= $navigationRoute === 'modules' ? ' aria-current="page"' : '' ?>>Modules</a>
         <?php endif; ?>
         <?php foreach ($navigation as $item): ?>
           <?php $navLabel = $item['label'] . (($item['route'] ?? '') === 'notifications' && $notificationCount > 0 ? ' (' . $notificationCount . ')' : ''); ?>
-          <a href="<?= h($item['href'] ?? url($item['route'])) ?>"><?= h($navLabel) ?></a>
+          <a href="<?= h($item['href'] ?? url($item['route'])) ?>"<?= $navigationRoute === ($item['route'] ?? null) ? ' aria-current="page"' : '' ?>><?= h($navLabel) ?></a>
         <?php endforeach; ?>
         <span><?= h($user['name']) ?> / <?= h($user['role']) ?></span>
         <form class="inline" method="post" action="<?= h(url('logout')) ?>">
@@ -70,8 +72,8 @@ if ($user && Database::isInstalled()) {
     <?php endif; ?>
     <?php if (!$user && \App\Support\Database::isInstalled() && cpe_context()->modules()->isEnabled('placement')): ?>
       <nav class="nav" aria-label="Public">
-        <a href="<?= h(url('public')) ?>"><?= h(cpe_public_placements_title()) ?></a>
-        <a href="<?= h(url('login')) ?>">Sign in</a>
+        <a href="<?= h(url('public')) ?>"<?= $navigationRoute === 'public' ? ' aria-current="page"' : '' ?>><?= h(cpe_public_placements_title()) ?></a>
+        <a href="<?= h(url('login')) ?>"<?= $navigationRoute === 'login' ? ' aria-current="page"' : '' ?>>Sign in</a>
       </nav>
     <?php endif; ?>
   </header>

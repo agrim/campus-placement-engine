@@ -111,9 +111,9 @@ ob_start();
         <?php $workflowActions = $app['workflow_actions'] ?? []; ?>
         <?php $workflowCorrection = $app['workflow_correction'] ?? null; ?>
         <article class="card" style="border-left: 6px solid <?= h($workflow->statusColor($key)) ?>">
-          <div class="card-title">
+          <h3 class="card-title">
             <a href="<?= h(url('candidate', ['id' => $app['candidate_id']])) ?>"><?= h($app['candidate_name']) ?></a>
-          </div>
+          </h3>
           <?php
             $candidateMeta = [];
             if ($showCardField('candidate_id')) {

@@ -185,7 +185,8 @@ h1, h2, h3 { margin: 0 0 8px; line-height: 1.2; }
   border: 1px solid rgba(0,0,0,.12);
   background: #fff;
 }
-.card-title { font-weight: 700; }
+.card-title { margin: 0; font-size: inherit; line-height: inherit; font-weight: 700; }
+.nav a[aria-current="page"] { text-decoration: underline; text-underline-offset: .2em; font-weight: 700; }
 .card-meta { color: #31404f; font-size: 0.75rem; margin-top: 3px; }
 .card form { margin-top: 8px; }
 .board-compact {

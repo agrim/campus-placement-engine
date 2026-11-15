@@ -5224,6 +5224,35 @@ test_case('custom workflow heading colors retain readable contrast across palett
     assert_true(str_contains($css, 'color: var(--status-text, #000000);') && str_contains($css, 'color: contrast-color(var(--status-bg, #ffffff));'), 'Modern contrast must follow the fallback declaration');
 });
 
+test_case('navigation announces only the current route and board cards retain heading structure', function (): void {
+    $previousGet = $_GET;
+    $previousSession = $_SESSION;
+    try {
+        $adminId = (int) Database::connection()->query("SELECT id FROM users WHERE role = 'admin' AND active = 1 LIMIT 1")->fetchColumn();
+        assert_true($adminId > 0, 'Fixture requires an active administrator');
+        $_SESSION['user_id'] = $adminId;
+        foreach (['board', 'records', 'modules'] as $route) {
+            $_GET = ['r' => $route, 'filter' => 'fictional'];
+            $html = render_layout_for_test(['title' => 'Unrelated title', 'content' => '<h1>Fixture</h1>']);
+            assert_same(1, substr_count($html, 'aria-current="page"'), 'Exactly one active navigation item for ' . $route);
+        }
+        unset($_SESSION['user_id']);
+        foreach (['login', 'public'] as $route) {
+            $_GET = ['r' => $route];
+            $html = render_layout_for_test(['content' => '<h1>Fixture</h1>']);
+            assert_true(str_contains($html, 'href="' . h(url($route)) . '" aria-current="page"'), 'Public navigation current route');
+        }
+        $_GET = ['r' => ['invalid']];
+        $html = render_layout_for_test(['content' => '<h1>Fixture</h1>']);
+        assert_true(!str_contains($html, 'aria-current="page"'), 'Malformed route must not mark a link current');
+    } finally {
+        $_GET = $previousGet;
+        $_SESSION = $previousSession;
+    }
+    $board = file_get_contents(dirname(__DIR__) . '/app/Views/board.php');
+    assert_true(str_contains($board, '<h3 class="card-title">'), 'Cards should have headings beneath status h2');
+});
+
 test_case('web typography respects browser text size and declares the initial color scheme', function (): void {
     $css = file_get_contents(dirname(__DIR__) . '/public/assets/app.css');
     assert_true(!preg_match('/font-size:\s*[^;}]*px/', $css), 'Typography should use font-relative sizes');
