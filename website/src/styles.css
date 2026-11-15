@@ -99,9 +99,12 @@
   button:focus-visible,
   a:focus-visible,
   summary:focus-visible {
-    outline: 3px solid var(--amber);
+    outline: 3px solid var(--focus-ring, var(--ink));
     outline-offset: 3px;
   }
+
+  /* Dark panels need a light ring; keep light-page focus dark for contrast. */
+  .action-panel, footer { --focus-ring: var(--paper); }
 
   .skip-link {
     position: fixed;
