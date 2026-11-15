@@ -378,3 +378,11 @@ export, HTTP smoke, and restore. The broad suite also injects a runtime file
 under the extracted package's `data/` tree and proves the Git-free publication
 check rejects its deterministic relative path. Do not use the
 historical private archive or real institutional records as fixtures.
+
+### Dependency-free browser-control unit checks
+
+Run `node --test tests/browser-controls.test.cjs` to check the shared script's
+pause/resume and hidden-document refresh behavior, malformed refresh settings,
+and native-form confirmation cancellation. The test uses synthetic DOM doubles:
+it complements, but does not replace, browser keyboard or assistive-technology
+checks. It does not require a live database or browser profile.
