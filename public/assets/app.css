@@ -386,3 +386,9 @@ label { display: block; font-weight: 600; margin: 10px 0 5px; }
 
 .table-scroll { max-width: 100%; overflow-x: auto; }
 .table-scroll:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
+
+/* Preserve the browser autofill palette and focus outline; add a non-color cue
+   without changing control dimensions. Unsupported browsers keep native styling. */
+:is(input, select, textarea):is(:autofill, :-webkit-autofill) {
+  box-shadow: inset 0 0 0 2px currentColor;
+}

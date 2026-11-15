@@ -54,3 +54,11 @@ test('refresh action label is not combined with a pressed-state toggle', () => {
   const layout = readFileSync(join(__dirname, '../app/Views/layout.php'), 'utf8');
   assert.doesNotMatch(layout, /<button[^>]*data-board-refresh-toggle[^>]*aria-pressed/);
 });
+
+test('autofill adds a progressive non-color cue without overriding native colors', () => {
+  const css = readFileSync(join(__dirname, '../public/assets/app.css'), 'utf8');
+  const rule = css.match(/:is\(input, select, textarea\):is\(:autofill, :-webkit-autofill\)\s*\{([^}]+)\}/);
+  assert.ok(rule);
+  assert.match(rule[1], /box-shadow: inset 0 0 0 2px currentColor/);
+  assert.doesNotMatch(rule[1], /(?:background|outline|padding|border-width|text-fill-color)\s*:/);
+});
