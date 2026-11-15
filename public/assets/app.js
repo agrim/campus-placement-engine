@@ -61,7 +61,7 @@
       var error = document.getElementById(field.getAttribute('data-error'));
       // Do not replace independently authored server errors.
       if (!error || field.getAttribute('aria-invalid') === 'true') return;
-      states.set(field, { error: error, dirty: false, blurred: false, invalid: false, announced: false });
+      states.set(field, { error: error, dirty: false, announced: false });
       field.setAttribute('aria-invalid', 'false');
     });
     function update(field, invalid, announce) {
@@ -74,7 +74,6 @@
       if (invalid) hints.push(id);
       if (hints.length) field.setAttribute('aria-describedby', hints.join(' '));
       else field.removeAttribute('aria-describedby');
-      state.invalid = invalid;
       if (!invalid) {
         state.announced = false;
         if (announcedField === field) {
@@ -99,15 +98,14 @@
         clearTimeout(timer);
         announcer.textContent = '';
         state.dirty = true;
-        state.blurred = true;
         state.announced = true;
         update(field, true, false); // Native validation focuses and describes the first invalid field.
       } else if (event.type === 'blur') {
-        state.blurred = true;
         if (state.dirty) update(field, !field.validity.valid, true);
       } else {
         state.dirty = true;
-        if (state.blurred || state.invalid) update(field, !field.validity.valid, event.type === 'change');
+        if (event.type === 'change') update(field, !field.validity.valid, true);
+        else if (field.validity.valid) update(field, false, false); // Typing only clears errors; defer new errors until blur/change/submit.
       }
     }
     ['input', 'change', 'blur', 'invalid'].forEach(function (name) { form.addEventListener(name, handle, true); });
@@ -117,7 +115,6 @@
         if (event.defaultPrevented) return;
         states.forEach(function (state, field) {
           state.dirty = false;
-          state.blurred = false;
           update(field, false, false);
         });
       }, 0);

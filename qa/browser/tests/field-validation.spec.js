@@ -20,6 +20,9 @@ test('errors follow interaction, retain hints, clear stale announcements and nat
   await expect(email).toHaveAttribute('aria-invalid', 'false');
   await expect(email).toHaveAttribute('aria-describedby', 'hint');
   await expect(live).toBeEmpty();
+  await email.fill('still-typing');
+  await expect(email).toHaveAttribute('aria-invalid', 'false');
+  await email.fill('synthetic@example.test');
   await page.locator('form').evaluate(form => form.requestSubmit());
   await expect(password).toBeFocused();
   await expect(password).toHaveAttribute('aria-invalid', 'true');
