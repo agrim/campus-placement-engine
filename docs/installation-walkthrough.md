@@ -80,14 +80,39 @@ required only for configured external channels. See
 
 ## 7. Upgrade safely
 
-Preserve `data/`, configuration, backups, and the old release directory. Replace
-application files with a verified newer archive, then run:
+Preserve `data/`, configuration, backups, and the old release directory. Stage
+verified newer application files separately and run the read-only email check
+against the intended database or a verified restored copy before replacing live
+application files:
 
 ```bash
+php /path/to/staged-release/placement pre-upgrade-check
+```
+
+Use the intended database environment configuration. For SQLite, explicitly set
+`CPE_DB_DRIVER=sqlite` and an absolute `CPE_DB_PATH` pointing to the existing
+database; the staged directory's default database is not the upgrade target.
+For PostgreSQL, use the target's `CPE_DATABASE_URL` or `CPE_PG_*` settings and
+TLS policy. Exit status `0` means no collision, `2` means collision groups need
+resolution, and `1` means the check could not complete. Default JSON contains
+counts only. An administrator can use `--show-user-ids` in a private session
+for remediation; see [security-operations.md](security-operations.md) for
+privacy and recovery guidance.
+
+Resolve collisions deliberately before proceeding. Stop application and worker
+writes, take a verified backup, then rerun the check against the target
+immediately before upgrading. The check is a point-in-time observation and does
+not replace the migration's automatic fail-closed uniqueness enforcement.
+Replace application files while preserving runtime configuration and `data/`,
+then run:
+
+```bash
+php placement pre-upgrade-check
 php placement upgrade
 php placement doctor
 php placement readiness
 ```
 
-The upgrade writes a backup before migrations. Never delete migration or
-database-ownership evidence to force an upgrade.
+Proceed to `upgrade` only after the check exits `0`. The upgrade writes another
+backup before migrations. Never delete migration or database-ownership evidence
+to force an upgrade.

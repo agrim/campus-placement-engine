@@ -7,6 +7,7 @@ namespace App\Import;
 use App\Core\Http\UserVisibleException;
 use App\Core\Persistence\WriteTransaction;
 use App\Modules\Placement\Application\ApplicationStatusWriter;
+use App\Modules\Placement\Application\PlacementService;
 use App\Modules\Placement\Install\LegacyDomainSynchronizer;
 use App\Modules\Placement\Workflow\WorkflowRepository;
 use PDO;
@@ -556,8 +557,9 @@ final class CsvImporter
         return WriteTransaction::run($this->pdo, function () use ($normalized): int {
             $count = 0;
             $writer = new ApplicationStatusWriter($this->pdo);
+            $placements = [];
             foreach ($normalized as $row) {
-                $writer->saveStatus(
+                $saved = $writer->saveStatus(
                     (int) $row['candidate_id'],
                     (int) $row['company_id'],
                     (string) $row['status'],
@@ -567,7 +569,18 @@ final class CsvImporter
                     'Application status changed through shortlist import.',
                     cpe_now(),
                 );
+                if ($row['status'] === 'placed') {
+                    $placements[(int) $saved['id']] = true;
+                } else {
+                    unset($placements[(int) $saved['id']]);
+                }
                 $count++;
+            }
+            if ($placements !== []) {
+                $placement = new PlacementService($this->pdo);
+                foreach (array_keys($placements) as $applicationId) {
+                    $placement->applySavedApplicationPlacement($applicationId, null, 'import');
+                }
             }
             $this->synchronizeDurableDomain(true);
             return $count;
@@ -578,24 +591,73 @@ final class CsvImporter
     {
         $rows = $this->rows($csv, ['external_id', 'name', 'company_code']);
         $validStatuses = $this->validStatuses($validStatuses);
-        $count = 0;
+        if ($rows === []) {
+            return 0;
+        }
+        $candidates = [];
+        $companies = [];
+        $shortlists = [];
         foreach ($rows as $row) {
-            $candidateCsv = "external_id,name,program,current_location\n" .
-                $row['external_id'] . ',' . $row['name'] . ',' . ($row['program'] ?? '') . ',' . ($row['current_location'] ?? 'CP') . "\n";
+            $candidates[] = [
+                'external_id' => $row['external_id'],
+                'name' => $row['name'],
+                'program' => $row['program'] ?? '',
+                'current_location' => $row['current_location'] ?? 'CP',
+            ];
             $companyName = $row['company_name'] ?? $row['company_code'];
-            $companyCsv = "code,name,slot,process_type,room\n" . strtoupper($row['company_code']) . ',' . $companyName . ',' . ($row['slot'] ?? '') . ',' . ($row['process_type'] ?? '') . ',' . ($row['room'] ?? '') . "\n";
+            $companies[] = [
+                'code' => strtoupper($row['company_code']),
+                'name' => $companyName,
+                'slot' => $row['slot'] ?? '',
+                'process_type' => $row['process_type'] ?? '',
+                'room' => $row['room'] ?? '',
+            ];
             $status = $this->legacyStatus($row);
             if (!in_array($status, $validStatuses, true)) {
                 throw new RuntimeException("Row {$row['__row']} maps to unavailable workflow status: {$status}");
             }
-            $shortlistCsv = "candidate_external_id,company_code,status\n" . $row['external_id'] . ',' . strtoupper($row['company_code']) . ',' . $status . "\n";
-            $this->candidates($candidateCsv);
-            $this->companies($companyCsv);
-            $this->shortlists($shortlistCsv, $validStatuses);
-            $this->legacyGdPanelAssignment($row);
-            $count++;
+            $shortlists[] = [
+                'candidate_external_id' => $row['external_id'],
+                'company_code' => strtoupper($row['company_code']),
+                'status' => $status,
+            ];
         }
-        return $count;
+        $this->candidates($this->rowsToCsv($candidates));
+        $this->companies($this->rowsToCsv($companies));
+        $this->shortlists($this->rowsToCsv($shortlists), $validStatuses);
+        foreach ($rows as $row) {
+            $this->legacyGdPanelAssignment($row);
+        }
+        return count($rows);
+    }
+
+    /** @param non-empty-list<array<string, string>> $rows */
+    private function rowsToCsv(array $rows): string
+    {
+        $handle = fopen('php://temp', 'w+');
+        if ($handle === false) {
+            throw new RuntimeException('Could not prepare legacy import rows.');
+        }
+        try {
+            if (fputcsv($handle, array_keys($rows[0]), ',', '"', '') === false) {
+                throw new RuntimeException('Could not serialize legacy import headers.');
+            }
+            foreach ($rows as $row) {
+                if (fputcsv($handle, array_values($row), ',', '"', '') === false) {
+                    throw new RuntimeException('Could not serialize legacy import row.');
+                }
+            }
+            if (!rewind($handle)) {
+                throw new RuntimeException('Could not rewind legacy import rows.');
+            }
+            $csv = stream_get_contents($handle);
+            if ($csv === false) {
+                throw new RuntimeException('Could not read legacy import rows.');
+            }
+            return $csv;
+        } finally {
+            fclose($handle);
+        }
     }
 
     private function previewCandidates(string $csv): array

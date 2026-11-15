@@ -56,7 +56,7 @@ final class DatabaseRestoreService
             if ($driver === 'sqlite') {
                 $this->restoreSqlite($stagedBackupPath);
             } elseif ($driver === 'pgsql') {
-                $this->restorePostgres($stagedBackupPath);
+                $this->restorePostgres($stagedBackupPath, $targetIdentity);
             } else {
                 throw new RuntimeException('Database restore is not configured for driver: ' . $driver);
             }
@@ -376,42 +376,151 @@ final class DatabaseRestoreService
         }
     }
 
-    private function restorePostgres(string $backupPath): void
+    /** @param array{owner_kind: string, owner_contract_version: int, institution_public_id: string} $targetIdentity */
+    private function restorePostgres(string $backupPath, array $targetIdentity): void
+    {
+        // pg_restore --clean only drops objects present in the archive. A later
+        // migration can leave extra objects, or foreign keys that prevent those
+        // drops. Reset the application schema and restore in one transaction.
+        $pdo = Database::connection();
+        $schema = (string) $pdo->query('SELECT current_schema()')->fetchColumn();
+        if ($schema === '' || $schema === 'information_schema' || str_starts_with($schema, 'pg_')) {
+            throw new RuntimeException('PostgreSQL restore requires an application schema.');
+        }
+        $this->psqlBinary();
+        $this->postgresCommandConnection();
+        $namespace = $pdo->prepare(
+            'SELECT pg_get_userbyid(nspowner) AS owner, obj_description(oid, \'pg_namespace\') AS comment
+             FROM pg_namespace WHERE nspname = ?',
+        );
+        $namespace->execute([$schema]);
+        $metadata = $namespace->fetch(PDO::FETCH_ASSOC);
+        if (!is_array($metadata) || !is_string($metadata['owner'] ?? null)) {
+            throw new RuntimeException('PostgreSQL restore schema metadata is unavailable.');
+        }
+        $acl = $pdo->prepare(
+            "SELECT CASE WHEN a.grantee = 0 THEN NULL ELSE pg_get_userbyid(a.grantee) END AS grantee,
+                    a.privilege_type, a.is_grantable
+             FROM pg_namespace n,
+                  LATERAL aclexplode(COALESCE(n.nspacl, acldefault('n', n.nspowner))) a
+             WHERE n.nspname = ?",
+        );
+        $acl->execute([$schema]);
+        $grants = $acl->fetchAll(PDO::FETCH_ASSOC);
+        $quotedSchema = $this->postgresIdentifier($schema);
+        $identitySql = $this->postgresIdentitySql($pdo, $schema, $targetIdentity);
+        $resetSql = $identitySql
+            . 'DROP SCHEMA ' . $quotedSchema . " CASCADE;\n"
+            . 'CREATE SCHEMA ' . $quotedSchema . ' AUTHORIZATION '
+            . $this->postgresIdentifier($metadata['owner']) . ";\n";
+
+        // CREATE SCHEMA can apply role default privileges. Remove those before
+        // replaying the existing schema ACL, including deliberate PUBLIC revokes.
+        $grantSql = 'DO $cpe_schema_acl$ DECLARE principal RECORD; BEGIN '
+            . 'FOR principal IN SELECT DISTINCT a.grantee FROM pg_namespace n, '
+            . "LATERAL aclexplode(n.nspacl) a WHERE n.nspname = " . $pdo->quote($schema)
+            . ' LOOP EXECUTE ' . $pdo->quote('REVOKE ALL ON SCHEMA ' . $quotedSchema . ' FROM ')
+            . " || CASE WHEN principal.grantee = 0 THEN 'PUBLIC' ELSE quote_ident(pg_get_userbyid(principal.grantee)) END; "
+            . "END LOOP; END; \$cpe_schema_acl$;\n";
+        foreach ($grants as $grant) {
+            if (!in_array($grant['privilege_type'], ['USAGE', 'CREATE'], true)) {
+                throw new RuntimeException('PostgreSQL restore schema privileges are invalid.');
+            }
+            $grantSql .= 'GRANT ' . $grant['privilege_type'] . ' ON SCHEMA ' . $quotedSchema . ' TO '
+                . ($grant['grantee'] === null ? 'PUBLIC' : $this->postgresIdentifier((string) $grant['grantee']))
+                . (in_array($grant['is_grantable'], [true, 1, '1', 't'], true) ? ' WITH GRANT OPTION' : '') . ";\n";
+        }
+        $grantSql .= 'COMMENT ON SCHEMA ' . $quotedSchema . ' IS '
+            . ($metadata['comment'] === null ? 'NULL' : $pdo->quote((string) $metadata['comment'])) . ";\n";
+
+        $directory = dirname($backupPath);
+        $resetPath = $directory . '/reset.sql';
+        $restorePath = $directory . '/restore.sql';
+        $verifyPath = $directory . '/verify.sql';
+        $listPath = $directory . '/restore.list';
+        $diagnosticPath = $directory . '/postgres-restore.log';
+        $this->writeRestoreScript($resetPath, $resetSql);
+        $this->writeRestoreScript($verifyPath, $grantSql . $identitySql);
+        // The schema is recreated with its original owner above. Exclude its
+        // archive CREATE SCHEMA entry; pg_restore's schema filter selects only
+        // this application's objects, including for a non-public schema.
+        $list = preg_replace('/^([0-9]+; [0-9]+ [0-9]+ SCHEMA - .*)$/m', ';$1', $this->inspectPostgresBackup($backupPath));
+        if ($list === null) {
+            throw new RuntimeException('Could not prepare PostgreSQL restore contents.');
+        }
+        $this->writeRestoreScript($listPath, $list);
+        $this->writeRestoreScript($restorePath, '');
+        $this->runPostgresCommand([
+            $this->pgRestoreBinary(), '--no-owner', '--no-privileges', '--schema=' . $schema,
+            '--use-list=' . $listPath, '--file=' . $restorePath, $backupPath,
+        ], $diagnosticPath);
+        Database::reset();
+        $this->executePostgresRestore([$resetPath, $restorePath, $verifyPath], $diagnosticPath);
+    }
+
+    /** @param list<string> $paths */
+    private function executePostgresRestore(array $paths, string $diagnosticPath): void
     {
         $connection = $this->postgresCommandConnection();
-        $binary = $this->pgRestoreBinary();
+        $command = [
+            $this->psqlBinary(), '--no-psqlrc', '--no-password', '--quiet', '--single-transaction',
+            '--set=ON_ERROR_STOP=1', '--dbname=' . $connection->safeUri(),
+        ];
+        foreach ($paths as $path) {
+            $command[] = '--file=' . $path;
+        }
+        $this->runPostgresCommand($command, $diagnosticPath);
+    }
+
+    /** @param list<string> $command */
+    private function runPostgresCommand(array $command, string $diagnosticPath): void
+    {
         $environment = getenv();
         if (!is_array($environment)) {
             $environment = [];
         }
-        $environment = $connection->childEnvironment($environment);
-        Database::reset();
+        $environment = $this->postgresCommandConnection()->childEnvironment($environment);
+        $this->writeRestoreScript($diagnosticPath, '');
         $process = proc_open(
-            [
-                $binary,
-                '--clean',
-                '--if-exists',
-                '--no-owner',
-                '--no-privileges',
-                '--single-transaction',
-                '--dbname=' . $connection->safeUri(),
-                $backupPath,
-            ],
-            [1 => ['pipe', 'w'], 2 => ['pipe', 'w']],
+            $command,
+            [0 => ['file', '/dev/null', 'r'], 1 => ['file', '/dev/null', 'w'], 2 => ['file', $diagnosticPath, 'w']],
             $pipes,
             null,
             $environment,
         );
         if (!is_resource($process)) {
-            throw new RuntimeException('Could not start pg_restore.');
+            throw new RuntimeException('Could not start the PostgreSQL restore process.');
         }
-        $stdout = stream_get_contents($pipes[1]) ?: '';
-        $stderr = stream_get_contents($pipes[2]) ?: '';
-        fclose($pipes[1]);
-        fclose($pipes[2]);
-        $exitCode = proc_close($process);
-        if ($exitCode !== 0) {
+        if (proc_close($process) !== 0) {
             throw new RuntimeException('PostgreSQL restore process failed.');
+        }
+    }
+
+    /** @param array{owner_kind: string, owner_contract_version: int, institution_public_id: string} $identity */
+    private function postgresIdentitySql(PDO $pdo, string $schema, array $identity): string
+    {
+        $namespace = $this->postgresIdentifier($schema) . '.';
+        return 'DO $cpe_restore_identity$ BEGIN IF '
+            . '(SELECT COUNT(*) FROM ' . $namespace . 'cpe_database_ownership) <> 1 OR NOT EXISTS '
+            . '(SELECT 1 FROM ' . $namespace . 'cpe_database_ownership WHERE singleton_id = 1 AND owner_kind = '
+            . $pdo->quote($identity['owner_kind']) . ' AND contract_version = ' . $identity['owner_contract_version'] . ') OR '
+            . '(SELECT COUNT(*) FROM ' . $namespace . "institutions WHERE slug = 'default') <> 1 OR NOT EXISTS "
+            . '(SELECT 1 FROM ' . $namespace . "institutions WHERE slug = 'default' AND public_id = "
+            . $pdo->quote($identity['institution_public_id']) . ') OR '
+            . '(SELECT COUNT(*) FROM ' . $namespace . "settings WHERE key = 'installed_at') <> 1 OR NOT EXISTS "
+            . '(SELECT 1 FROM ' . $namespace . "settings WHERE key = 'installed_at' AND btrim(value) <> '') "
+            . "THEN RAISE EXCEPTION 'CPE_DATABASE_RESTORE_IDENTITY_MISMATCH'; END IF; END; \$cpe_restore_identity$;\n";
+    }
+
+    private function postgresIdentifier(string $identifier): string
+    {
+        return '"' . str_replace('"', '""', $identifier) . '"';
+    }
+
+    private function writeRestoreScript(string $path, string $contents): void
+    {
+        if (file_put_contents($path, $contents, LOCK_EX) === false || !chmod($path, 0600)) {
+            throw new RuntimeException('Could not prepare private PostgreSQL restore storage.');
         }
     }
 
@@ -478,7 +587,7 @@ final class DatabaseRestoreService
         $this->assertMetadataMatchesTarget($metadata, 'sqlite', $backupIdentity);
     }
 
-    private function inspectPostgresBackup(string $backupPath): void
+    private function inspectPostgresBackup(string $backupPath): string
     {
         $process = proc_open(
             [$this->pgRestoreBinary(), '--list', $backupPath],
@@ -501,6 +610,7 @@ final class DatabaseRestoreService
                 );
             }
         }
+        return $stdout;
     }
 
     private function pgRestoreBinary(): string
@@ -525,15 +635,12 @@ final class DatabaseRestoreService
 
     private function postgresCommandConnection(): PostgresCommandConnectionSpec
     {
-        $url = $this->postgresUrl !== null
-            ? trim($this->postgresUrl)
-            : trim((string) (getenv('CPE_DATABASE_URL') ?: ''));
-        if ($url === '') {
+        if ($this->postgresUrl !== null && trim($this->postgresUrl) === '') {
             throw new UserVisibleException('DATABASE_RESTORE_CONFIGURATION_REQUIRED', 'PostgreSQL restore configuration is incomplete.');
         }
         try {
             return $this->postgresUrl !== null
-                ? PostgresConnectionProvider::fromUrl($url, 'PostgreSQL restore URL')->commandConnectionSpec()
+                ? PostgresConnectionProvider::fromUrl(trim($this->postgresUrl), 'PostgreSQL restore URL')->commandConnectionSpec()
                 : PostgresConnectionPolicy::commandConnectionFromEnvironment();
         } catch (\Throwable $e) {
             throw new UserVisibleException(
@@ -542,5 +649,19 @@ final class DatabaseRestoreService
                 $e,
             );
         }
+    }
+
+    private function psqlBinary(): string
+    {
+        $configured = trim((string) (getenv('CPE_PSQL_BINARY') ?: ''));
+        foreach (array_filter([$configured, dirname($this->pgRestoreBinary()) . '/psql', '/usr/bin/psql']) as $candidate) {
+            if (is_file($candidate) && is_executable($candidate)) {
+                return $candidate;
+            }
+        }
+        throw new UserVisibleException(
+            'DATABASE_RESTORE_TOOL_REQUIRED',
+            'PostgreSQL restore requires the psql command-line tool alongside pg_restore.',
+        );
     }
 }

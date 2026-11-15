@@ -72,7 +72,7 @@ final class Installer
             );
         }
         $name = trim((string) ($input['admin_name'] ?? ''));
-        $email = trim((string) ($input['admin_email'] ?? ''));
+        $email = Auth::normalizeEmail((string) ($input['admin_email'] ?? ''));
         $password = (string) ($input['admin_password'] ?? '');
 
         if ($college === '' || $name === '' || !filter_var($email, FILTER_VALIDATE_EMAIL) || strlen($password) < 8) {
@@ -81,6 +81,7 @@ final class Installer
                 'College, admin name, valid email, and an 8+ character password are required.',
             );
         }
+        Auth::validatePassword($password);
 
         // Reject a capability replayed against a different configured target,
         // then classify it while a missing SQLite target can still be proven

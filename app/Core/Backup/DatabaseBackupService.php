@@ -262,9 +262,6 @@ final class DatabaseBackupService
             }
             return PostgresConnectionProvider::fromUrl($url, 'PostgreSQL backup URL')->commandConnectionSpec();
         }
-        if (trim((string) (getenv('CPE_DATABASE_URL') ?: '')) === '') {
-            throw new RuntimeException('PostgreSQL backups require CPE_DATABASE_URL.');
-        }
         return PostgresConnectionPolicy::commandConnectionFromEnvironment();
     }
 }

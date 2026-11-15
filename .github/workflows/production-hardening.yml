@@ -38,6 +38,7 @@ jobs:
           php -l app/Controllers/AdminController.php
           php -l tests/capability_factory_contract.php
           php -l tests/admin_settings_transaction_contract.php
+          php -l tests/email_identity_preflight_contract.php
 
       - name: Run focused SQLite contracts
         env:
@@ -45,6 +46,7 @@ jobs:
         run: |
           php tests/capability_factory_contract.php
           php tests/admin_settings_transaction_contract.php
+          php tests/email_identity_preflight_contract.php
 
   postgres-transaction:
     name: PostgreSQL admin settings transaction

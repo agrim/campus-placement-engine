@@ -74,13 +74,25 @@ ownership-contract, and installed institution identity match. SQLite opens the
 actual backup read-only, runs `PRAGMA integrity_check`, and compares its owner,
 installed marker, and institution identity with the metadata. PostgreSQL runs
 `pg_restore --list` to establish custom-archive structural readability before
-direct restore, then verifies the restored identity. This structural preflight
+restore, then verifies the restored identity before committing. This structural preflight
 is not an isolated staging restore or recovery drill. SQLite atomically replaces
 the database file; all old PHP/PDO processes must be stopped because they retain
-handles to the old file. PostgreSQL uses
-`pg_restore --clean --if-exists --single-transaction` and requires
-`CPE_DATABASE_URL` plus `pg_restore`.
-Both PostgreSQL tools use the runtime policy's resolved TLS mode, trusted root,
+handles to the old file. PostgreSQL renders the application schema with
+`pg_restore`, then uses `psql --no-psqlrc --single-transaction` with
+`ON_ERROR_STOP` to reset that schema, restore its objects and data, and verify
+the archive's actual installed identity and ownership before commit. This also
+removes objects introduced after the backup, including foreign keys from later
+migrations. Schema ownership and grants are preserved. A SQL error or identity
+mismatch rolls back the complete schema replacement.
+
+PostgreSQL restore requires `pg_restore` and `psql` from the PostgreSQL client
+package. `psql` is discovered beside the configured `pg_restore`; use
+`CPE_PSQL_BINARY` if it is installed elsewhere. Both URL and component-style
+`CPE_PG_*` runtime configuration work for backups and restores. Private restore
+staging needs enough disk space for the staged archive, its generated SQL, and
+the pre-restore safety backup.
+
+The PostgreSQL tools use the runtime policy's resolved TLS mode, trusted root,
 and connection timeout. The password is excluded from argv, while inherited
 `PG*` connection settings are scrubbed before the validated child environment
 is installed. This keeps backup and restore transport policy aligned with PDO.

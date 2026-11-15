@@ -107,10 +107,18 @@ php placement verify-package /path/to/campus-placement-engine-<version>.zip
 
 ## Upgrade an existing installation
 
-Back up first, replace the application files while preserving your runtime
+Stage verified newer application files and run `php placement pre-upgrade-check`
+against the intended database before replacing live files. Resolve any collisions
+deliberately. See the [upgrade walkthrough](docs/installation-walkthrough.md#7-upgrade-safely)
+for explicit target configuration and private account-ID inspection.
+
+Stop application and worker writes, take a verified backup, and rerun the check.
+Proceed only on exit status `0`; `2` means collisions and `1` means the check
+could not complete. Replace application files while preserving your runtime
 configuration and `data/`, then run:
 
 ```bash
+php placement pre-upgrade-check
 php placement upgrade
 ```
 

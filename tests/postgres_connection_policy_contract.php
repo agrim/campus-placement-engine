@@ -612,6 +612,7 @@ $commandEnvironmentNames = [
     'CPE_BACKUP_DIR',
     'CPE_PG_DUMP_BINARY',
     'CPE_PG_RESTORE_BINARY',
+    'CPE_PSQL_BINARY',
     'PGPASSWORD',
     'PGSSLMODE',
     'PGSSLROOTCERT',
@@ -676,6 +677,7 @@ PHP;
     putenv('CPE_POSTGRES_POOL_MODE=direct');
     putenv('CPE_PG_DUMP_BINARY=' . $fakeTool);
     putenv('CPE_PG_RESTORE_BINARY=' . $fakeTool);
+    putenv('CPE_PSQL_BINARY=' . $fakeTool);
     putenv('PGPASSWORD=hostile-password');
     putenv('PGSSLMODE=disable');
     putenv('PGSSLROOTCERT=/hostile/root.pem');
@@ -698,14 +700,14 @@ PHP;
     $restoreRecordPath = $commandRoot . '/restore-record.json';
     putenv('CPE_FAKE_PG_RECORD=' . $restoreRecordPath);
     Database::useProvider(new PostgresPolicyCommandProvider($identityPdo));
-    $restoreMethod = new ReflectionMethod(DatabaseRestoreService::class, 'restorePostgres');
-    $restoreMethod->invoke(new DatabaseRestoreService(), $commandRoot . '/synthetic.pgdump');
+    $restoreMethod = new ReflectionMethod(DatabaseRestoreService::class, 'executePostgresRestore');
+    $restoreMethod->invoke(new DatabaseRestoreService(), [$commandRoot . '/synthetic.sql'], $commandRoot . '/restore.log');
     postgres_policy_assert_command_record(
         postgres_policy_command_record($restoreRecordPath),
         $policyPassword,
         $policyRoot,
         '12',
-        'pg_restore',
+        'psql',
     );
 
     $compatibilityUrl = 'postgresql://legacy%20user:legacy%3Asecret@127.0.0.1:5432/legacy%20db'
@@ -720,8 +722,8 @@ PHP;
     $compatibilityRestoreRecord = $commandRoot . '/compatibility-restore-record.json';
     putenv('CPE_FAKE_PG_RECORD=' . $compatibilityRestoreRecord);
     Database::useProvider(new PostgresPolicyCommandProvider($identityPdo));
-    $restoreMethod->invoke(new DatabaseRestoreService($compatibilityUrl), $commandRoot . '/synthetic.pgdump');
-    $compatibilityRecords['explicit pg_restore'] = postgres_policy_command_record($compatibilityRestoreRecord);
+    $restoreMethod->invoke(new DatabaseRestoreService($compatibilityUrl), [$commandRoot . '/synthetic.sql'], $commandRoot . '/restore.log');
+    $compatibilityRecords['explicit psql'] = postgres_policy_command_record($compatibilityRestoreRecord);
     foreach ($compatibilityRecords as $label => $record) {
         $argv = json_encode($record['argv'], JSON_THROW_ON_ERROR | JSON_UNESCAPED_SLASHES);
         postgres_policy_assert(!str_contains($argv, 'legacy:secret'), $label . ' exposed its password in argv.');

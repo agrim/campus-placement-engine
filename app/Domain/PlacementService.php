@@ -79,9 +79,9 @@ final class PlacementService
         $role = (string) ($user['role'] ?? 'admin');
         $staleCutoff = $this->staleCutoff($this->staleMinutesForUser((int) ($user['id'] ?? 0)));
         $activeApplicationSql = $this->activeApplicationSql('ac');
-        if ($this->isCompanyScopedUser($user) && ($user['scope_value'] ?? '') !== '') {
+        if ($this->isCompanyScopedUser($user)) {
             $where[] = 'co.code = ?';
-            $params[] = strtoupper((string) $user['scope_value']);
+            $params[] = strtoupper(trim((string) ($user['scope_value'] ?? '')));
         }
         $company = strtoupper(trim((string) ($filters['company'] ?? '')));
         if ($company !== '' && !$this->isCompanyScopedUser($user)) {
@@ -89,7 +89,8 @@ final class PlacementService
             $params[] = $company;
         }
         $status = trim((string) ($filters['status'] ?? ''));
-        if ($status !== '' && array_key_exists($status, $this->workflow->statuses())) {
+        $boardStatuses = $this->boardStatuses();
+        if ($status !== '' && array_key_exists($status, $boardStatuses)) {
             $where[] = 'a.current_status = ?';
             $params[] = $status;
         }
@@ -176,7 +177,7 @@ final class PlacementService
         }));
 
         $groups = [];
-        foreach ($this->workflow->statuses() as $key => $status) {
+        foreach ($boardStatuses as $key => $status) {
             if (in_array($key, $visibleStatuses, true)) {
                 $groups[$key] = ['status' => $status, 'applications' => []];
             }
@@ -235,14 +236,14 @@ final class PlacementService
         $role = (string) ($user['role'] ?? 'admin');
         $visibleStatuses = $this->visibleStatusesForRole($role);
         $statuses = array_filter(
-            $this->workflow->statuses(),
+            $this->boardStatuses(),
             fn (string $key): bool => in_array($key, $visibleStatuses, true),
             ARRAY_FILTER_USE_KEY
         );
         $companies = [];
-        if ($this->isCompanyScopedUser($user) && trim((string) ($user['scope_value'] ?? '')) !== '') {
+        if ($this->isCompanyScopedUser($user)) {
             $stmt = $this->pdo->prepare('SELECT code, name FROM companies WHERE code = ? ORDER BY code');
-            $stmt->execute([strtoupper((string) $user['scope_value'])]);
+            $stmt->execute([strtoupper(trim((string) ($user['scope_value'] ?? '')))]);
             $companies = $stmt->fetchAll();
         } else {
             $companies = $this->pdo->query('SELECT code, name FROM companies ORDER BY code')->fetchAll();
@@ -573,13 +574,40 @@ final class PlacementService
 
     public function visibleStatusesForRole(string $role): array
     {
-        $all = array_keys($this->workflow->statuses());
+        $all = array_keys($this->boardStatuses());
         return match ($role) {
             'mobile' => array_values(array_intersect($all, ['scheduled', 'intransit', 'sent'])),
             'floor' => array_values(array_intersect($all, ['intransit', 'arrived', 'requested', 'sendin', 'inside', 'exit'])),
             'placement' => array_values(array_intersect($all, ['requested', 'sendin', 'requestaway', 'sendaway', 'sent', 'placed'])),
             default => $all,
         };
+    }
+
+    /** Keep persisted applications visible until their pinned workflow is migrated. */
+    private function boardStatuses(): array
+    {
+        $statuses = $this->workflow->statuses();
+        if ($this->workflowEngine === null) {
+            return $statuses;
+        }
+        $rows = $this->pdo->query(
+            'SELECT DISTINCT ws.workflow_version_id, ws.state_key, ws.label, ws.color,
+                    ws.display_order, ws.semantic_category, ws.is_terminal
+             FROM workflow_states ws
+             JOIN applications a ON a.workflow_version_id = ws.workflow_version_id
+                                AND a.current_status = ws.state_key
+             ORDER BY ws.workflow_version_id DESC, ws.display_order'
+        )->fetchAll();
+        foreach ($rows as $row) {
+            $statuses[(string) $row['state_key']] ??= [
+                'label' => (string) $row['label'],
+                'color' => (string) $row['color'],
+                'order' => (int) $row['display_order'],
+                'semantic_category' => (string) $row['semantic_category'],
+                'is_terminal' => (bool) $row['is_terminal'],
+            ];
+        }
+        return $statuses;
     }
 
     private function canSeeCandidatePrivateFields(?array $user): bool
@@ -935,17 +963,14 @@ final class PlacementService
             );
 
             if ($acceptOffer) {
-                $this->acceptCandidateOffer($app, $now);
-                if (($versionedTransition === null || in_array('placement.clear_competing_applications', $effects, true))
-                    && $this->setting('allow_offer_upgrade', '0') !== '1') {
-                    $this->clearCompetingActiveApplications(
-                        $app,
-                        $actorId,
-                        $actorRole,
-                        $now,
-                        $actorServiceAccountId,
-                    );
-                }
+                $this->applyOfferAcceptance(
+                    $app,
+                    $actorId,
+                    $actorRole,
+                    $now,
+                    $versionedTransition === null || in_array('placement.clear_competing_applications', $effects, true),
+                    $actorServiceAccountId,
+                );
             } elseif ($moveToOpportunity) {
                 $this->updateCandidateLocation($app, (string) $app['company_code'], $now);
             } elseif ($returnToControl) {
@@ -973,20 +998,6 @@ final class PlacementService
                     ['source' => 'placement.transition'],
                     $actorServiceAccountId,
                 );
-            }
-            if ($acceptOffer) {
-                cpe_context()->events()->dispatch(new DomainEvent(
-                    'placement.offer.accepted',
-                    'placement_application',
-                    (string) ($app['public_id'] ?? '') ?: 'application_' . $applicationId,
-                    'placement',
-                    [
-                        'application_id' => $applicationId,
-                        'candidate_public_id' => $this->publicIdFor('candidates', (int) $app['candidate_id']),
-                        'company_public_id' => $this->publicIdFor('companies', (int) $app['company_id']),
-                    ],
-                    $now
-                ));
             }
             Auth::audit(
                 $actorId,
@@ -2400,7 +2411,9 @@ final class PlacementService
                    FROM applications a
                    JOIN candidates c ON c.id = a.candidate_id
                    JOIN companies co ON co.id = a.company_id
-                   WHERE a.current_status NOT IN (\'idle\', \'placed\')';
+                   WHERE a.current_status NOT IN (\'idle\', \'placed\')
+                     AND c.opted_out = 0
+                     AND (c.anonymized_at IS NULL OR c.anonymized_at = \'\')';
         $appParams = [];
         if ($companyCode !== '') {
             $appSql .= ' AND co.code = ?';
@@ -2737,6 +2750,14 @@ final class PlacementService
             return 0;
         }
         if (preg_match('/^\d+$/', $value)) {
+            $cycleStartValue = $this->setting('cycle_start_date');
+            $cycleStart = \DateTimeImmutable::createFromFormat(
+                '!Y-m-d', $cycleStartValue, new \DateTimeZone('UTC')
+            );
+            if ($cycleStart instanceof \DateTimeImmutable
+                && $cycleStart->format('Y-m-d') === $cycleStartValue) {
+                return intdiv((int) $cycleStart->format('U'), 86400) + max(0, (int) $value - 1);
+            }
             return (int) $value;
         }
         if (preg_match('/^\d{4}-\d{2}-\d{2}$/', $value)) {
@@ -3177,11 +3198,47 @@ final class PlacementService
                 'Application status changed through record maintenance.',
                 $now,
             );
+            if ($status === 'placed') {
+                $this->applySavedApplicationPlacement((int) $result['id'], $actorId, 'operator');
+            }
             Auth::audit($actorId, 'application.save', 'application', (int) $result['id'], "candidate {$candidateId} company {$companyId} status {$status}");
             $this->synchronizeDurableDomain();
             if ($this->workflowEngine !== null) {
                 $this->workflowEngine->ensureApplication((int) $result['id']);
             }
+        });
+    }
+
+    /** Apply the same offer effects after record maintenance or shortlist import. */
+    public function applySavedApplicationPlacement(int $applicationId, ?int $actorId, string $actorRole): void
+    {
+        $this->transactional(function () use ($applicationId, $actorId, $actorRole): void {
+            $stmt = $this->pdo->prepare(
+                'SELECT a.*, c.placed_company_id, c.current_location, co.code AS company_code
+                 FROM applications a
+                 JOIN candidates c ON c.id = a.candidate_id
+                 JOIN companies co ON co.id = a.company_id
+                 WHERE a.id = ?'
+            );
+            $stmt->execute([$applicationId]);
+            $application = $stmt->fetch();
+            if (!$application || (string) $application['current_status'] !== 'placed') {
+                throw new UserVisibleException('PLACEMENT_STATUS_INVALID', 'An accepted offer requires a placed application.');
+            }
+            $placedCompanyId = (int) ($application['placed_company_id'] ?? 0);
+            if ($placedCompanyId === (int) $application['company_id']) {
+                if ((string) $application['current_location'] !== (string) $application['company_code']) {
+                    $this->updateCandidateLocation($application, (string) $application['company_code'], cpe_now());
+                }
+                if ($this->setting('allow_offer_upgrade', '0') !== '1') {
+                    $this->clearCompetingActiveApplications($application, $actorId, $actorRole, cpe_now());
+                }
+                return;
+            }
+            if ($placedCompanyId > 0 && $this->setting('allow_offer_upgrade', '0') !== '1') {
+                throw new UserVisibleException('WORKFLOW_UPGRADE_DISABLED', 'Candidate already has a placement. Offer upgrades are disabled.');
+            }
+            $this->applyOfferAcceptance($application, $actorId, $actorRole, cpe_now(), true);
         });
     }
 
@@ -4125,6 +4182,32 @@ final class PlacementService
         if ($placed->rowCount() !== 1) {
             throw new UserVisibleException('PLACEMENT_BOARD_STALE', 'The candidate changed while the offer was being recorded. Reload the board and retry.');
         }
+    }
+
+    private function applyOfferAcceptance(
+        array $application,
+        ?int $actorId,
+        string $actorRole,
+        string $now,
+        bool $clearCompeting,
+        ?int $actorServiceAccountId = null,
+    ): void {
+        $this->acceptCandidateOffer($application, $now);
+        if ($clearCompeting && $this->setting('allow_offer_upgrade', '0') !== '1') {
+            $this->clearCompetingActiveApplications($application, $actorId, $actorRole, $now, $actorServiceAccountId);
+        }
+        cpe_context()->events()->dispatch(new DomainEvent(
+            'placement.offer.accepted',
+            'placement_application',
+            (string) ($application['public_id'] ?? '') ?: 'application_' . $application['id'],
+            'placement',
+            [
+                'application_id' => (int) $application['id'],
+                'candidate_public_id' => $this->publicIdFor('candidates', (int) $application['candidate_id']),
+                'company_public_id' => $this->publicIdFor('companies', (int) $application['company_id']),
+            ],
+            $now,
+        ));
     }
 
     private function updateCandidateLocation(array $application, string $location, string $now): void

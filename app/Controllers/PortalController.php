@@ -13,7 +13,8 @@ final class PortalController
     public function home(): void
     {
         $user = Auth::requireUser();
-        if (cpe_context()->modules()->isEnabled('placement')) {
+        if (cpe_context()->modules()->isEnabled('placement')
+            && Auth::hasCapability($user, 'placement.board.view')) {
             redirect(url('board'));
         }
         view('portal', [

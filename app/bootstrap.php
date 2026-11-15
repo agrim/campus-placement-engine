@@ -111,7 +111,7 @@ function cpe_register_web_error_boundary(): void
 
 cpe_register_web_error_boundary();
 
-if (!is_dir(CPE_DATA)) {
+if (!defined('CPE_READ_ONLY_BOOTSTRAP') && !is_dir(CPE_DATA)) {
     mkdir(CPE_DATA, 0775, true);
 }
 

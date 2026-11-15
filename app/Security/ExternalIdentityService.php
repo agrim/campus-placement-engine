@@ -33,7 +33,7 @@ final class ExternalIdentityService
             throw new RuntimeException('Institutional SSO is not configured safely.');
         }
         $subject = $this->header('HTTP_X_CPE_SSO_SUBJECT', 255, 'SSO subject');
-        $email = strtolower($this->header('HTTP_X_CPE_SSO_EMAIL', 254, 'SSO email'));
+        $email = Auth::normalizeEmail($this->header('HTTP_X_CPE_SSO_EMAIL', 254, 'SSO email'));
         $name = $this->header('HTTP_X_CPE_SSO_NAME', 120, 'SSO name', true);
         $timestamp = $this->header('HTTP_X_CPE_SSO_TIMESTAMP', 20, 'SSO timestamp');
         $nonce = $this->header('HTTP_X_CPE_SSO_NONCE', 128, 'SSO nonce');
@@ -60,9 +60,10 @@ final class ExternalIdentityService
         $stmt->execute([$provider, $subject]);
         $user = $stmt->fetch();
         if (!$user && self::truthy(getenv('CPE_SSO_AUTO_LINK_EMAIL'))) {
-            $stmt = $this->pdo->prepare('SELECT * FROM users WHERE lower(email) = lower(?) AND active = 1');
+            $stmt = $this->pdo->prepare('SELECT * FROM users WHERE lower(trim(email)) = ? AND active = 1');
             $stmt->execute([$email]);
-            $user = $stmt->fetch();
+            $matches = $stmt->fetchAll(PDO::FETCH_ASSOC);
+            $user = count($matches) === 1 ? $matches[0] : false;
             if ($user) {
                 $this->linkUser($provider, $subject, (int) $user['id'], $email);
             }
@@ -79,13 +80,14 @@ final class ExternalIdentityService
     {
         $provider = $this->provider($provider);
         $subject = $this->text($subject, 255, 'External identity subject');
-        $userEmail = strtolower(trim($userEmail));
-        $stmt = $this->pdo->prepare('SELECT id, email FROM users WHERE lower(email) = lower(?)');
+        $userEmail = Auth::normalizeEmail($userEmail);
+        $stmt = $this->pdo->prepare('SELECT id, email FROM users WHERE lower(trim(email)) = ?');
         $stmt->execute([$userEmail]);
-        $user = $stmt->fetch();
-        if (!$user) {
+        $matches = $stmt->fetchAll(PDO::FETCH_ASSOC);
+        if (count($matches) !== 1) {
             throw new RuntimeException('Portal user was not found for external identity link.');
         }
+        $user = $matches[0];
         $this->linkUser($provider, $subject, (int) $user['id'], (string) $user['email']);
         return ['provider' => $provider, 'subject' => $subject, 'user_id' => (int) $user['id'], 'email' => (string) $user['email']];
     }
