@@ -102,7 +102,7 @@ ob_start();
 <section class="board <?= !empty($filters['compact']) ? 'board-compact' : '' ?>" aria-label="Placement status board">
   <?php foreach ($groups as $key => $group): ?>
     <div class="column">
-      <h2 style="background: <?= h($workflow->statusColor($key)) ?>"><?= h($workflow->statusLabel($key)) ?> (<?= count($group['applications']) ?>)</h2>
+      <h2 style="--status-bg: <?= h($workflow->statusColor($key)) ?>; --status-text: <?= h($workflow->statusTextColor($key)) ?>"><?= h($workflow->statusLabel($key)) ?> (<?= count($group['applications']) ?>)</h2>
       <?php if (!$group['applications']): ?>
         <div class="empty">No candidates</div>
       <?php endif; ?>

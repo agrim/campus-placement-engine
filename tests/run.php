@@ -5204,6 +5204,26 @@ test_case('lookup filters and CSV templates expose native accessible semantics',
     assert_true(str_contains($board, "</search>\n  <form class=\"preference-actions\""), 'Saving preferences must stay outside the search landmark');
 });
 
+test_case('custom workflow heading colors retain readable contrast across palettes', function (): void {
+    foreach (range(0, 255, 17) as $red) {
+        foreach (range(0, 255, 17) as $green) {
+            foreach (range(0, 255, 17) as $blue) {
+                $color = sprintf('#%02x%02x%02x', $red, $green, $blue);
+                $workflow = new Workflow(['statuses' => ['sample' => ['color' => $color]]]);
+                $text = $workflow->statusTextColor('sample');
+                $linear = array_map(static fn (int $c): float => ($c / 255) <= 0.04045 ? ($c / 255) / 12.92 : ((($c / 255) + 0.055) / 1.055) ** 2.4, [$red, $green, $blue]);
+                $luminance = .2126 * $linear[0] + .7152 * $linear[1] + .0722 * $linear[2];
+                $ratio = $text === '#ffffff' ? 1.05 / ($luminance + .05) : ($luminance + .05) / .05;
+                assert_true(in_array($text, ['#000000', '#ffffff'], true) && $ratio >= 4.5, 'Status text must meet AA contrast for ' . $color);
+            }
+        }
+    }
+    $board = file_get_contents(dirname(__DIR__) . '/app/Views/board.php');
+    assert_true(str_contains($board, '--status-text:') && str_contains($board, 'statusTextColor($key)'), 'Board must emit its computed fallback');
+    $css = file_get_contents(dirname(__DIR__) . '/public/assets/app.css');
+    assert_true(str_contains($css, 'color: var(--status-text, #000000);') && str_contains($css, 'color: contrast-color(var(--status-bg, #ffffff));'), 'Modern contrast must follow the fallback declaration');
+});
+
 test_case('web typography respects browser text size and declares the initial color scheme', function (): void {
     $css = file_get_contents(dirname(__DIR__) . '/public/assets/app.css');
     assert_true(!preg_match('/font-size:\s*[^;}]*px/', $css), 'Typography should use font-relative sizes');

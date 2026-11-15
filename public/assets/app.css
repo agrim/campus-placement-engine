@@ -172,6 +172,9 @@ h1, h2, h3 { margin: 0 0 8px; line-height: 1.2; }
   min-height: 120px;
 }
 .column h2 {
+  background: var(--status-bg, #ffffff);
+  color: var(--status-text, #000000);
+  color: contrast-color(var(--status-bg, #ffffff));
   font-size: 0.8125rem;
   padding: 9px 10px;
   border-bottom: 1px solid var(--border);
